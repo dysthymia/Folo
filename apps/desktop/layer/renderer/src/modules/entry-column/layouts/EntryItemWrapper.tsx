@@ -4,6 +4,8 @@ import { getMousePosition } from "@follow/components/hooks/useMouse.js"
 import { ActionButton } from "@follow/components/ui/button/action-button.js"
 import { FeedViewType } from "@follow/constants"
 import { useEntry } from "@follow/store/entry/hooks"
+import { useFeedById } from "@follow/store/feed/hooks"
+import { useInboxById } from "@follow/store/inbox/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { cn } from "@follow/utils/utils"
 import { AnimatePresence } from "motion/react"
@@ -30,6 +32,20 @@ import { useShowEntryDetailsColumn } from "~/hooks/biz/useShowEntryDetailsColumn
 import { useFeedSafeUrl } from "~/hooks/common/useFeedSafeUrl"
 import { useRequireLogin } from "~/hooks/common/useRequireLogin"
 
+import { getEntrySourceColorStyle } from "../source-color"
+
+const sourceColorListViews = new Set([
+  FeedViewType.All,
+  FeedViewType.Articles,
+  FeedViewType.Notifications,
+])
+
+const handleMiddleMouseDown = (e: MouseEvent<HTMLElement>) => {
+  if (e.button !== 1) return
+  e.preventDefault()
+  e.stopPropagation()
+}
+
 export const EntryItemWrapper: FC<
   {
     entryId: string
@@ -45,6 +61,8 @@ export const EntryItemWrapper: FC<
     const { id, url } = state
     return { feedId, id, inboxId: inboxHandle, url }
   })
+  const feedTitle = useFeedById(entry?.feedId, (feed) => feed.title)
+  const inboxTitle = useInboxById(entry?.inboxId)?.title
   const actionConfigs = useEntryActions({ entryId, view })
   const isMobile = useMobile()
 
@@ -110,6 +128,20 @@ export const EntryItemWrapper: FC<
   }, [entry?.id])
 
   const populatedFullHref = useFeedSafeUrl(entryId)
+  const shouldColorizeBySource = useRouteParamsSelector(
+    ({ folderName, isAllFeeds, isCollection, listId }) =>
+      sourceColorListViews.has(view) &&
+      (view === FeedViewType.All || isAllFeeds || !!folderName || !!listId || isCollection),
+    [view],
+  )
+  const sourceColorStyle = useMemo(() => {
+    if (!shouldColorizeBySource) return
+    return getEntrySourceColorStyle(feedTitle || inboxTitle || entry?.feedId || entry?.inboxId)
+  }, [entry?.feedId, entry?.inboxId, feedTitle, inboxTitle, shouldColorizeBySource])
+  const mergedStyle = useMemo(
+    () => (sourceColorStyle ? { ...sourceColorStyle, ...style } : style),
+    [sourceColorStyle, style],
+  )
 
   const handleDoubleClick = useCallback(
     (e: MouseEvent<HTMLElement>) => {
@@ -122,6 +154,18 @@ export const EntryItemWrapper: FC<
       window.open(populatedFullHref, "_blank", "noopener,noreferrer")
     },
     [entry?.id, entry?.url, populatedFullHref],
+  )
+
+  const handleAuxClick = useCallback(
+    (e: MouseEvent<HTMLElement>) => {
+      if (e.button !== 1) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!populatedFullHref) return
+
+      window.open(populatedFullHref, "_blank", "noopener,noreferrer")
+    },
+    [populatedFullHref],
   )
 
   const handleClick = useCallback(
@@ -154,24 +198,32 @@ export const EntryItemWrapper: FC<
 
   const Link = view === FeedViewType.SocialMedia ? "article" : NavLink
   const isAll = view === FeedViewType.All
+  const sourceColorClassName = sourceColorStyle
+    ? asRead
+      ? "bg-[var(--entry-source-background-read)] hover:bg-[var(--entry-source-background-read-hover)]"
+      : "bg-[var(--entry-source-background)] hover:bg-[var(--entry-source-background-hover)]"
+    : "hover:bg-theme-item-hover"
   return (
     <div
       data-entry-id={entry?.id}
       data-read={asRead ? "true" : "false"}
       data-active={isActive ? "true" : "false"}
-      style={style}
+      style={mergedStyle}
     >
       <Link
         to={navigationPath}
         className={cn(
-          "relative block cursor-button overflow-visible duration-200 hover:bg-theme-item-hover",
+          "relative block cursor-button overflow-visible duration-200",
+          sourceColorClassName,
           !isWide ? "rounded-none @[650px]:rounded-md" : "rounded-md",
           isAll && "!rounded-none",
           (isActive || isContextMenuOpen) && "!bg-theme-item-active",
           itemClassName,
         )}
         onClick={handleClick}
+        onAuxClick={handleAuxClick}
         onDoubleClick={handleDoubleClick}
+        onMouseDown={handleMiddleMouseDown}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         {...contextMenuProps}
