@@ -15,6 +15,7 @@ import { ErrorComponentType } from "~/components/errors/enum"
 import { PlainModal, PlainWithAnimationModal } from "~/components/ui/modal/stacked/custom-modal"
 import { DeclarativeModal } from "~/components/ui/modal/stacked/declarative-modal"
 import { ROOT_CONTAINER_ID } from "~/constants/dom"
+import { SHOULD_SHOW_DEBUG_OVERLAYS } from "~/lib/debug-overlays"
 import { EnvironmentIndicator } from "~/modules/app/EnvironmentIndicator"
 import { LoginModalContent } from "~/modules/auth/LoginModalContent"
 import { DebugRegistry } from "~/modules/debug/registry"
@@ -169,7 +170,7 @@ export function MainDestopLayout() {
 
   return (
     <RootContainer ref={containerRef}>
-      {!PROD && <EnvironmentIndicator />}
+      {SHOULD_SHOW_DEBUG_OVERLAYS && !PROD && <EnvironmentIndicator />}
 
       <Suspense>
         <AppNotificationContainer />

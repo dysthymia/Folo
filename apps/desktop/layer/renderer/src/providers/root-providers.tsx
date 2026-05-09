@@ -14,6 +14,7 @@ import { GoogleReCaptchaProvider } from "react-google-recaptcha-v3"
 
 import { LCPEndDetector } from "~/components/common/LCPEndDetector"
 import { ModalStackProvider } from "~/components/ui/modal"
+import { SHOULD_SHOW_DEBUG_OVERLAYS } from "~/lib/debug-overlays"
 import { jotaiStore } from "~/lib/jotai"
 import { persistConfig, queryClient } from "~/lib/query-client"
 import { FollowCommandManager } from "~/modules/command/command-manager"
@@ -54,7 +55,7 @@ export const RootProviders: FC<PropsWithChildren> = ({ children }) => (
                   <FollowCommandManager />
                   <ReviewPromptProvider />
 
-                  {import.meta.env.DEV && <Devtools />}
+                  {SHOULD_SHOW_DEBUG_OVERLAYS && <Devtools />}
 
                   {children}
                   <Suspense>
