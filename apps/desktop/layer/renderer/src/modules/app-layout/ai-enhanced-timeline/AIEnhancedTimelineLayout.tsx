@@ -2,6 +2,7 @@ import { Spring } from "@follow/components/constants/spring.js"
 import { useMobile } from "@follow/components/hooks/useMobile.js"
 import { PanelSplitter } from "@follow/components/ui/divider/index.js"
 import { FeedViewType } from "@follow/constants"
+import { useElementWidth } from "@follow/hooks"
 import { defaultUISettings } from "@follow/shared/settings/defaults"
 import { cn } from "@follow/utils"
 import { isSafari } from "@follow/utils/utils"
@@ -57,11 +58,22 @@ const AIEnhancedTimelineLayoutImpl = () => {
 
   const layoutContainerRef = useRef<HTMLDivElement>(null)
   const feedColumnWidth = useUISettingKey("feedColWidth")
+  const layoutContainerWidth = useElementWidth(layoutContainerRef)
 
-  const timelineMaxWidth = useMemo(() => {
+  const availableLayoutWidth = useMemo(() => {
+    if (layoutContainerWidth > 0) return layoutContainerWidth
     if (typeof window === "undefined") return 600
-    return Math.max((window.innerWidth - feedColumnWidth) / 2, 600)
-  }, [feedColumnWidth])
+    return Math.max(window.innerWidth - feedColumnWidth, 0)
+  }, [feedColumnWidth, layoutContainerWidth])
+
+  const timelineMaxWidth = useMemo(
+    () => Math.max(availableLayoutWidth, MIN_ENTRY_WIDTH),
+    [availableLayoutWidth],
+  )
+  const aiPanelMaxWidth = useMemo(
+    () => Math.max(availableLayoutWidth / 2, 600),
+    [availableLayoutWidth],
+  )
 
   const entryColumnInitialWidth = useMemo(() => getUISettings().entryColWidth, [])
   const timelineStartDragPosition = useRef(0)
@@ -90,7 +102,7 @@ const AIEnhancedTimelineLayoutImpl = () => {
   })
 
   const isAllView = view === FeedViewType.All
-  const widthRange: [number, number] = isAllView ? [500, timelineMaxWidth] : [300, timelineMaxWidth]
+  const widthRange: [number, number] = isAllView ? [500, aiPanelMaxWidth] : [300, aiPanelMaxWidth]
   const [minWidth, maxWidth] = widthRange
 
   const clampWidth = useCallback(
