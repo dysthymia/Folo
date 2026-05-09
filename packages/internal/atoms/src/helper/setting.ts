@@ -1,6 +1,6 @@
-import { UserRole } from "@follow/constants"
 import { useRefValue } from "@follow/hooks"
 import { getSettingPaidLevel, SettingPaidLevels } from "@follow/shared/settings/constants"
+import { hasPaidFeatureAccess } from "@follow/store/user/dev-paid-feature-unlock"
 import { useUserStore } from "@follow/store/user/store"
 import { EventBus } from "@follow/utils/event-bus"
 import { createAtomHooks } from "@follow/utils/jotai"
@@ -50,8 +50,7 @@ export const createSettingAtom = <T extends object>(
     ) {
       return true
     }
-    const role = useUserStore.getState().role ?? UserRole.Free
-    return role !== UserRole.Free && role !== UserRole.Trial
+    return hasPaidFeatureAccess(useUserStore.getState().role)
   }
 
   const resolveAccessibleValue = (

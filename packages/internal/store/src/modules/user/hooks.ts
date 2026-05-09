@@ -5,6 +5,7 @@ import { useEffect } from "react"
 import { api, queryClient } from "../../context"
 import type { GeneralQueryOptions } from "../../types"
 import { isNewUserQueryKey } from "./constants"
+import { getEffectiveUserRole, isDevPaidFeatureUnlockEnabled } from "./dev-paid-feature-unlock"
 import type { UserStore } from "./store"
 import { userSyncService, useUserStore } from "./store"
 
@@ -47,7 +48,7 @@ export const useWhoami = () => {
 }
 
 const loggedInSelector = (state: UserStore) => !!state.whoami
-const roleSelector = (state: UserStore) => state.role
+const roleSelector = (state: UserStore) => getEffectiveUserRole(state.role)
 export const useIsLoggedIn = () => {
   return useUserStore(loggedInSelector)
 }
@@ -63,6 +64,12 @@ export const useRoleEndAt = () => {
 export const useUserSubscriptionLimit = () => {
   const rsshubLimit = useUserStore((state) => state.rsshubSubscriptionLimit)
   const feedLimit = useUserStore((state) => state.feedSubscriptionLimit)
+  if (isDevPaidFeatureUnlockEnabled()) {
+    return {
+      rsshubLimit: null,
+      feedLimit: null,
+    }
+  }
   return {
     rsshubLimit,
     feedLimit,

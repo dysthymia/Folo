@@ -2,8 +2,13 @@ import "./wdyr"
 import "@follow/components/tailwind"
 import "./styles/main.css"
 
-import { IN_ELECTRON, WEB_BUILD } from "@follow/shared/constants"
+import { DEV, IN_ELECTRON, WEB_BUILD } from "@follow/shared/constants"
+import { env } from "@follow/shared/env.desktop"
 import { apiContext, authClientContext, queryClientContext } from "@follow/store/context"
+import {
+  resolveDevPaidFeatureUnlock,
+  setDevPaidFeatureUnlock,
+} from "@follow/store/user/dev-paid-feature-unlock"
 import { getOS } from "@follow/utils/utils"
 import * as React from "react"
 import { flushSync } from "react-dom"
@@ -23,6 +28,13 @@ import { router } from "./router"
 authClientContext.provide(authClient)
 queryClientContext.provide(queryClient)
 apiContext.provide(followApi)
+
+setDevPaidFeatureUnlock(
+  resolveDevPaidFeatureUnlock({
+    isDev: DEV,
+    value: env.VITE_UNLOCK_PAID_FEATURES,
+  }),
+)
 
 initializeApp().finally(() => {
   import("./push-notification").then(({ registerWebPushNotifications }) => {

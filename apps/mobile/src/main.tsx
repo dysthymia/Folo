@@ -2,6 +2,10 @@ import "./global.css"
 import "./polyfill"
 
 import { apiContext, authClientContext, queryClientContext } from "@follow/store/context"
+import {
+  resolveDevPaidFeatureUnlock,
+  setDevPaidFeatureUnlock,
+} from "@follow/store/user/dev-paid-feature-unlock"
 import { registerRootComponent } from "expo"
 import { Image } from "expo-image"
 import { LinearGradient } from "expo-linear-gradient"
@@ -36,6 +40,13 @@ global.ELECTRON = false
 authClientContext.provide(authClient)
 queryClientContext.provide(queryClient)
 apiContext.provide(followApi)
+
+setDevPaidFeatureUnlock(
+  resolveDevPaidFeatureUnlock({
+    isDev: __DEV__,
+    value: process.env.EXPO_PUBLIC_UNLOCK_PAID_FEATURES,
+  }),
+)
 
 enableFreeze(true)
 ;[Image, LinearGradient].forEach((Component) => {

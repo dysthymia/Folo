@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   VITE_SENTRY_DSN: string
   VITE_FIREBASE_CONFIG: string
   VITE_SHOW_DEBUG_OVERLAYS?: string
+  VITE_UNLOCK_PAID_FEATURES?: string
 }
 
 interface ImportMeta {

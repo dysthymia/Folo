@@ -11,6 +11,7 @@ import type { Hydratable, Resetable } from "../../lib/base"
 import { createImmerSetter, createTransaction, createZustandStore } from "../../lib/helper"
 import { readNdjsonStream } from "../../lib/stream"
 import { getEntry } from "../entry/getter"
+import { getEffectiveUserRole } from "../user/dev-paid-feature-unlock"
 import { useUserStore } from "../user/store"
 import type { EntryTranslation, TranslationFieldArray, TranslationMode } from "./types"
 import { translationFields } from "./types"
@@ -230,9 +231,9 @@ class TranslationSyncService {
     target: "content" | "readabilityContent"
     mode?: TranslationMode
   }) {
-    const userRole = useUserStore.getState().role
+    const userRole = getEffectiveUserRole(useUserStore.getState().role)
 
-    if (userRole === UserRole.Free) return null
+    if (userRole === UserRole.Free || userRole === UserRole.Trial) return null
     const translationMode = mode ?? "bilingual"
     await this.ensureMode(translationMode)
 
