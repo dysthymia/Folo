@@ -3,16 +3,20 @@ import type { FeedViewType } from "@follow/constants"
 import { createSingleArgGetter, createStaticGetter } from "../../lib/helper"
 import { getSubscriptionByEntryId } from "../subscription/getter"
 import { useEntryStore } from "./store"
+import { compareEntriesByInsertedAtDesc } from "./utils"
 
 export const getEntry = (id: string) => {
   return useEntryStore.getState().data[id]
 }
 
-function sortEntryIdsByPublishDate(a: string, b: string) {
+function sortEntryIdsByInsertedDate(a: string, b: string) {
   const entryA = getEntry(a)
   const entryB = getEntry(b)
   if (!entryA || !entryB) return 0
-  return entryB.publishedAt.getTime() - entryA.publishedAt.getTime()
+  return compareEntriesByInsertedAtDesc(
+    { id: a, insertedAt: entryA.insertedAt, publishedAt: entryA.publishedAt },
+    { id: b, insertedAt: entryB.insertedAt, publishedAt: entryB.publishedAt },
+  )
 }
 
 // Utility functions for creating getters
@@ -36,7 +40,7 @@ export const getEntryIdsByViewSelector =
         }
         return true
       })
-      .sort((a, b) => sortEntryIdsByPublishDate(a, b))
+      .sort((a, b) => sortEntryIdsByInsertedDate(a, b))
   }
 
 export const getEntryIdsByFeedIdSelector =
@@ -44,34 +48,34 @@ export const getEntryIdsByFeedIdSelector =
     if (!feedId) return null
     const ids = state.entryIdByFeed[feedId]
     if (!ids) return null
-    return Array.from(ids).sort((a, b) => sortEntryIdsByPublishDate(a, b))
+    return Array.from(ids).sort((a, b) => sortEntryIdsByInsertedDate(a, b))
   }
 
 export const getEntryIdsByFeedIdsSelector =
   (state: StateType) => (feedIds: string[] | undefined) => {
     const ids = feedIds?.flatMap((feedId) => Array.from(state.entryIdByFeed[feedId] || []))
     if (!ids) return null
-    return Array.from(ids).sort((a, b) => sortEntryIdsByPublishDate(a, b))
+    return Array.from(ids).sort((a, b) => sortEntryIdsByInsertedDate(a, b))
   }
 
 export const getEntryIdsByInboxIdSelector = (state: StateType) => (inboxId: string | undefined) => {
   if (!inboxId) return null
   const ids = state.entryIdByInbox[inboxId]
   if (!ids) return null
-  return Array.from(ids).sort((a, b) => sortEntryIdsByPublishDate(a, b))
+  return Array.from(ids).sort((a, b) => sortEntryIdsByInsertedDate(a, b))
 }
 
 export const getEntryIdsByCategorySelector = (state: StateType) => (category: string) => {
   const ids = state.entryIdByCategory[category]
   if (!ids) return null
-  return Array.from(ids).sort((a, b) => sortEntryIdsByPublishDate(a, b))
+  return Array.from(ids).sort((a, b) => sortEntryIdsByInsertedDate(a, b))
 }
 
 export const getEntryIdsByListIdSelector = (state: StateType) => (listId: string | undefined) => {
   if (!listId) return null
   const ids = state.entryIdByList[listId]
   if (!ids) return null
-  return Array.from(ids).sort((a, b) => sortEntryIdsByPublishDate(a, b))
+  return Array.from(ids).sort((a, b) => sortEntryIdsByInsertedDate(a, b))
 }
 
 export const getEntryIsInboxSelector = (state: StateType) => (entryId: string) => {

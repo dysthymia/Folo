@@ -74,7 +74,7 @@ class EntryServiceStatic implements Resetable {
   async getEntriesToHydrate() {
     const [entries, subscriptions] = await Promise.all([
       db.query.entriesTable.findMany({
-        orderBy: (t, { desc }) => desc(t.publishedAt),
+        orderBy: (t, { desc }) => desc(t.insertedAt),
       }),
       db.query.subscriptionsTable.findMany(),
     ])

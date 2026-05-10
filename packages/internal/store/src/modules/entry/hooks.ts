@@ -18,6 +18,7 @@ import {
 } from "./getter"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
+import { compareEntriesByInsertedAtDesc } from "./utils"
 
 export const invalidateEntriesQuery = ({
   views,
@@ -48,6 +49,14 @@ export const invalidateEntriesQuery = ({
 }
 
 const defaultStaleTime = 10 * (60 * 1000) // 10 minutes
+
+type EntryQueryItem = {
+  entries: {
+    id: string
+    insertedAt: Date | number | string | null
+    publishedAt: Date | number | string | null
+  }
+}
 
 export const useEntriesQuery = (
   props?: Omit<FetchEntriesProps, "pageParam" | "read" | "excludePrivate"> &
@@ -128,12 +137,27 @@ export const useEntriesQuery = (
     if (!query.data || query.isLoading || query.isError) {
       return []
     }
-    return (
-      query.data?.pages
-        ?.flatMap((page) => page.data?.map((entry) => entry.entries.id))
-        .filter((id) => typeof id === "string") || []
-    )
-  }, [query.data, query.isLoading, query.isError])
+    const entries = query.data.pages.flatMap((page) => (page.data ?? []) as EntryQueryItem[])
+    const orderedEntries =
+      isCollection || aiSort
+        ? entries
+        : [...entries].sort((left, right) =>
+            compareEntriesByInsertedAtDesc(
+              {
+                id: left.entries.id,
+                insertedAt: left.entries.insertedAt,
+                publishedAt: left.entries.publishedAt,
+              },
+              {
+                id: right.entries.id,
+                insertedAt: right.entries.insertedAt,
+                publishedAt: right.entries.publishedAt,
+              },
+            ),
+          )
+
+    return orderedEntries.map((entry) => entry.entries.id).filter((id) => typeof id === "string")
+  }, [aiSort, isCollection, query.data, query.isLoading, query.isError])
 
   useSyncUnreadWhenUnMatch(entriesIds)
 
