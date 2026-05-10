@@ -49,6 +49,13 @@ export default defineConfig({
   ],
 
   server: {
+    cors: true,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "*",
+      "Access-Control-Allow-Headers": "*",
+      "Access-Control-Allow-Private-Network": "true",
+    },
     watch: {
       ignored: ["**/.env", "**/.env.*"],
     },

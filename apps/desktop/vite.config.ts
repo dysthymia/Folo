@@ -47,6 +47,9 @@ const isWebBuild = process.env.WEB_BUILD === "1"
 // eslint-disable-next-line no-console
 console.log(green("Build type:"), isWebBuild ? "Web" : "Unknown")
 
+const toSSRDevAssetUrl = (url: string) =>
+  url.startsWith("/") && !url.startsWith("//") ? `http://localhost:2234${url}` : url
+
 const proxyConfig = {
   target: "http://localhost:2234",
   changeOrigin: true,
@@ -63,7 +66,7 @@ const proxyConfig = {
         $scripts.forEach((script) => {
           const src = script.getAttribute("src")
           if (src) {
-            script.setAttribute("src", `http://localhost:2234${src}`)
+            script.setAttribute("src", toSSRDevAssetUrl(src))
           }
         })
 
@@ -71,7 +74,7 @@ const proxyConfig = {
         $links.forEach((link) => {
           const href = link.getAttribute("href")
           if (href) {
-            link.setAttribute("href", `http://localhost:2234${href}`)
+            link.setAttribute("href", toSSRDevAssetUrl(href))
           }
         })
 
@@ -107,6 +110,7 @@ export default ({ mode }) => {
     server: {
       host: true,
       port: 2233,
+      allowedHosts: ["local.folo.is", "host.docker.internal"],
       watch: {
         ignored: ["**/dist/**", "**/out/**", "**/public/**", ".git/**", "**/.env", "**/.env.*"],
       },

@@ -18,7 +18,68 @@ let db: SqliteRemoteDatabase<typeof schema>
 
 const IDB_NAME = "WA_SQLITE"
 
+function installNavigatorLocksFallback() {
+  if (typeof navigator === "undefined" || "locks" in navigator) return
+
+  const heldLocks: Array<{ name: string; mode: "exclusive" | "shared" }> = []
+  const waiters = new Set<() => void>()
+
+  const canAcquire = (name: string, mode: "exclusive" | "shared") =>
+    !heldLocks.some(
+      (lock) => lock.name === name && (mode === "exclusive" || lock.mode === "exclusive"),
+    )
+
+  const notifyWaiters = () => {
+    for (const waiter of waiters) waiter()
+    waiters.clear()
+  }
+
+  const waitUntilAvailable = async (name: string, mode: "exclusive" | "shared") => {
+    while (!canAcquire(name, mode)) {
+      await new Promise<void>((resolve) => {
+        waiters.add(resolve)
+      })
+    }
+  }
+
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      async request(name: string, optionsOrCallback: any, maybeCallback?: any) {
+        const options = typeof optionsOrCallback === "function" ? {} : optionsOrCallback || {}
+        const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
+        const mode: "exclusive" | "shared" = options.mode === "shared" ? "shared" : "exclusive"
+
+        if (options.ifAvailable && !canAcquire(name, mode)) {
+          return callback(null)
+        }
+
+        await waitUntilAvailable(name, mode)
+
+        const lock: { name: string; mode: "exclusive" | "shared" } = { name, mode }
+        heldLocks.push(lock)
+
+        try {
+          return await callback(lock)
+        } finally {
+          const index = heldLocks.indexOf(lock)
+          if (index !== -1) heldLocks.splice(index, 1)
+          notifyWaiters()
+        }
+      },
+      async query() {
+        return {
+          held: heldLocks.map((lock) => ({ ...lock, clientId: "local-fallback" })),
+          pending: [],
+        }
+      },
+    },
+  })
+}
+
 export async function initializeDB() {
+  installNavigatorLocksFallback()
+
   const module = await SQLiteESMFactory()
   const sqlite3 = SQLite.Factory(module)
   const vfs = await MyVFS.create(IDB_NAME, module)
@@ -83,6 +144,8 @@ export async function migrateDB() {
   }
 }
 export async function getDBFile() {
+  installNavigatorLocksFallback()
+
   const module = await SQLiteESMFactory()
   const vfs = await MyVFS.create(IDB_NAME, module)
   const source = new DatabaseSource(vfs, SQLITE_DB_NAME)

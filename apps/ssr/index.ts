@@ -51,6 +51,23 @@ export const createApp = async () => {
   app.addHook("onRequest", (req, reply, done) => {
     req.requestContext.set("req", req)
 
+    if (__DEV__) {
+      const { origin } = req.headers
+      reply.header("Access-Control-Allow-Origin", origin || "*")
+      reply.header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
+      reply.header(
+        "Access-Control-Allow-Headers",
+        req.headers["access-control-request-headers"] || "*",
+      )
+      reply.header("Access-Control-Allow-Private-Network", "true")
+      reply.header("Vary", "Origin")
+
+      if (req.method === "OPTIONS") {
+        reply.status(204).send()
+        return
+      }
+    }
+
     const { host } = req.headers
 
     const forwardedHost = req.headers["x-forwarded-host"]
