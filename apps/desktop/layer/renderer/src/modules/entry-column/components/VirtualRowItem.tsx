@@ -1,4 +1,5 @@
 import { useEntry } from "@follow/store/entry/hooks"
+import { useIsListSubscription } from "@follow/store/subscription/hooks"
 import { clsx } from "@follow/utils/utils"
 import type { FC, Key } from "react"
 import { Fragment, memo, useMemo } from "react"
@@ -25,16 +26,17 @@ const EntryHeadDateItem: FC<{
   isSticky?: boolean
 }> = ({ entryId, isSticky }) => {
   const entry = useEntry(entryId, (state) => {
-    const { insertedAt } = state
+    const { insertedAt, publishedAt } = state
 
-    return { insertedAt }
+    return { insertedAt, publishedAt }
   })
 
   const routeParams = useRouteParams()
-  const { view } = routeParams
+  const { feedId, view } = routeParams
+  const isList = useIsListSubscription(feedId)
 
   if (!entry) return null
-  const date = new Date(entry.insertedAt).toDateString()
+  const date = new Date(isList ? entry.insertedAt : entry.publishedAt).toDateString()
 
   return <DateItem isSticky={isSticky} date={date} view={view} />
 }

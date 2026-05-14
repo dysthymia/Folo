@@ -245,7 +245,7 @@ const useLocalEntries = (): UseEntriesReturn => {
 }
 
 export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
-  const { view } = useRouteParams()
+  const { view, listId } = useRouteParams()
 
   const remoteQuery = useRemoteEntries()
   const localQuery = useLocalEntries()
@@ -292,7 +292,7 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
       if (isOnboardingEntryUrl(entry.url)) {
         continue
       }
-      const date = new Date(entry.insertedAt).toDateString()
+      const date = new Date(listId ? entry.insertedAt : entry.publishedAt).toDateString()
       if (date !== lastDate) {
         counts.push(1)
         lastDate = date
@@ -303,7 +303,7 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
     }
 
     return counts
-  }, [groupByDate, entryIds, view])
+  }, [groupByDate, listId, entryIds, view])
 
   return {
     ...query,

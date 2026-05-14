@@ -18,7 +18,6 @@ import {
 } from "./getter"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
-import { compareEntriesByInsertedAtDesc } from "./utils"
 
 export const invalidateEntriesQuery = ({
   views,
@@ -52,14 +51,6 @@ const defaultStaleTime = 10 * (60 * 1000) // 10 minutes
 const toPageParam = (value: Date | string | null | undefined) => {
   if (!value) return
   return typeof value === "string" ? value : value.toISOString()
-}
-
-type EntryQueryItem = {
-  entries: {
-    id: string
-    insertedAt: Date | number | string | null
-    publishedAt: Date | number | string | null
-  }
 }
 
 export const useEntriesQuery = (
@@ -156,27 +147,12 @@ export const useEntriesQuery = (
     if (!query.data || query.isLoading || query.isError) {
       return []
     }
-    const entries = query.data.pages.flatMap((page) => (page.data ?? []) as EntryQueryItem[])
-    const orderedEntries =
-      isCollection || aiSort
-        ? entries
-        : [...entries].sort((left, right) =>
-            compareEntriesByInsertedAtDesc(
-              {
-                id: left.entries.id,
-                insertedAt: left.entries.insertedAt,
-                publishedAt: left.entries.publishedAt,
-              },
-              {
-                id: right.entries.id,
-                insertedAt: right.entries.insertedAt,
-                publishedAt: right.entries.publishedAt,
-              },
-            ),
-          )
-
-    return orderedEntries.map((entry) => entry.entries.id).filter((id) => typeof id === "string")
-  }, [aiSort, isCollection, query.data, query.isLoading, query.isError])
+    return (
+      query.data?.pages
+        ?.flatMap((page) => page.data?.map((entry) => entry.entries.id))
+        .filter((id) => typeof id === "string") || []
+    )
+  }, [query.data, query.isLoading, query.isError])
 
   useSyncUnreadWhenUnMatch(entriesIds)
 
