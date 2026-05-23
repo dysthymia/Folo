@@ -3,6 +3,30 @@ import { FeedViewType } from "@follow/constants"
 import { FEED_COLLECTION_LIST, ROUTE_FEED_PENDING } from "../../constants/app"
 import type { UseEntriesReturn } from "./types"
 
+export const getEntryTitleDedupeKey = (title?: string | null) => {
+  const normalizedTitle = title?.trim().replaceAll(/\s+/g, " ").toLowerCase()
+  return normalizedTitle || null
+}
+
+export const dedupeEntryIdsByTitle = ({
+  entryIds,
+  getTitle,
+}: {
+  entryIds: string[]
+  getTitle: (entryId: string) => string | null | undefined
+}) => {
+  const seenTitleKeys = new Set<string>()
+
+  return entryIds.filter((entryId) => {
+    const titleKey = getEntryTitleDedupeKey(getTitle(entryId))
+    if (!titleKey) return true
+    if (seenTitleKeys.has(titleKey)) return false
+
+    seenTitleKeys.add(titleKey)
+    return true
+  })
+}
+
 export function getEntriesParams({
   feedId,
   inboxId,

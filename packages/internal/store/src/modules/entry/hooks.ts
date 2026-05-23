@@ -18,6 +18,7 @@ import {
 } from "./getter"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
+import { dedupeEntryIdsByTitle } from "./utils"
 
 export const invalidateEntriesQuery = ({
   views,
@@ -147,11 +148,25 @@ export const useEntriesQuery = (
     if (!query.data || query.isLoading || query.isError) {
       return []
     }
-    return (
+    const titleByEntryId = new Map<string, string | null | undefined>()
+    const entryIds =
       query.data?.pages
-        ?.flatMap((page) => page.data?.map((entry) => entry.entries.id))
+        ?.flatMap(
+          (page) =>
+            page.data?.flatMap((entry) => {
+              const { id, title } = entry.entries
+              if (typeof id !== "string") return []
+
+              titleByEntryId.set(id, title)
+              return id
+            }) ?? [],
+        )
         .filter((id) => typeof id === "string") || []
-    )
+
+    return dedupeEntryIdsByTitle({
+      entryIds,
+      getTitle: (entryId) => titleByEntryId.get(entryId),
+    })
   }, [query.data, query.isLoading, query.isError])
 
   useSyncUnreadWhenUnMatch(entriesIds)

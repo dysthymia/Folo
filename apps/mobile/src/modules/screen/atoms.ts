@@ -15,7 +15,7 @@ import type {
   UseEntriesProps,
   UseEntriesReturn,
 } from "@follow/store/entry/types"
-import { fallbackReturn } from "@follow/store/entry/utils"
+import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { useListById } from "@follow/store/list/hooks"
@@ -241,7 +241,7 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
                 entryIdsByInboxId,
               ) ?? [])
 
-        return ids
+        const visibleEntryIds = ids
           .map((id) => {
             const entry = state.data[id]
             if (!entry) return null
@@ -251,6 +251,11 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
             return entry.id
           })
           .filter((id) => typeof id === "string")
+
+        return dedupeEntryIdsByTitle({
+          entryIds: visibleEntryIds,
+          getTitle: (entryId) => state.data[entryId]?.title,
+        })
       },
       [
         entryIdsByCategory,

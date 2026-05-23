@@ -11,7 +11,7 @@ import {
 } from "@follow/store/entry/hooks"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
-import { fallbackReturn } from "@follow/store/entry/utils"
+import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
 import { useFolderFeedsByFeedId } from "@follow/store/subscription/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { nextFrame } from "@follow/utils"
@@ -170,11 +170,16 @@ const useLocalEntries = (): UseEntriesReturn => {
             ? stickyVisibleStateRef.current.ids
             : undefined
 
-        return getVisibleLocalEntryIds({
+        const visibleEntryIds = getVisibleLocalEntryIds({
           sourceIds: ids,
           entries: state.data,
           stickyVisibleIds,
           unreadOnly,
+        })
+
+        return dedupeEntryIdsByTitle({
+          entryIds: visibleEntryIds,
+          getTitle: (entryId) => state.data[entryId]?.title,
         })
       },
       [
