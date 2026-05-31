@@ -49,6 +49,10 @@ export const invalidateEntriesQuery = ({
 }
 
 const defaultStaleTime = 10 * (60 * 1000) // 10 minutes
+const toPageParam = (value: Date | string | null | undefined) => {
+  if (!value) return
+  return typeof value === "string" ? value : value.toISOString()
+}
 
 type EntryQueryItem = {
   entries: {
@@ -80,6 +84,7 @@ export const useEntriesQuery = (
 
   const isPop =
     "history" in globalThis && "isPop" in globalThis.history && !!globalThis.history.isPop
+  const isCollectionQuery = isCollection === true || feedId === FEED_COLLECTION_LIST
   const queryKey = useMemo(
     () => [
       "entries",
@@ -119,7 +124,15 @@ export const useEntriesQuery = (
         excludePrivate: hidePrivateSubscriptionsInTimeline,
       }),
 
-    getNextPageParam: (lastPage) => (aiSort ? null : lastPage.data?.at(-1)?.entries.publishedAt),
+    getNextPageParam: (lastPage) => {
+      if (aiSort) return
+
+      const lastEntry = lastPage.data?.at(-1)
+      return isCollectionQuery
+        ? (toPageParam(lastEntry?.collections?.createdAt) ??
+            toPageParam(lastEntry?.entries.publishedAt))
+        : toPageParam(lastEntry?.entries.publishedAt)
+    },
     initialPageParam: undefined as undefined | string,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
@@ -132,6 +145,12 @@ export const useEntriesQuery = (
       isPop ? Infinity : fetchUnread && feedUnreadDirty ? 0 : defaultStaleTime,
     enabled: !!props,
   })
+  const { fetchNextPage: queryFetchNextPage } = query
+  const fetchNextPage = useCallback(
+    (options?: Parameters<typeof queryFetchNextPage>[0]) =>
+      queryFetchNextPage({ cancelRefetch: false, ...options }),
+    [queryFetchNextPage],
+  )
 
   const entriesIds = useMemo(() => {
     if (!query.data || query.isLoading || query.isError) {
@@ -164,10 +183,11 @@ export const useEntriesQuery = (
   return useMemo(() => {
     return {
       ...query,
+      fetchNextPage,
       entriesIds,
       queryKey,
     }
-  }, [entriesIds, query, queryKey])
+  }, [entriesIds, fetchNextPage, query, queryKey])
 }
 
 export const usePrefetchEntryDetail = (entryId: string | undefined, isInbox?: boolean) => {
