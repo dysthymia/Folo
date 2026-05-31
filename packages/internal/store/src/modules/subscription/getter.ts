@@ -3,6 +3,7 @@ import { sortByAlphabet } from "@follow/utils/utils"
 
 import { createSingleArgGetter, createStaticGetter } from "../../lib/helper"
 import { getEntry } from "../entry/getter"
+import { getEntrySubscriptionSourceIds, isEntryHiddenBySubscriptions } from "../entry/visibility"
 import { getFeedById } from "../feed/getter"
 import { getInboxList } from "../inbox/getters"
 import { getListById, getListFeedIds } from "../list/getters"
@@ -21,10 +22,26 @@ export const getSubscriptionByEntryId = (entryId: string | undefined) => {
   if (!entryId) return
   const entry = getEntry(entryId)
   if (!entry) return
-  const { feedId, sources } = entry
-  const possibleSource = (sources?.concat(feedId || "") ?? []).filter((s) => !!s && s !== "feed")
-  if (!possibleSource || possibleSource.length === 0) return
-  return possibleSource.map((id) => getSubscriptionByFeedId(id)).find((s) => !!s)
+  return getEntrySubscriptionSourceIds(entry)
+    .map((id) => getSubscriptionById(id))
+    .find((subscription) => !!subscription)
+}
+
+export const isEntryHiddenFromTimeline = (
+  entryId: string | undefined,
+  options?: {
+    excludePrivate?: boolean
+  },
+) => {
+  if (!entryId) return false
+  const entry = getEntry(entryId)
+  if (!entry) return false
+
+  return isEntryHiddenBySubscriptions({
+    entry,
+    excludePrivate: options?.excludePrivate,
+    getSubscription: getSubscriptionById,
+  })
 }
 
 export const getSubscribedFeedIdAndInboxHandlesByView = ({

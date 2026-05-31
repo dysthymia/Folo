@@ -1,7 +1,7 @@
 import type { FeedViewType } from "@follow/constants"
 
 import { createSingleArgGetter, createStaticGetter } from "../../lib/helper"
-import { getSubscriptionByEntryId } from "../subscription/getter"
+import { isEntryHiddenFromTimeline } from "../subscription/getter"
 import { useEntryStore } from "./store"
 
 export const getEntry = (id: string) => {
@@ -30,8 +30,7 @@ export const getEntryIdsByViewSelector =
     if (!ids) return null
     return Array.from(ids)
       .filter((id) => {
-        const subscription = getSubscriptionByEntryId(id)
-        if ((excludePrivate && subscription?.isPrivate) || subscription?.hideFromTimeline) {
+        if (isEntryHiddenFromTimeline(id, { excludePrivate })) {
           return false
         }
         return true

@@ -5,6 +5,7 @@ import { useCallback, useMemo } from "react"
 import { FEED_COLLECTION_LIST } from "../../constants/app"
 import { queryClient } from "../../context"
 import { useFeedUnreadIsDirty } from "../feed/hooks"
+import { isEntryHiddenFromTimeline } from "../subscription/getter"
 import { useSyncUnreadWhenUnMatch } from "../unread/hooks"
 import {
   getEntryIdsByCategorySelector,
@@ -164,10 +165,15 @@ export const useEntriesQuery = (
         .filter((id) => typeof id === "string") || []
 
     return dedupeEntryIdsByTitle({
-      entryIds,
+      entryIds: entryIds.filter(
+        (entryId) =>
+          !isEntryHiddenFromTimeline(entryId, {
+            excludePrivate: hidePrivateSubscriptionsInTimeline,
+          }),
+      ),
       getTitle: (entryId) => titleByEntryId.get(entryId),
     })
-  }, [query.data, query.isLoading, query.isError])
+  }, [query.data, query.isLoading, query.isError, hidePrivateSubscriptionsInTimeline])
 
   useSyncUnreadWhenUnMatch(entriesIds)
 
