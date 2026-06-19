@@ -5,8 +5,8 @@ import { useFeedStore } from "../feed/store"
 import type { FeedModel } from "../feed/types"
 import { useSubscriptionStore } from "../subscription/store"
 import {
-  filterSemanticDuplicateEntryIds,
   getSemanticDuplicateCandidates,
+  getSemanticDuplicateEntryRole,
   useSemanticDedupeStore,
 } from "./semantic-dedupe"
 import { useEntryStore } from "./store"
@@ -45,7 +45,7 @@ const createEntry = ({
     url: `https://example.com/${id}`,
   }) as EntryModel
 
-describe("semantic duplicate entry filtering", () => {
+describe("semantic duplicate entry marking", () => {
   beforeEach(() => {
     useEntryStore.setState({
       data: {},
@@ -139,7 +139,7 @@ describe("semantic duplicate entry filtering", () => {
     })
   })
 
-  it("hides confident duplicates only when the kept entry is present", () => {
+  it("marks confident duplicate and kept entries without filtering them", () => {
     useSemanticDedupeStore.setState({
       decisions: {
         "entry-a::entry-b": {
@@ -166,11 +166,9 @@ describe("semantic duplicate entry filtering", () => {
       revision: 1,
     })
 
-    expect(filterSemanticDuplicateEntryIds(["entry-a", "entry-b", "entry-c", "entry-d"])).toEqual([
-      "entry-a",
-      "entry-c",
-      "entry-d",
-    ])
-    expect(filterSemanticDuplicateEntryIds(["entry-b"])).toEqual(["entry-b"])
+    expect(getSemanticDuplicateEntryRole("entry-a")).toBe("keeper")
+    expect(getSemanticDuplicateEntryRole("entry-b")).toBe("duplicate")
+    expect(getSemanticDuplicateEntryRole("entry-c")).toBeNull()
+    expect(getSemanticDuplicateEntryRole("entry-d")).toBeNull()
   })
 })

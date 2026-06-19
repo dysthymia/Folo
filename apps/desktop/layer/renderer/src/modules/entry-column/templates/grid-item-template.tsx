@@ -2,6 +2,7 @@ import { TitleMarquee } from "@follow/components/ui/marquee/index.jsx"
 import { FeedViewType } from "@follow/constants"
 import { useIsEntryStarred } from "@follow/store/collection/hooks"
 import { useEntry, useHasEntry } from "@follow/store/entry/hooks"
+import { useSemanticDuplicateEntryRole } from "@follow/store/entry/semantic-dedupe"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { cn } from "@follow/utils/utils"
 import dayjs from "dayjs"
@@ -16,6 +17,7 @@ import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
+import { getSemanticDuplicateTitleClassName } from "../semantic-dedupe-style"
 import { StarIcon } from "../star-icon"
 import type { UniversalItemProps } from "../types"
 
@@ -70,6 +72,7 @@ export const GridItemFooter = ({
   const feeds = useFeedById(entry?.feedId)
 
   const asRead = useEntryIsRead(entryId)
+  const semanticDuplicateRole = useSemanticDuplicateEntryRole(entryId)
 
   const iconEntry: FeedIconEntry = useMemo(
     () => ({
@@ -100,6 +103,7 @@ export const GridItemFooter = ({
           className={cn(
             "relative mb-1 mt-1.5 flex w-full items-center gap-1 truncate font-medium",
             titleClassName,
+            getSemanticDuplicateTitleClassName(semanticDuplicateRole),
           )}
         >
           <TitleMarquee className="min-w-0 grow">

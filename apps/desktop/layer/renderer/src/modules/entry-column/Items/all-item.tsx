@@ -11,6 +11,7 @@ import { FeedViewType } from "@follow/constants"
 import { IN_ELECTRON } from "@follow/shared/constants"
 import { useCollectionEntry } from "@follow/store/collection/hooks"
 import { useEntry } from "@follow/store/entry/hooks"
+import { useSemanticDuplicateEntryRole } from "@follow/store/entry/semantic-dedupe"
 import type { EntryModel } from "@follow/store/entry/types"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
@@ -33,6 +34,7 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { HighlightedText } from "~/modules/spotlight/HighlightedText"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
+import { getSemanticDuplicateTitleClassName } from "../semantic-dedupe-style"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
@@ -82,6 +84,7 @@ export function AllItem({
   const collectionCreatedAt = useCollectionEntry(entryId)?.createdAt
 
   const isRead = useEntryIsRead(entryId)
+  const semanticDuplicateRole = useSemanticDuplicateEntryRole(entryId)
 
   const inInCollection = useRouteParamsSelector((s) => s.feedId === FEED_COLLECTION_LIST)
 
@@ -168,6 +171,7 @@ export function AllItem({
             "text-text",
             entry?.title ? "font-medium" : "text-[13px]",
             isRead && dimRead && "text-text-secondary",
+            getSemanticDuplicateTitleClassName(semanticDuplicateRole),
           )}
         >
           <EllipsisHorizontalTextWithTooltip>

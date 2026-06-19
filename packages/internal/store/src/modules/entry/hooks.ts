@@ -18,9 +18,7 @@ import {
   getHasEntrySelector,
 } from "./getter"
 import {
-  filterSemanticDuplicateEntryIds,
   useSemanticDedupeProcessor,
-  useSemanticDedupeRevision,
 } from "./semantic-dedupe"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
@@ -79,7 +77,6 @@ export const useEntriesQuery = (
 
   const fetchUnread = unreadOnly
   const feedUnreadDirty = useFeedUnreadIsDirty((feedId as string) || "")
-  const semanticDedupeRevision = useSemanticDedupeRevision()
 
   const isPop =
     "history" in globalThis && "isPop" in globalThis.history && !!globalThis.history.isPop
@@ -183,10 +180,7 @@ export const useEntriesQuery = (
 
   useSemanticDedupeProcessor(fetchedEntryIds)
 
-  const entriesIds = useMemo(() => {
-    void semanticDedupeRevision
-    return filterSemanticDuplicateEntryIds(fetchedEntryIds)
-  }, [fetchedEntryIds, semanticDedupeRevision])
+  const entriesIds = fetchedEntryIds
 
   useSyncUnreadWhenUnMatch(entriesIds)
 

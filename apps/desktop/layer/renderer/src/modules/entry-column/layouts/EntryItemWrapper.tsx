@@ -4,6 +4,7 @@ import { getMousePosition } from "@follow/components/hooks/useMouse.js"
 import { ActionButton } from "@follow/components/ui/button/action-button.js"
 import { FeedViewType } from "@follow/constants"
 import { useEntry } from "@follow/store/entry/hooks"
+import { useSemanticDuplicateEntryRole } from "@follow/store/entry/semantic-dedupe"
 import { entrySyncServices } from "@follow/store/entry/store"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
@@ -206,11 +207,14 @@ export const EntryItemWrapper: FC<
       ? "bg-[var(--entry-source-background-read)] hover:bg-[var(--entry-source-background-read-hover)]"
       : "bg-[var(--entry-source-background)] hover:bg-[var(--entry-source-background-hover)]"
     : "hover:bg-theme-item-hover"
+  const semanticDuplicateRole = useSemanticDuplicateEntryRole(entryId)
+
   return (
     <div
       data-entry-id={entry?.id}
       data-read={asRead ? "true" : "false"}
       data-active={isActive ? "true" : "false"}
+      data-semantic-duplicate-role={semanticDuplicateRole ?? undefined}
       style={mergedStyle}
     >
       <Link
@@ -221,6 +225,7 @@ export const EntryItemWrapper: FC<
           !isWide ? "rounded-none @[650px]:rounded-md" : "rounded-md",
           isAll && "!rounded-none",
           (isActive || isContextMenuOpen) && "!bg-theme-item-active",
+          semanticDuplicateRole === "duplicate" && "opacity-60 blur-[0.4px] saturate-50",
           itemClassName,
         )}
         onClick={handleClick}

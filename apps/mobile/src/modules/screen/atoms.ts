@@ -9,10 +9,6 @@ import {
   useEntryIdsByListId,
   useEntryIdsByView,
 } from "@follow/store/entry/hooks"
-import {
-  filterSemanticDuplicateEntryIds,
-  useSemanticDedupeRevision,
-} from "@follow/store/entry/semantic-dedupe"
 import { useEntryStore } from "@follow/store/entry/store"
 import type {
   FetchEntriesProps,
@@ -217,7 +213,6 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
     view,
   )
   const options = useFetchEntriesSettings()
-  const semanticDedupeRevision = useSemanticDedupeRevision()
 
   const { feedId, feedIdList, listId, inboxId, isCollection } = payload || {}
   const { hidePrivateSubscriptionsInTimeline, unreadOnly } = options
@@ -235,7 +230,6 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
   const allEntries = useEntryStore(
     useCallback(
       (state) => {
-        void semanticDedupeRevision
         const ids = isCollection
           ? entryIdsByCollections
           : showEntriesByView
@@ -263,7 +257,7 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
           getTitle: (entryId) => state.data[entryId]?.title,
         })
 
-        return filterSemanticDuplicateEntryIds(titleDedupedEntryIds)
+        return titleDedupedEntryIds
       },
       [
         entryIdsByCategory,
@@ -273,7 +267,6 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
         entryIdsByListId,
         entryIdsByView,
         isCollection,
-        semanticDedupeRevision,
         showEntriesByView,
         unreadOnly,
       ],

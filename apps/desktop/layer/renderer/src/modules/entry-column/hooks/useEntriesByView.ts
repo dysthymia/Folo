@@ -10,9 +10,7 @@ import {
   useEntryIdsByView,
 } from "@follow/store/entry/hooks"
 import {
-  filterSemanticDuplicateEntryIds,
   useSemanticDedupeProcessor,
-  useSemanticDedupeRevision,
 } from "@follow/store/entry/semantic-dedupe"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
@@ -125,7 +123,6 @@ const useLocalEntries = (): UseEntriesReturn => {
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
   )
-  const semanticDedupeRevision = useSemanticDedupeRevision()
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
@@ -160,7 +157,6 @@ const useLocalEntries = (): UseEntriesReturn => {
   const allEntries = useEntryStore(
     useCallback(
       (state) => {
-        void semanticDedupeRevision
         const ids = isCollection
           ? entryIdsByCollections
           : showEntriesByView
@@ -189,7 +185,7 @@ const useLocalEntries = (): UseEntriesReturn => {
           getTitle: (entryId) => state.data[entryId]?.title,
         })
 
-        return filterSemanticDuplicateEntryIds(titleDedupedEntryIds)
+        return titleDedupedEntryIds
       },
       [
         entryIdsByCategory,
@@ -200,7 +196,6 @@ const useLocalEntries = (): UseEntriesReturn => {
         entryIdsByView,
         isCollection,
         localQueryKey,
-        semanticDedupeRevision,
         showEntriesByView,
         unreadOnly,
       ],

@@ -51,6 +51,8 @@ export interface SemanticDuplicateDecision extends SemanticDuplicateEvaluation {
   updatedAt: string
 }
 
+export type SemanticDuplicateEntryRole = "duplicate" | "keeper" | null
+
 interface SemanticDedupeStore {
   decisions: Record<string, SemanticDuplicateDecision>
   isHydrated: boolean
@@ -396,25 +398,39 @@ export const getSemanticDuplicateCandidates = (
     .slice(0, options.maxCandidates ?? MAX_CANDIDATES_PER_RUN)
 }
 
-export const filterSemanticDuplicateEntryIds = (entryIds: string[]) => {
-  const state = useSemanticDedupeStore.getState()
-  const entryIdSet = new Set(entryIds)
-  const hiddenEntryIdToKeepEntryId = new Map<string, string>()
+const isConfidentDuplicateDecision = (decision: SemanticDuplicateDecision) =>
+  decision.duplicate &&
+  decision.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD &&
+  !!decision.hideEntryId &&
+  !!decision.keepEntryId
 
-  for (const decision of Object.values(state.decisions)) {
-    if (!decision.duplicate) continue
-    if (decision.confidence < SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD) continue
-    if (!decision.hideEntryId || !decision.keepEntryId) continue
+const getSemanticDuplicateEntryRoleFromDecisions = (
+  decisions: Record<string, SemanticDuplicateDecision>,
+  entryId: string,
+): SemanticDuplicateEntryRole => {
+  let isKeeper = false
 
-    hiddenEntryIdToKeepEntryId.set(decision.hideEntryId, decision.keepEntryId)
+  for (const decision of Object.values(decisions)) {
+    if (!isConfidentDuplicateDecision(decision)) continue
+
+    if (decision.hideEntryId === entryId) {
+      return "duplicate"
+    }
+    if (decision.keepEntryId === entryId) {
+      isKeeper = true
+    }
   }
 
-  return entryIds.filter((entryId) => {
-    const keepEntryId = hiddenEntryIdToKeepEntryId.get(entryId)
-    if (!keepEntryId) return true
-    return !entryIdSet.has(keepEntryId)
-  })
+  return isKeeper ? "keeper" : null
 }
+
+export const getSemanticDuplicateEntryRole = (entryId: string) =>
+  getSemanticDuplicateEntryRoleFromDecisions(useSemanticDedupeStore.getState().decisions, entryId)
+
+export const useSemanticDuplicateEntryRole = (entryId: string) =>
+  useSemanticDedupeStore((state) =>
+    getSemanticDuplicateEntryRoleFromDecisions(state.decisions, entryId),
+  )
 
 export const useSemanticDedupeRevision = () => useSemanticDedupeStore((state) => state.revision)
 const useSemanticDedupeIsReady = () =>
