@@ -1,3 +1,4 @@
+import type { FeedViewType } from "@follow/constants"
 import type { FeedModel } from "@follow/store/feed/types"
 import type { EntryTranslation } from "@follow/store/translation/types"
 import type { ParsedEntry } from "@follow-app/client-sdk"
@@ -7,6 +8,7 @@ export type UniversalItemProps = {
   entryId: string
   translation?: EntryTranslation
   currentFeedTitle?: string
+  view?: FeedViewType
 }
 
 export type EntryListItemFC<P extends object = object> = FC<P & UniversalItemProps> & {

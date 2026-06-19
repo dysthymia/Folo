@@ -50,7 +50,12 @@ const EntryItemImpl = memo(function EntryItemImpl({
       view={view}
       isFirstItem={isFirstItem}
     >
-      <Item entryId={entryId} translation={translation} currentFeedTitle={currentFeedTitle} />
+      <Item
+        entryId={entryId}
+        translation={translation}
+        currentFeedTitle={currentFeedTitle}
+        view={view}
+      />
     </EntryItemWrapper>
   )
 })

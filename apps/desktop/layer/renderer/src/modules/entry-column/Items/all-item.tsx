@@ -7,8 +7,9 @@ import {
   TooltipTrigger,
 } from "@follow/components/ui/tooltip/index.js"
 import { EllipsisHorizontalTextWithTooltip } from "@follow/components/ui/typography/index.js"
+import { FeedViewType } from "@follow/constants"
 import { IN_ELECTRON } from "@follow/shared/constants"
-import { useCollectionEntry, useIsEntryStarred } from "@follow/store/collection/hooks"
+import { useCollectionEntry } from "@follow/store/collection/hooks"
 import { useEntry } from "@follow/store/entry/hooks"
 import type { EntryModel } from "@follow/store/entry/types"
 import { useFeedById } from "@follow/store/feed/hooks"
@@ -32,7 +33,7 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { HighlightedText } from "~/modules/spotlight/HighlightedText"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
-import { StarIcon } from "../star-icon"
+import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
 
@@ -69,11 +70,15 @@ const entrySelector = (state: EntryModel) => {
   }
 }
 
-export function AllItem({ entryId, translation, currentFeedTitle }: UniversalItemProps) {
+export function AllItem({
+  entryId,
+  translation,
+  currentFeedTitle,
+  view = FeedViewType.All,
+}: UniversalItemProps) {
   const entry = useEntry(entryId, entrySelector)
   const simple = true
 
-  const isInCollection = useIsEntryStarred(entryId)
   const collectionCreatedAt = useCollectionEntry(entryId)?.createdAt
 
   const isRead = useEntryIsRead(entryId)
@@ -150,6 +155,7 @@ export function AllItem({ entryId, translation, currentFeedTitle }: UniversalIte
           "before:absolute before:-left-4 before:top-[14px] before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryStarActionButton entryId={entryId} view={view} className="-ml-1" />
       {currentFeedTitle !== thisFeedTitle && (
         <FeedIcon target={related} fallback entry={iconEntry} size={16} />
       )}
@@ -160,7 +166,6 @@ export function AllItem({ entryId, translation, currentFeedTitle }: UniversalIte
           className={cn(
             "relative flex items-center",
             "text-text",
-            !!isInCollection && "pr-5",
             entry?.title ? "font-medium" : "text-[13px]",
             isRead && dimRead && "text-text-secondary",
           )}
@@ -183,7 +188,6 @@ export function AllItem({ entryId, translation, currentFeedTitle }: UniversalIte
               />
             )}
           </EllipsisHorizontalTextWithTooltip>
-          {!!isInCollection && <StarIcon className="absolute right-0 top-0" />}
         </div>
         <div
           className={cn(

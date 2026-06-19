@@ -14,8 +14,8 @@ export const ENTRY_ITEM_HIDE_IN_HEADER = new Set<UniqueIdentifier>([
 ])
 
 const MAIN_ACTIONS = [
-  COMMAND_ID.entry.read,
   COMMAND_ID.entry.star,
+  COMMAND_ID.entry.read,
 
   COMMAND_ID.entry.readability,
 

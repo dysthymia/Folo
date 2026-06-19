@@ -1,6 +1,7 @@
 import { useMobile } from "@follow/components/hooks/useMobile.js"
 import { EllipsisHorizontalTextWithTooltip } from "@follow/components/ui/typography/index.js"
-import { useCollectionEntry, useIsEntryStarred } from "@follow/store/collection/hooks"
+import { FeedViewType } from "@follow/constants"
+import { useCollectionEntry } from "@follow/store/collection/hooks"
 import { useEntry } from "@follow/store/entry/hooks"
 import type { EntryModel } from "@follow/store/entry/types"
 import { useFeedById } from "@follow/store/feed/hooks"
@@ -23,7 +24,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
-import { StarIcon } from "../star-icon"
+import { EntryStarActionButton } from "../star-action-button"
 import type { UniversalItemProps } from "../types"
 
 const entrySelector = (state: EntryModel) => {
@@ -56,13 +57,13 @@ export function ListItem({
   entryId,
   translation,
   simple,
+  view = FeedViewType.Articles,
 }: UniversalItemProps & {
   simple?: boolean
 }) {
   const isMobile = useMobile()
   const entry = useEntry(entryId, entrySelector)
 
-  const isInCollection = useIsEntryStarred(entryId)
   const collectionCreatedAt = useCollectionEntry(entryId)?.createdAt
 
   const isRead = useEntryIsRead(entryId)
@@ -152,11 +153,13 @@ export function ListItem({
   // calculate the max width to have a correct truncation
   // FIXME: this is not easy to maintain, need to refactor
   const feedIconWidth = 20 + marginWidth
+  const starActionWidth = 28
   const audioCoverWidth = 80 + marginWidth
   const mediaWidth = 80 * (isMobile ? 1.125 : 1) + marginWidth
 
   let savedWidth = 0
 
+  savedWidth += starActionWidth
   savedWidth += feedIconWidth
 
   if (hasAudio) {
@@ -174,6 +177,7 @@ export function ListItem({
           "before:absolute before:-left-3 before:top-5 before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryStarActionButton entryId={entryId} view={view} className="-ml-1 mt-0.5" />
       <FeedIcon target={related} fallback entry={iconEntry} size={24} />
       <div
         className={cn("-mt-0.5 ml-1 h-fit flex-1 text-sm leading-tight", lineClamp.global)}
@@ -185,7 +189,6 @@ export function ListItem({
           className={cn(
             "flex min-w-0 items-center gap-1 text-[10px] font-bold",
             "text-text-secondary",
-            isInCollection && "text-text-secondary",
             isRead && dimRead && "text-text-tertiary",
           )}
         >
@@ -203,7 +206,6 @@ export function ListItem({
           className={cn(
             "relative my-0.5 break-words",
             "text-text",
-            !!isInCollection && "pr-5",
             entry?.title ? "font-medium" : "text-[13px]",
             isRead && dimRead && "text-text-secondary",
           )}
@@ -221,7 +223,6 @@ export function ListItem({
               target={translation?.description}
             />
           )}
-          {!!isInCollection && <StarIcon className="absolute right-0 top-0" />}
         </div>
         {!simple && (
           <div

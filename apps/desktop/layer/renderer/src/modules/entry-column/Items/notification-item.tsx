@@ -8,8 +8,8 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
 
-export function NotificationItem({ entryId, translation }: UniversalItemProps) {
-  return <ListItem entryId={entryId} translation={translation} simple />
+export function NotificationItem({ entryId, translation, view }: UniversalItemProps) {
+  return <ListItem entryId={entryId} translation={translation} view={view} simple />
 }
 
 NotificationItem.wrapperClassName = readableContentMaxWidth

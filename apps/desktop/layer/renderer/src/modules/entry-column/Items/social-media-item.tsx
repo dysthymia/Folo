@@ -1,7 +1,7 @@
 import { PassviseFragment } from "@follow/components/common/Fragment.js"
 import { AutoResizeHeight } from "@follow/components/ui/auto-resize-height/index.js"
 import { Skeleton } from "@follow/components/ui/skeleton/index.jsx"
-import { useIsEntryStarred } from "@follow/store/collection/hooks"
+import { FeedViewType } from "@follow/constants"
 import { useEntry } from "@follow/store/entry/hooks"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { LRUCache } from "@follow/utils/lru-cache"
@@ -22,12 +22,16 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
 import { socialMediaContentWidthAtom } from "../atoms/social-media-content-width"
-import { StarIcon } from "../star-icon"
+import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, EntryListItemFC } from "../types"
 import { MediaGallery } from "./media-gallery"
 
-export const SocialMediaItem: EntryListItemFC = ({ entryId, translation }) => {
+export const SocialMediaItem: EntryListItemFC = ({
+  entryId,
+  translation,
+  view = FeedViewType.SocialMedia,
+}) => {
   const entry = useEntry(entryId, (state) => {
     /// keep-sorted
     const {
@@ -60,8 +64,6 @@ export const SocialMediaItem: EntryListItemFC = ({ entryId, translation }) => {
       url,
     }
   })
-
-  const isInCollection = useIsEntryStarred(entryId)
 
   const asRead = useEntryIsRead(entryId)
   const feed = useFeedById(entry?.feedId)
@@ -103,6 +105,7 @@ export const SocialMediaItem: EntryListItemFC = ({ entryId, translation }) => {
           "before:absolute before:-left-3 before:top-8 before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryStarActionButton entryId={entryId} view={view} className="-ml-1 mr-1 mt-1" />
       <FeedIcon fallback target={feed} entry={iconEntry} size={32} className="mt-1" />
       <div ref={ref} className="ml-2 min-w-0 flex-1">
         <div className="-mt-0.5 flex-1 text-sm">
@@ -128,7 +131,7 @@ export const SocialMediaItem: EntryListItemFC = ({ entryId, translation }) => {
               <RelativeTime date={entry.publishedAt} />
             </span>
           </div>
-          <div className={cn("relative mt-1 text-base", isInCollection && "pr-5")}>
+          <div className="relative mt-1 text-base">
             <EntryContentWrapper entryId={entryId}>
               <HTML
                 as="div"
@@ -142,7 +145,6 @@ export const SocialMediaItem: EntryListItemFC = ({ entryId, translation }) => {
                 {translation?.content || content}
               </HTML>
             </EntryContentWrapper>
-            {isInCollection && <StarIcon className="absolute right-0 top-0" />}
           </div>
         </div>
         <MediaGallery entryId={entryId} />
