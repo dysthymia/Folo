@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import type { IncomingMessage, ServerResponse } from "node:http"
 import { fileURLToPath } from "node:url"
 
 import type { env as EnvType } from "@follow/shared/env.desktop"
@@ -15,6 +16,8 @@ import { VitePWA } from "vite-plugin-pwa"
 import { routeBuilderPlugin } from "vite-plugin-route-builder"
 
 import { viteRenderBaseConfig } from "./configs/vite.render.config"
+import type { SemanticDuplicateCandidate } from "./layer/main/src/lib/semantic-dedupe-codex"
+import { evaluateSemanticDuplicateCandidates } from "./layer/main/src/lib/semantic-dedupe-codex"
 import { createDependencyChunksPlugin } from "./plugins/vite/deps"
 import { htmlInjectPlugin } from "./plugins/vite/html-inject"
 import { localesPlugin } from "./plugins/vite/locales"
@@ -86,6 +89,160 @@ const proxyConfig = {
     })
   },
 }
+
+const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
+const SEMANTIC_DEDUPE_MAX_BODY_SIZE = 1024 * 1024
+const semanticDedupeDevOrigins = new Set([
+  "http://127.0.0.1:2233",
+  "https://127.0.0.1:2233",
+  "http://localhost:2233",
+  "https://localhost:2233",
+  "http://local.folo.is",
+  "http://local.folo.is:2233",
+  "https://local.folo.is",
+  "https://local.folo.is:2233",
+])
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const isSemanticDuplicateEntryContext = (value: unknown) => {
+  if (!isRecord(value)) return false
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.feedTitle === "string" &&
+    typeof value.description === "string" &&
+    typeof value.publishedAt === "string" &&
+    typeof value.urlHost === "string"
+  )
+}
+
+const isSemanticDuplicateCandidate = (value: unknown): value is SemanticDuplicateCandidate => {
+  if (!isRecord(value)) return false
+  if (!Array.isArray(value.entries) || value.entries.length !== 2) return false
+
+  return (
+    typeof value.pairKey === "string" &&
+    typeof value.keepEntryId === "string" &&
+    typeof value.testEntryId === "string" &&
+    typeof value.similarity === "number" &&
+    Number.isFinite(value.similarity) &&
+    isSemanticDuplicateEntryContext(value.entries[0]) &&
+    isSemanticDuplicateEntryContext(value.entries[1])
+  )
+}
+
+const isSemanticDedupeDevRequest = (
+  value: unknown,
+): value is { candidates: SemanticDuplicateCandidate[] } =>
+  isRecord(value) &&
+  Array.isArray(value.candidates) &&
+  value.candidates.every(isSemanticDuplicateCandidate)
+
+const setSemanticDedupeResponseHeaders = (req: IncomingMessage, res: ServerResponse) => {
+  const origin = Array.isArray(req.headers.origin) ? undefined : req.headers.origin
+
+  if (origin && semanticDedupeDevOrigins.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin)
+    res.setHeader("Vary", "Origin")
+  }
+
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+}
+
+const isAllowedSemanticDedupeOrigin = (req: IncomingMessage) => {
+  const origin = Array.isArray(req.headers.origin) ? undefined : req.headers.origin
+  if (!origin) return true
+  return semanticDedupeDevOrigins.has(origin)
+}
+
+const sendSemanticDedupeJson = (res: ServerResponse, statusCode: number, payload: unknown) => {
+  res.statusCode = statusCode
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
+  res.end(JSON.stringify(payload))
+}
+
+const readSemanticDedupeBody = async (req: IncomingMessage) =>
+  new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let rejected = false
+    let size = 0
+
+    req.on("data", (chunk: Buffer) => {
+      if (rejected) return
+
+      size += chunk.byteLength
+      if (size > SEMANTIC_DEDUPE_MAX_BODY_SIZE) {
+        rejected = true
+        reject(new Error("Semantic dedupe request body is too large."))
+        return
+      }
+
+      chunks.push(chunk)
+    })
+    req.on("end", () => {
+      if (!rejected) {
+        resolve(Buffer.concat(chunks).toString("utf8"))
+      }
+    })
+    req.on("error", reject)
+  })
+
+const readSemanticDedupeRequest = async (req: IncomingMessage) => {
+  const body = await readSemanticDedupeBody(req)
+  const payload = JSON.parse(body) as unknown
+
+  if (!isSemanticDedupeDevRequest(payload)) {
+    throw new Error("Invalid semantic dedupe request.")
+  }
+
+  return payload
+}
+
+const semanticDedupeDevServer = (): PluginOption => ({
+  name: "semantic-dedupe-dev-server",
+  configureServer(server: ViteDevServer) {
+    const runtimeDir = resolve(__dirname, "node_modules/.cache/folo-semantic-dedupe")
+
+    server.middlewares.use(SEMANTIC_DEDUPE_DEV_ENDPOINT, async (req, res, next) => {
+      if (!req.url) {
+        next()
+        return
+      }
+
+      setSemanticDedupeResponseHeaders(req, res)
+
+      if (req.method === "OPTIONS") {
+        res.statusCode = isAllowedSemanticDedupeOrigin(req) ? 204 : 403
+        res.end()
+        return
+      }
+
+      if (req.method !== "POST") {
+        next()
+        return
+      }
+
+      if (!isAllowedSemanticDedupeOrigin(req)) {
+        sendSemanticDedupeJson(res, 403, { error: "Forbidden semantic dedupe origin." })
+        return
+      }
+
+      try {
+        const { candidates } = await readSemanticDedupeRequest(req)
+        const result = await evaluateSemanticDuplicateCandidates({ candidates, runtimeDir })
+        sendSemanticDedupeJson(res, 200, result)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Semantic dedupe failed."
+        server.config.logger.error(`[semantic-dedupe] ${message}`)
+        sendSemanticDedupeJson(res, 500, { error: message })
+      }
+    })
+  },
+})
 
 export default ({ mode }) => {
   const env = loadEnv(mode, process.cwd())
@@ -234,6 +391,7 @@ export default ({ mode }) => {
       htmlInjectPlugin(typedEnv),
       process.env.SSL ? mkcert() : false,
       devPrint(),
+      semanticDedupeDevServer(),
       createDependencyChunksPlugin([
         //  React framework
         ["react", "react-dom"],

@@ -7,6 +7,7 @@ import { useSubscriptionStore } from "../subscription/store"
 import {
   getSemanticDuplicateCandidates,
   getSemanticDuplicateEntryRole,
+  registerSemanticDuplicateEvaluator,
   useSemanticDedupeStore,
 } from "./semantic-dedupe"
 import { useEntryStore } from "./store"
@@ -137,6 +138,18 @@ describe("semantic duplicate entry marking", () => {
       title: firstEntry.title,
       urlHost: "example.com",
     })
+  })
+
+  it("bumps revision when the evaluator changes", () => {
+    expect(useSemanticDedupeStore.getState().revision).toBe(0)
+
+    const dispose = registerSemanticDuplicateEvaluator(async () => [])
+
+    expect(useSemanticDedupeStore.getState().revision).toBe(1)
+
+    dispose()
+
+    expect(useSemanticDedupeStore.getState().revision).toBe(2)
   })
 
   it("marks confident duplicate and kept entries without filtering them", () => {

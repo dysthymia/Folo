@@ -151,10 +151,16 @@ export const registerSemanticDuplicateEvaluator = (
   evaluator: SemanticDuplicateEvaluator | null,
 ) => {
   semanticDuplicateEvaluator = evaluator
+  set((state) => {
+    state.revision += 1
+  })
 
   return () => {
     if (semanticDuplicateEvaluator === evaluator) {
       semanticDuplicateEvaluator = null
+      set((state) => {
+        state.revision += 1
+      })
     }
   }
 }
