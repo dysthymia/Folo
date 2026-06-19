@@ -1,6 +1,7 @@
 import type {
   collectionsTable,
   entriesTable,
+  entryOpenStatsTable,
   feedsTable,
   imagesTable,
   inboxesTable,
@@ -25,6 +26,8 @@ export type UnreadSchema = typeof unreadTable.$inferInsert
 export type UserSchema = typeof usersTable.$inferInsert
 
 export type EntrySchema = typeof entriesTable.$inferInsert
+
+export type EntryOpenStatsSchema = typeof entryOpenStatsTable.$inferInsert
 
 export type CollectionSchema = typeof collectionsTable.$inferInsert
 

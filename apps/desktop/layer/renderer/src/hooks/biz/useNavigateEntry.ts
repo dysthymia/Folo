@@ -3,6 +3,7 @@ import { useMobile } from "@follow/components/hooks/useMobile.js"
 import { useSheetContext } from "@follow/components/ui/sheet/context.js"
 import type { FeedViewType } from "@follow/constants"
 import { getEntry } from "@follow/store/entry/getter"
+import { entrySyncServices } from "@follow/store/entry/store"
 import { getSubscriptionByFeedId } from "@follow/store/subscription/getter"
 import { tracker } from "@follow/tracker"
 import { useCallback } from "react"
@@ -127,6 +128,7 @@ export const navigateEntry = (options: NavigateEntryOptions) => {
     entryId: parsedOptions.entryId,
     timelineId: parsedOptions.timelineId,
   })
+  void entrySyncServices.recordEntryOpen(parsedOptions.entryId, "internal")
 
   disableShowAISummaryOnce()
   disableShowAITranslationOnce()

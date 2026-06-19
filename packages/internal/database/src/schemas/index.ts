@@ -110,6 +110,21 @@ export const entriesTable = sqliteTable("entries", {
   settings: text("settings", { mode: "json" }).$type<EntrySettings>(),
 })
 
+export const entryOpenStatsTable = sqliteTable(
+  "entry_open_stats",
+  {
+    entryId: text("entry_id").primaryKey(),
+    feedId: text("feed_id").notNull(),
+    publishedAt: integer("published_at", { mode: "timestamp_ms" }).notNull(),
+    firstOpenedAt: integer("first_opened_at", { mode: "timestamp_ms" }),
+    openSource: text("open_source").$type<"internal" | "external">(),
+  },
+  (table) => [
+    index("idx_entry_open_stats_feed_published_at").on(table.feedId, table.publishedAt),
+    index("idx_entry_open_stats_feed_first_opened_at").on(table.feedId, table.firstOpenedAt),
+  ],
+)
+
 export const collectionsTable = sqliteTable("collections", {
   feedId: text("feed_id"),
   entryId: text("entry_id").notNull().primaryKey(),

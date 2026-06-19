@@ -24,7 +24,12 @@ import {
 import { EllipsisHorizontalTextWithTooltip } from "@follow/components/ui/typography/index.js"
 import { getView, getViewList } from "@follow/constants"
 import { getFeedById } from "@follow/store/feed/getter"
-import { useFeedById, usePrefetchFeedAnalytics } from "@follow/store/feed/hooks"
+import type {
+  FeedOpenStats,
+  FeedOpenStatsPeriod,
+  FeedOpenStatsValue,
+} from "@follow/store/feed/hooks"
+import { useFeedById, useFeedOpenStats, usePrefetchFeedAnalytics } from "@follow/store/feed/hooks"
 import { getSubscriptionByFeedId } from "@follow/store/subscription/getter"
 import {
   useAllFeedSubscriptionIds,
@@ -55,7 +60,15 @@ import { SettingModalContentPortal } from "~/modules/settings/modal/layout"
 import { Balance } from "~/modules/wallet/balance"
 import { Queries } from "~/queries"
 
-type SortField = "name" | "view" | "date" | "subscriptionCount" | "updatesPerWeek"
+type SortField =
+  | "name"
+  | "view"
+  | "date"
+  | "subscriptionCount"
+  | "updatesPerWeek"
+  | "dayOpenRate"
+  | "weekOpenRate"
+  | "monthOpenRate"
 type SortDirection = "asc" | "desc"
 type FeedFilter = "all" | "rsshub"
 
@@ -69,7 +82,8 @@ export const SettingFeeds = () => {
   )
 }
 
-const GRID_COLS_CLASSNAME = "grid-cols-[30px_auto_100px_150px_60px_60px]"
+const GRID_COLS_CLASSNAME = "grid-cols-[30px_minmax(160px,1fr)_96px_130px_58px_58px_66px_66px_66px]"
+const OPEN_RATE_SORT_FIELDS = new Set<SortField>(["dayOpenRate", "weekOpenRate", "monthOpenRate"])
 
 const SubscriptionFeedsSection = () => {
   const { t } = useTranslation("settings")
@@ -120,7 +134,7 @@ const SubscriptionFeedsSection = () => {
         setSortDirection(sortDirection === "asc" ? "desc" : "asc")
       } else {
         setSortField(field)
-        setSortDirection("asc")
+        setSortDirection(OPEN_RATE_SORT_FIELDS.has(field) ? "desc" : "asc")
       }
     },
     [sortField, sortDirection],
@@ -182,78 +196,98 @@ const SubscriptionFeedsSection = () => {
       </div>
 
       {filteredFeeds.length > 0 && (
-        <div className="mt-6 space-y-0.5">
-          {/* Header - Sticky */}
-          <div
-            className={clsx(
-              "sticky top-0 z-20 grid h-7 gap-3 border-b border-border bg-background/80 px-1 pb-1.5 text-xs font-medium text-text-secondary backdrop-blur-sm",
-              GRID_COLS_CLASSNAME,
-            )}
-          >
-            <div className="flex items-center justify-center">
-              <Checkbox size="sm" checked={isAllSelected} onCheckedChange={handleSelectAll} />
+        <div className="mt-6 overflow-x-auto pb-2">
+          <div className="min-w-[840px] space-y-0.5">
+            {/* Header - Sticky */}
+            <div
+              className={clsx(
+                "sticky top-0 z-20 grid h-7 gap-3 border-b border-border bg-background/80 px-1 pb-1.5 text-xs font-medium text-text-secondary backdrop-blur-sm",
+                GRID_COLS_CLASSNAME,
+              )}
+            >
+              <div className="flex items-center justify-center">
+                <Checkbox size="sm" checked={isAllSelected} onCheckedChange={handleSelectAll} />
+              </div>
+              <button
+                type="button"
+                className="text-left transition-colors hover:text-text"
+                onClick={() => handleSort("name")}
+              >
+                {t("feeds.tableHeaders.name")}
+                {sortField === "name" && (
+                  <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+              <button
+                type="button"
+                className="ml-4 text-left transition-colors hover:text-text"
+                onClick={() => handleSort("view")}
+              >
+                {t("feeds.tableHeaders.view")}
+                {sortField === "view" && (
+                  <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+              <button
+                className="text-center transition-colors hover:text-text"
+                onClick={() => handleSort("date")}
+                type="button"
+              >
+                {t("feeds.tableHeaders.date")}
+                {sortField === "date" && (
+                  <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+              <button
+                className="text-nowrap text-center transition-colors hover:text-text"
+                onClick={() => handleSort("subscriptionCount")}
+                type="button"
+              >
+                {t("feeds.tableHeaders.followers")}
+                {sortField === "subscriptionCount" && (
+                  <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+              <button
+                className="text-nowrap text-center transition-colors hover:text-text"
+                onClick={() => handleSort("updatesPerWeek")}
+                type="button"
+              >
+                {t("feeds.tableHeaders.updatesPerWeek")}
+                {sortField === "updatesPerWeek" && (
+                  <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+              <OpenStatsHeader
+                label={t("feeds.tableHeaders.openToday")}
+                active={sortField === "dayOpenRate"}
+                sortDirection={sortDirection}
+                onClick={() => handleSort("dayOpenRate")}
+              />
+              <OpenStatsHeader
+                label={t("feeds.tableHeaders.openWeek")}
+                active={sortField === "weekOpenRate"}
+                sortDirection={sortDirection}
+                onClick={() => handleSort("weekOpenRate")}
+              />
+              <OpenStatsHeader
+                label={t("feeds.tableHeaders.openMonth")}
+                active={sortField === "monthOpenRate"}
+                sortDirection={sortDirection}
+                onClick={() => handleSort("monthOpenRate")}
+              />
             </div>
-            <button
-              type="button"
-              className="text-left transition-colors hover:text-text"
-              onClick={() => handleSort("name")}
-            >
-              {t("feeds.tableHeaders.name")}
-              {sortField === "name" && (
-                <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
-              )}
-            </button>
-            <button
-              type="button"
-              className="ml-4 text-left transition-colors hover:text-text"
-              onClick={() => handleSort("view")}
-            >
-              {t("feeds.tableHeaders.view")}
-              {sortField === "view" && (
-                <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
-              )}
-            </button>
-            <button
-              className="text-center transition-colors hover:text-text"
-              onClick={() => handleSort("date")}
-              type="button"
-            >
-              {t("feeds.tableHeaders.date")}
-              {sortField === "date" && (
-                <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
-              )}
-            </button>
-            <button
-              className="text-nowrap text-center transition-colors hover:text-text"
-              onClick={() => handleSort("subscriptionCount")}
-              type="button"
-            >
-              {t("feeds.tableHeaders.followers")}
-              {sortField === "subscriptionCount" && (
-                <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
-              )}
-            </button>
-            <button
-              className="text-nowrap text-center transition-colors hover:text-text"
-              onClick={() => handleSort("updatesPerWeek")}
-              type="button"
-            >
-              {t("feeds.tableHeaders.updatesPerWeek")}
-              {sortField === "updatesPerWeek" && (
-                <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
-              )}
-            </button>
-          </div>
 
-          {/* Feed List */}
-          <div className="relative">
-            <SortedFeedsList
-              feeds={filteredFeeds}
-              sortField={sortField}
-              sortDirection={sortDirection}
-              selectedFeeds={selectedFeeds}
-              onSelect={handleSelectFeed}
-            />
+            {/* Feed List */}
+            <div className="relative">
+              <SortedFeedsList
+                feeds={filteredFeeds}
+                sortField={sortField}
+                sortDirection={sortDirection}
+                selectedFeeds={selectedFeeds}
+                onSelect={handleSelectFeed}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -354,11 +388,33 @@ const SortedFeedsList: FC<{
   onSelect: (feedId: string, checked: boolean) => void
 }> = ({ feeds, sortField, sortDirection, selectedFeeds, onSelect }) => {
   const scrollContainerElement = useScrollViewElement()
+  const { data: feedOpenStats } = useFeedOpenStats(feeds)
 
   const sortedFeedIds = useMemo(() => {
+    const sortableFeeds = [...feeds]
+    const sortByOpenStats = (period: FeedOpenStatsPeriod) => {
+      return sortableFeeds.sort((a, b) => {
+        const aStats = feedOpenStats?.[a]?.[period]
+        const bStats = feedOpenStats?.[b]?.[period]
+        const aRate = getOpenRate(aStats) ?? -1
+        const bRate = getOpenRate(bStats) ?? -1
+        const rateDiff = aRate - bRate
+
+        if (rateDiff !== 0) {
+          return sortDirection === "asc" ? rateDiff : -rateDiff
+        }
+
+        const openDiff = (aStats?.opened ?? 0) - (bStats?.opened ?? 0)
+        return sortDirection === "asc" ? openDiff : -openDiff
+      })
+    }
+
     switch (sortField) {
+      case "dayOpenRate": {
+        return sortByOpenStats("day")
+      }
       case "date": {
-        return feeds.sort((a, b) => {
+        return sortableFeeds.sort((a, b) => {
           const aSubscription = getSubscriptionByFeedId(a)
           const bSubscription = getSubscriptionByFeedId(b)
           if (!aSubscription || !bSubscription) return 0
@@ -371,7 +427,7 @@ const SortedFeedsList: FC<{
         })
       }
       case "view": {
-        return feeds.sort((a, b) => {
+        return sortableFeeds.sort((a, b) => {
           const aSubscription = getSubscriptionByFeedId(a)
           const bSubscription = getSubscriptionByFeedId(b)
           if (!aSubscription || !bSubscription) return 0
@@ -381,7 +437,7 @@ const SortedFeedsList: FC<{
         })
       }
       case "name": {
-        return feeds.sort((a, b) => {
+        return sortableFeeds.sort((a, b) => {
           const aSubscription = getSubscriptionByFeedId(a)
           const bSubscription = getSubscriptionByFeedId(b)
           if (!aSubscription || !bSubscription) return 0
@@ -396,7 +452,7 @@ const SortedFeedsList: FC<{
         })
       }
       case "updatesPerWeek": {
-        return feeds.sort((a, b) => {
+        return sortableFeeds.sort((a, b) => {
           const aSubscription = getSubscriptionByFeedId(a)
           const bSubscription = getSubscriptionByFeedId(b)
           if (!aSubscription || !bSubscription) return 0
@@ -408,8 +464,14 @@ const SortedFeedsList: FC<{
             : (bFeed.updatesPerWeek || 0) - (aFeed.updatesPerWeek || 0)
         })
       }
+      case "weekOpenRate": {
+        return sortByOpenStats("week")
+      }
+      case "monthOpenRate": {
+        return sortByOpenStats("month")
+      }
       case "subscriptionCount": {
-        return feeds.sort((a, b) => {
+        return sortableFeeds.sort((a, b) => {
           const aSubscription = getSubscriptionByFeedId(a)
           const bSubscription = getSubscriptionByFeedId(b)
           if (!aSubscription || !bSubscription) return 0
@@ -422,12 +484,12 @@ const SortedFeedsList: FC<{
         })
       }
     }
-  }, [feeds, sortDirection, sortField])
+  }, [feedOpenStats, feeds, sortDirection, sortField])
 
   const rowVirtualizer = useVirtualizer({
     count: sortedFeedIds.length,
     getScrollElement: () => scrollContainerElement,
-    estimateSize: () => 38, // Estimated height of each feed item (h-9 = 36px + 2px gap)
+    estimateSize: () => 46, // Estimated height of each feed item (h-11 = 44px + 2px gap)
     overscan: 5,
   })
 
@@ -472,7 +534,12 @@ const SortedFeedsList: FC<{
               transform: `translateY(${virtualRow.start}px)`,
             }}
           >
-            <FeedListItem id={feedId} selected={selectedFeeds.has(feedId)} onSelect={onSelect} />
+            <FeedListItem
+              id={feedId}
+              selected={selectedFeeds.has(feedId)}
+              stats={feedOpenStats?.[feedId]}
+              onSelect={onSelect}
+            />
           </div>
         )
       })}
@@ -513,10 +580,12 @@ const FeedListItem = memo(
   ({
     id,
     selected,
+    stats,
     onSelect,
   }: {
     id: string
     selected: boolean
+    stats?: FeedOpenStats
     onSelect: (feedId: string, checked: boolean) => void
   }) => {
     const subscription = useSubscriptionByFeedId(id)
@@ -534,8 +603,8 @@ const FeedListItem = memo(
         role="button"
         tabIndex={-1}
         className={clsx(
-          "group relative grid h-9 w-full items-center gap-3 rounded-md px-1.5 transition-all",
-          "content-visibility-auto contain-intrinsic-size-[auto_2.25rem]",
+          "group relative grid h-11 w-full items-center gap-3 rounded-md px-1.5 transition-all",
+          "content-visibility-auto contain-intrinsic-size-[auto_2.75rem]",
           GRID_COLS_CLASSNAME,
           "hover:bg-material-medium",
 
@@ -655,10 +724,89 @@ const FeedListItem = memo(
             <div className="text-[11px] text-text-secondary">--</div>
           )}
         </div>
+        <FeedOpenStatsCell value={stats?.day} />
+        <FeedOpenStatsCell value={stats?.week} />
+        <FeedOpenStatsCell value={stats?.month} />
       </div>
     )
   },
 )
+
+const getOpenRate = (value: FeedOpenStatsValue | undefined) => {
+  if (!value?.total) return null
+  return value.openedFromPublished / value.total
+}
+
+const formatOpenRate = (value: FeedOpenStatsValue | undefined) => {
+  const rate = getOpenRate(value)
+  if (rate === null) return "--"
+  return `${Math.round(rate * 100)}%`
+}
+
+const OpenStatsHeader = ({
+  label,
+  active,
+  sortDirection,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  sortDirection: SortDirection
+  onClick: () => void
+}) => {
+  const { t } = useTranslation("settings")
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          className="text-nowrap text-center transition-colors hover:text-text"
+          onClick={onClick}
+          type="button"
+        >
+          {label}
+          {active && <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>}
+        </button>
+      </TooltipTrigger>
+      <TooltipPortal>
+        <TooltipContent className="max-w-72">{t("feeds.openStats.headerTooltip")}</TooltipContent>
+      </TooltipPortal>
+    </Tooltip>
+  )
+}
+
+const FeedOpenStatsCell = ({ value }: { value?: FeedOpenStatsValue }) => {
+  const { t } = useTranslation("settings")
+  const opened = value?.opened ?? 0
+  const openedFromPublished = value?.openedFromPublished ?? 0
+  const total = value?.total ?? 0
+  const hasStats = opened > 0 || total > 0
+  const rate = formatOpenRate(value)
+
+  if (!hasStats) {
+    return <div className="text-center text-[11px] text-text-secondary">--</div>
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className="flex min-w-0 flex-col items-center justify-center leading-none">
+          <span className="text-[11px] font-medium tabular-nums text-text">{opened}</span>
+          <span className="mt-0.5 text-[10px] tabular-nums text-text-secondary">{rate}</span>
+        </div>
+      </TooltipTrigger>
+      <TooltipPortal>
+        <TooltipContent className="max-w-80">
+          {t("feeds.openStats.cellTooltip", {
+            opened,
+            openedFromPublished,
+            total,
+            rate,
+          })}
+        </TooltipContent>
+      </TooltipPortal>
+    </Tooltip>
+  )
+}
 
 const FeedClaimedSection = () => {
   const { t } = useTranslation("settings")

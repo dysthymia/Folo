@@ -1,10 +1,12 @@
 import { FeedViewType } from "@follow/constants"
 import { EntryService } from "@follow/database/services/entry"
+import type { EntryOpenSource } from "@follow/database/services/entry-open-stats"
+import { EntryOpenStatsService } from "@follow/database/services/entry-open-stats"
 import { isBizId } from "@follow/utils"
 import { cloneDeep } from "es-toolkit"
 import { debounce } from "es-toolkit/compat"
 
-import { api } from "../../context"
+import { api, queryClient } from "../../context"
 import type { Hydratable, Resetable } from "../../lib/base"
 import { createImmerSetter, createTransaction, createZustandStore } from "../../lib/helper"
 import { readNdjsonStream } from "../../lib/stream"
@@ -522,6 +524,29 @@ class EntryActions implements Hydratable, Resetable {
 }
 
 class EntrySyncServices {
+  async recordEntryOpen(entryId: EntryId, source: EntryOpenSource) {
+    const entry = getEntry(entryId)
+    if (!entry?.feedId) return
+
+    try {
+      await EntryOpenStatsService.recordOpen({
+        entryId: entry.id,
+        feedId: entry.feedId,
+        publishedAt: entry.publishedAt,
+        source,
+      })
+    } catch (error) {
+      console.error("Failed to record entry open", error)
+      return
+    }
+
+    try {
+      void queryClient().invalidateQueries({ queryKey: ["feed", "open-stats"] })
+    } catch {
+      // Query client is not always available in isolated store tests.
+    }
+  }
+
   async fetchEntries(props: FetchEntriesProps) {
     const {
       feedId,

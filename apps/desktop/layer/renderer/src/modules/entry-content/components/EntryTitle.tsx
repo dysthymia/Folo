@@ -1,9 +1,10 @@
 import { useEntry } from "@follow/store/entry/hooks"
+import { entrySyncServices } from "@follow/store/entry/store"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { useEntryTranslation } from "@follow/store/translation/hooks"
 import { cn, formatEstimatedMins, formatTimeToSeconds } from "@follow/utils"
-import { useMemo } from "react"
+import { useCallback, useMemo } from "react"
 import { titleCase } from "title-case"
 import { useShallow } from "zustand/shallow"
 
@@ -97,8 +98,16 @@ export const EntryTitle = ({
   )
 
   const LinkTarget = populatedFullHref ? "a" : "span"
+  const handleExternalOpen = useCallback(() => {
+    void entrySyncServices.recordEntryOpen(entryId, "external")
+  }, [entryId])
   const linkProps = populatedFullHref
-    ? { href: populatedFullHref, target: "_blank", rel: "noopener noreferrer" }
+    ? {
+        href: populatedFullHref,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        onClick: handleExternalOpen,
+      }
     : {}
   if (!entry) return null
 

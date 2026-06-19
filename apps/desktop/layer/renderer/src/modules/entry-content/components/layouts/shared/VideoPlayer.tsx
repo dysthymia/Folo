@@ -1,6 +1,7 @@
 import { isMobile } from "@follow/components/hooks/useMobile.js"
 import { IN_ELECTRON } from "@follow/shared/constants"
 import { useEntry } from "@follow/store/entry/hooks"
+import { entrySyncServices } from "@follow/store/entry/store"
 import { stopPropagation } from "@follow/utils/dom"
 import { formatDuration } from "@follow/utils/duration"
 import { transformVideoUrl } from "@follow/utils/url-for-video"
@@ -109,6 +110,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       className={cn("w-full cursor-pointer", className)}
       onClick={(e) => {
         if (isMobile() && entry.url) {
+          void entrySyncServices.recordEntryOpen(entryId, "external")
           window.open(entry.url, "_blank")
           e.stopPropagation()
           return

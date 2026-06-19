@@ -3,6 +3,7 @@ import { and, between, eq, inArray, lt, or } from "drizzle-orm"
 import { db } from "../db"
 import { entriesTable } from "../schemas"
 import type { EntrySchema } from "../schemas/types"
+import { EntryOpenStatsService } from "./entry-open-stats"
 import type { Resetable } from "./internal/base"
 import { conflictUpdateAllExcept } from "./internal/utils"
 
@@ -18,6 +19,7 @@ interface InsertedBeforeTimeRangeFilter {
 class EntryServiceStatic implements Resetable {
   async reset() {
     await db.delete(entriesTable).execute()
+    await EntryOpenStatsService.reset()
   }
 
   async upsertMany(entries: EntrySchema[]) {
@@ -29,6 +31,7 @@ class EntryServiceStatic implements Resetable {
         target: [entriesTable.id],
         set: conflictUpdateAllExcept(entriesTable, ["id"]),
       })
+    await EntryOpenStatsService.upsertSeenEntries(entries)
   }
 
   async patch(entry: Partial<EntrySchema> & { id: string }) {

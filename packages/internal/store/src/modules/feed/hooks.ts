@@ -1,3 +1,4 @@
+import { EntryOpenStatsService } from "@follow/database/services/entry-open-stats"
 import { jotaiStore } from "@follow/utils/jotai"
 import { isBizId } from "@follow/utils/utils"
 import { useQuery } from "@tanstack/react-query"
@@ -9,6 +10,12 @@ import { FEED_COLLECTION_LIST, ROUTE_FEED_PENDING } from "../../constants/app"
 import type { GeneralQueryOptions } from "../../types"
 import { feedSyncServices, useFeedStore } from "./store"
 import type { FeedModel } from "./types"
+
+export type {
+  FeedOpenStats,
+  FeedOpenStatsPeriod,
+  FeedOpenStatsValue,
+} from "@follow/database/services/entry-open-stats"
 
 const defaultSelector = (feed: FeedModel) => feed
 export function useFeedById(id: string | undefined | null): FeedModel | undefined
@@ -104,6 +111,21 @@ export const usePrefetchFeedAnalytics = (id: string | string[], options?: Genera
     ...options,
     queryKey: ["feed", "analytics", id],
     queryFn: () => feedSyncServices.fetchAnalytics(id),
+  })
+}
+
+export const feedOpenStatsQueryKey = (feedIds: string[]) =>
+  ["feed", "open-stats", [...feedIds].sort()] as const
+
+export const useFeedOpenStats = (feedIds: string[] | undefined, options?: GeneralQueryOptions) => {
+  const stableFeedIds = useMemo(() => (feedIds ? [...feedIds].sort() : []), [feedIds])
+
+  return useQuery({
+    ...options,
+    queryKey: feedOpenStatsQueryKey(stableFeedIds),
+    queryFn: () => EntryOpenStatsService.getStatsByFeedIds(stableFeedIds),
+    enabled: stableFeedIds.length > 0 && options?.enabled !== false,
+    staleTime: 1000 * 30,
   })
 }
 

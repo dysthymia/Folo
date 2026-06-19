@@ -4,6 +4,7 @@ import { getMousePosition } from "@follow/components/hooks/useMouse.js"
 import { ActionButton } from "@follow/components/ui/button/action-button.js"
 import { FeedViewType } from "@follow/constants"
 import { useEntry } from "@follow/store/entry/hooks"
+import { entrySyncServices } from "@follow/store/entry/store"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
@@ -151,6 +152,7 @@ export const EntryItemWrapper: FC<
       if (!entry?.id) return
 
       if (!populatedFullHref) return
+      void entrySyncServices.recordEntryOpen(entry.id, "external")
       window.open(populatedFullHref, "_blank", "noopener,noreferrer")
     },
     [entry?.id, entry?.url, populatedFullHref],
@@ -163,9 +165,10 @@ export const EntryItemWrapper: FC<
       e.stopPropagation()
       if (!populatedFullHref) return
 
+      void entrySyncServices.recordEntryOpen(entryId, "external")
       window.open(populatedFullHref, "_blank", "noopener,noreferrer")
     },
-    [populatedFullHref],
+    [entryId, populatedFullHref],
   )
 
   const handleClick = useCallback(

@@ -214,6 +214,7 @@ export const useRegisterEntryCommands = () => {
             toast.error("Failed to open in browser: url is not available", { duration: 3000 })
             return
           }
+          void entrySyncServices.recordEntryOpen(entry.id, "external")
           window.open(entry.url, "_blank")
         },
       },
