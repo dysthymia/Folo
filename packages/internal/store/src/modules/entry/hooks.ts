@@ -17,6 +17,11 @@ import {
   getEntryIsInboxSelector,
   getHasEntrySelector,
 } from "./getter"
+import {
+  filterSemanticDuplicateEntryIds,
+  useSemanticDedupeProcessor,
+  useSemanticDedupeRevision,
+} from "./semantic-dedupe"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
 import { dedupeEntryIdsByTitle } from "./utils"
@@ -74,6 +79,7 @@ export const useEntriesQuery = (
 
   const fetchUnread = unreadOnly
   const feedUnreadDirty = useFeedUnreadIsDirty((feedId as string) || "")
+  const semanticDedupeRevision = useSemanticDedupeRevision()
 
   const isPop =
     "history" in globalThis && "isPop" in globalThis.history && !!globalThis.history.isPop
@@ -145,7 +151,7 @@ export const useEntriesQuery = (
     [queryFetchNextPage],
   )
 
-  const entriesIds = useMemo(() => {
+  const fetchedEntryIds = useMemo(() => {
     if (!query.data || query.isLoading || query.isError) {
       return []
     }
@@ -174,6 +180,13 @@ export const useEntriesQuery = (
       getTitle: (entryId) => titleByEntryId.get(entryId),
     })
   }, [query.data, query.isLoading, query.isError, hidePrivateSubscriptionsInTimeline])
+
+  useSemanticDedupeProcessor(fetchedEntryIds)
+
+  const entriesIds = useMemo(() => {
+    void semanticDedupeRevision
+    return filterSemanticDuplicateEntryIds(fetchedEntryIds)
+  }, [fetchedEntryIds, semanticDedupeRevision])
 
   useSyncUnreadWhenUnMatch(entriesIds)
 

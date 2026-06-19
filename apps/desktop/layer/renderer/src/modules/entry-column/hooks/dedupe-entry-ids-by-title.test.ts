@@ -6,6 +6,12 @@ describe("dedupeEntryIdsByTitle", () => {
     expect(getEntryTitleDedupeKey("  Hello   World  ")).toBe("hello world")
   })
 
+  it("normalizes punctuation as title separators", () => {
+    expect(getEntryTitleDedupeKey("Threat\uFF0C hidden wallet")).toBe(
+      getEntryTitleDedupeKey("Threat\uFF1A hidden wallet"),
+    )
+  })
+
   it("keeps the first entry with the same normalized title", () => {
     const titles: Record<string, string | null | undefined> = {
       "entry-1": "Breaking News",

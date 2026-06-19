@@ -4,7 +4,12 @@ import { FEED_COLLECTION_LIST, ROUTE_FEED_PENDING } from "../../constants/app"
 import type { UseEntriesReturn } from "./types"
 
 export const getEntryTitleDedupeKey = (title?: string | null) => {
-  const normalizedTitle = title?.trim().replaceAll(/\s+/g, " ").toLowerCase()
+  const normalizedTitle = title
+    ?.trim()
+    .replaceAll(/\p{P}+/gu, " ")
+    .replaceAll(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
   return normalizedTitle || null
 }
 

@@ -9,6 +9,7 @@ import { DockService } from "./services/dock"
 import { IntegrationService } from "./services/integration"
 import { MenuService } from "./services/menu"
 import { ReaderService } from "./services/reader"
+import { SemanticDedupeService } from "./services/semantic-dedupe"
 import { SettingService } from "./services/setting"
 
 // Initialize all services
@@ -20,6 +21,7 @@ const services = createServices([
   DockService,
   MenuService,
   ReaderService,
+  SemanticDedupeService,
   SettingService,
   IntegrationService,
 ])
