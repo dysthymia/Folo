@@ -52,9 +52,7 @@ export const SemanticDedupeSection = () => {
               type="text"
               value={settings.semanticDedupeModel}
             />
-            <SettingDescription className="-mt-2">
-              {t("semantic_dedupe.model.description")}
-            </SettingDescription>
+            <SettingDescription>{t("semantic_dedupe.model.description")}</SettingDescription>
           </div>
 
           <SettingTabbedSegment
