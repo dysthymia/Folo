@@ -6,7 +6,7 @@
   "scripts": {
     "android": "expo run:android",
     "bump": "vv",
-    "dev": "npm run start",
+    "dev": "pnpm run start",
     "e2e:android": "sh ./e2e/run-maestro.sh android",
     "e2e:bootstrap:ios:auth": "tsx scripts/e2e-prod-ios-auth-bootstrap.ts",
     "e2e:bootstrap:ios:prod-auth": "pnpm run e2e:bootstrap:ios:auth",

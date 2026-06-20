@@ -15,7 +15,7 @@
     "build:packages": "turbo run build --filter=\"./packages/**/*\"",
     "build:web": "turbo run Folo#build:web",
     "dedupe:locales": "eslint --fix locales/**",
-    "depcheck": "npx depcheck --quiet",
+    "depcheck": "pnpm dlx depcheck --quiet",
     "dev:web": "turbo run @follow/web#dev @follow/ssr#dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -81,7 +81,7 @@
       "bash scripts/increment-build-id.sh"
     ],
     "locales/**/*.json": [
-      "npm run dedupe:locales",
+      "pnpm run dedupe:locales",
       "git add locales"
     ]
   }

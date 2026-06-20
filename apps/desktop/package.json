@@ -24,7 +24,7 @@
     "build:web": "rm -rf out/web && cross-env WEB_BUILD=1 vite build",
     "bump": "vv --minor",
     "dedupe:locales": "eslint --fix locales/**/*.json",
-    "depcheck": "npx depcheck --quiet",
+    "depcheck": "pnpm dlx depcheck --quiet",
     "dev": "turbo run @follow/web#dev @follow/ssr#dev",
     "dev:debug": "export DEBUG=true && vite --debug",
     "dev:electron": "electron-vite dev",
