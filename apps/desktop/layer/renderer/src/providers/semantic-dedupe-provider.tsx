@@ -17,6 +17,8 @@ import { useEffect, useState } from "react"
 import { ipcServices } from "~/lib/client"
 
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
+const SEMANTIC_DEDUPE_REQUESTED_MODEL = "GPT-5.3-Codex-Spark"
+const SEMANTIC_DEDUPE_REASONING_EFFORT = "low"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -92,7 +94,22 @@ const parseSemanticDedupeResponse = (
   }
 }
 
+const recordPendingEvaluatorRun = (candidateCount: number) => {
+  semanticDedupeActions.recordEvaluatorRun({
+    candidateCount,
+    command: null,
+    durationMs: null,
+    fallbackUsed: false,
+    inputCandidateCount: candidateCount,
+    reasoningEffort: SEMANTIC_DEDUPE_REASONING_EFFORT,
+    requestedModel: SEMANTIC_DEDUPE_REQUESTED_MODEL,
+    usedModel: "running",
+  })
+}
+
 const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCandidate[]) => {
+  recordPendingEvaluatorRun(candidates.length)
+
   const response = await fetch(SEMANTIC_DEDUPE_DEV_ENDPOINT, {
     body: JSON.stringify({ candidates }),
     headers: {
@@ -128,6 +145,8 @@ export const SemanticDedupeProvider = () => {
     if (window.electron && semanticDedupeService) {
       return registerSemanticDuplicateEvaluator(
         async (candidates: SemanticDuplicateCandidate[]) => {
+          recordPendingEvaluatorRun(candidates.length)
+
           const result = await semanticDedupeService.evaluateCandidates({ candidates })
           const debug = isRecord(result) ? parseEvaluatorRunInfo(result.debug) : null
           if (debug) {

@@ -294,6 +294,10 @@ export const semanticDedupeActions = {
       state.debug.lastError = message
       state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
       state.debug.lastRunFinishedAt = finishedAt
+      if (state.debug.lastEvaluatorRun?.usedModel === "running") {
+        state.debug.lastEvaluatorRun.durationMs = state.debug.lastRunDurationMs
+        state.debug.lastEvaluatorRun.usedModel = "failed"
+      }
       state.debug.totalErrors += 1
     })
   },
