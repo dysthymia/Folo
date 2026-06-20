@@ -97,13 +97,13 @@ const parseSemanticDedupeResponse = (
 const recordPendingEvaluatorRun = (candidateCount: number) => {
   semanticDedupeActions.recordEvaluatorRun({
     candidateCount,
-    command: null,
+    command: "running",
     durationMs: null,
     fallbackUsed: false,
     inputCandidateCount: candidateCount,
     reasoningEffort: SEMANTIC_DEDUPE_REASONING_EFFORT,
     requestedModel: SEMANTIC_DEDUPE_REQUESTED_MODEL,
-    usedModel: "running",
+    usedModel: SEMANTIC_DEDUPE_REQUESTED_MODEL,
   })
 }
 
@@ -218,6 +218,7 @@ const SemanticDedupeDebugPanel = () => {
       ownerKey: state.ownerKey,
       pendingCount: Object.keys(state.pendingPairKeys).length,
       revision: state.revision,
+      settledCount: Object.keys(state.settledEntryIds).length,
       confidentDuplicateCount,
     }
   })
@@ -281,6 +282,7 @@ const SemanticDedupeDebugPanel = () => {
               />
               <DebugMetric label="pending" value={snapshot.pendingCount.toString()} />
               <DebugMetric label="queued" value={debug.queuedEntryCount.toString()} />
+              <DebugMetric label="settled" value={snapshot.settledCount.toString()} />
               <DebugMetric
                 label="decisions"
                 value={`${snapshot.decisionCount} (${snapshot.confidentDuplicateCount})`}

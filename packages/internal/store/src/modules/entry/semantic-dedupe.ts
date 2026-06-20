@@ -107,6 +107,7 @@ interface SemanticDedupeStore {
   ownerKey: string | null
   pendingPairKeys: Record<string, true>
   revision: number
+  settledEntryIds: Record<string, true>
 }
 
 const createDefaultDebugState = (): SemanticDedupeDebugState => ({
@@ -137,6 +138,7 @@ const defaultState: SemanticDedupeStore = {
   ownerKey: null,
   pendingPairKeys: {},
   revision: 0,
+  settledEntryIds: {},
 }
 
 const getLocalStorage = () => {
@@ -169,31 +171,60 @@ const normalizeDecision = (value: unknown): SemanticDuplicateDecision | null => 
   }
 }
 
-const readDecisionsFromStorage = (ownerKey: string): Record<string, SemanticDuplicateDecision> => {
+const normalizeSettledEntryIds = (value: unknown): Record<string, true> => {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value
+        .filter((entryId): entryId is string => typeof entryId === "string")
+        .map((entryId) => [entryId, true] as const),
+    )
+  }
+
+  if (!isRecord(value)) return {}
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([entryId, settled]) => typeof entryId === "string" && settled === true)
+      .map(([entryId]) => [entryId, true] as const),
+  )
+}
+
+const readStateFromStorage = (
+  ownerKey: string,
+): Pick<SemanticDedupeStore, "decisions" | "settledEntryIds"> => {
   const storage = getLocalStorage()
-  if (!storage) return {}
+  if (!storage) {
+    return { decisions: {}, settledEntryIds: {} }
+  }
 
   const raw = storage.getItem(getStorageKey(ownerKey))
-  if (!raw) return {}
+  if (!raw) {
+    return { decisions: {}, settledEntryIds: {} }
+  }
 
   try {
     const parsed = JSON.parse(raw) as unknown
-    const decisions = isRecord(parsed) ? parsed.decisions : parsed
-    if (!isRecord(decisions)) return {}
+    const decisions = isRecord(parsed) && "decisions" in parsed ? parsed.decisions : parsed
 
-    return Object.fromEntries(
-      Object.entries(decisions)
-        .map(([key, decision]) => [key, normalizeDecision(decision)] as const)
-        .filter((entry): entry is readonly [string, SemanticDuplicateDecision] => !!entry[1]),
-    )
+    return {
+      decisions: isRecord(decisions)
+        ? Object.fromEntries(
+            Object.entries(decisions)
+              .map(([key, decision]) => [key, normalizeDecision(decision)] as const)
+              .filter((entry): entry is readonly [string, SemanticDuplicateDecision] => !!entry[1]),
+          )
+        : {},
+      settledEntryIds: isRecord(parsed) ? normalizeSettledEntryIds(parsed.settledEntryIds) : {},
+    }
   } catch {
-    return {}
+    return { decisions: {}, settledEntryIds: {} }
   }
 }
 
-const writeDecisionsToStorage = (
+const writeStateToStorage = (
   ownerKey: string,
   decisions: Record<string, SemanticDuplicateDecision>,
+  settledEntryIds: Record<string, true>,
 ) => {
   const storage = getLocalStorage()
   if (!storage) return
@@ -202,6 +233,7 @@ const writeDecisionsToStorage = (
     getStorageKey(ownerKey),
     JSON.stringify({
       decisions,
+      settledEntryIds,
       updatedAt: new Date().toISOString(),
       version: 1,
     }),
@@ -255,10 +287,15 @@ export const semanticDedupeActions = {
   hydrate: (ownerKey: string | undefined) => {
     queuedEntryIds = null
     lastFailedEntryIdsKey = null
+    const persistedState = ownerKey
+      ? readStateFromStorage(ownerKey)
+      : { decisions: {}, settledEntryIds: {} }
+
     set((state) => {
       state.ownerKey = ownerKey ?? null
-      state.decisions = ownerKey ? readDecisionsFromStorage(ownerKey) : {}
+      state.decisions = persistedState.decisions
       state.pendingPairKeys = {}
+      state.settledEntryIds = persistedState.settledEntryIds
       state.debug.lastEvaluatorRun = null
       state.debug.queuedEntryCount = 0
       state.isHydrated = true
@@ -294,9 +331,9 @@ export const semanticDedupeActions = {
       state.debug.lastError = message
       state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
       state.debug.lastRunFinishedAt = finishedAt
-      if (state.debug.lastEvaluatorRun?.usedModel === "running") {
+      if (state.debug.lastEvaluatorRun?.command === "running") {
         state.debug.lastEvaluatorRun.durationMs = state.debug.lastRunDurationMs
-        state.debug.lastEvaluatorRun.usedModel = "failed"
+        state.debug.lastEvaluatorRun.command = "failed"
       }
       state.debug.totalErrors += 1
     })
@@ -332,6 +369,19 @@ export const semanticDedupeActions = {
     set((state) => {
       state.debug.lastQueuedAt = new Date().toISOString()
       state.debug.queuedEntryCount = entryCount
+    })
+  },
+  markEntriesSettled: (entryIds: string[]) => {
+    if (entryIds.length === 0) return
+
+    set((state) => {
+      for (const entryId of entryIds) {
+        state.settledEntryIds[entryId] = true
+      }
+
+      if (state.ownerKey) {
+        writeStateToStorage(state.ownerKey, state.decisions, state.settledEntryIds)
+      }
     })
   },
   recordProcessingStarted: (candidates: SemanticDuplicateCandidate[]) => {
@@ -409,7 +459,7 @@ export const semanticDedupeActions = {
       }
 
       if (state.ownerKey) {
-        writeDecisionsToStorage(state.ownerKey, state.decisions)
+        writeStateToStorage(state.ownerKey, state.decisions, state.settledEntryIds)
       }
       state.revision += 1
     })
@@ -545,6 +595,9 @@ export const getSemanticDuplicateCandidates = (
       const pairKey = getPairKey(left.context.id, right.context.id)
 
       if (state.decisions[pairKey] || state.pendingPairKeys[pairKey]) continue
+      if (state.settledEntryIds[left.context.id] && state.settledEntryIds[right.context.id]) {
+        continue
+      }
       if (!isWithinCandidateWindow(leftEntry, rightEntry)) continue
 
       const { isCandidate, similarity } = shouldEvaluateCandidate(left.context, right.context)
@@ -637,6 +690,7 @@ const processQueuedSemanticDedupeEntries = async () => {
   const candidates = getSemanticDuplicateCandidates(entryIds)
   semanticDedupeActions.recordScan(entryIds.length, candidates)
   if (candidates.length === 0) {
+    semanticDedupeActions.markEntriesSettled(entryIds)
     semanticDedupeActions.recordProcessingQueued(0)
     return
   }
@@ -675,9 +729,23 @@ const enqueueSemanticDedupeEntries = (entryIds: string[]) => {
   const entryIdsKey = entryIds.join("\n")
   if (entryIdsKey === lastFailedEntryIdsKey) return
 
-  queuedEntryIds = entryIds
-  semanticDedupeActions.recordProcessingQueued(entryIds.length)
+  queuedEntryIds = mergeEntryIds(entryIds, queuedEntryIds)
+  semanticDedupeActions.recordProcessingQueued(queuedEntryIds.length)
   void processQueuedSemanticDedupeEntries()
+}
+
+const mergeEntryIds = (nextEntryIds: string[], existingEntryIds: string[] | null) => {
+  if (!existingEntryIds) return nextEntryIds
+
+  const seenEntryIds = new Set(nextEntryIds)
+  return [
+    ...nextEntryIds,
+    ...existingEntryIds.filter((entryId) => {
+      if (seenEntryIds.has(entryId)) return false
+      seenEntryIds.add(entryId)
+      return true
+    }),
+  ]
 }
 
 export const useSemanticDedupeProcessor = (entryIds: string[]) => {

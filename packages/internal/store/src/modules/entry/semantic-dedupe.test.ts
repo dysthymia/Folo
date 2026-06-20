@@ -92,6 +92,7 @@ describe("semantic duplicate entry marking", () => {
       ownerKey: "user-1",
       pendingPairKeys: {},
       revision: 0,
+      settledEntryIds: {},
     })
   })
 
@@ -189,6 +190,59 @@ describe("semantic duplicate entry marking", () => {
       keepEntryId: newestEntry.id,
       testEntryId: newestCandidate.id,
     })
+  })
+
+  it("skips settled old pairs while still comparing new entries with settled entries", () => {
+    const newEntry = createEntry({
+      description: "Chainlink non-circulating supply wallet transferred LINK to Binance.",
+      id: "entry-new",
+      publishedAt: "2026-06-19T12:03:00.000Z",
+      title: "Chainlink wallet transfers LINK to Binance",
+    })
+    const settledEntry = createEntry({
+      description: "Chainlink non-circulating supply wallet deposited LINK into Binance.",
+      id: "entry-settled-a",
+      publishedAt: "2026-06-19T11:03:00.000Z",
+      title: "Chainlink wallet deposits LINK to Binance",
+    })
+    const settledDuplicate = createEntry({
+      description: "Chainlink non-circulating supply wallets deposited LINK into Binance.",
+      id: "entry-settled-b",
+      publishedAt: "2026-06-19T11:02:00.000Z",
+      title: "Chainlink wallet deposits LINK to Binance",
+    })
+
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: {
+        [newEntry.id]: newEntry,
+        [settledEntry.id]: settledEntry,
+        [settledDuplicate.id]: settledDuplicate,
+      },
+      entryIdSet: new Set([newEntry.id, settledEntry.id, settledDuplicate.id]),
+    }))
+    useSemanticDedupeStore.setState({
+      settledEntryIds: {
+        [settledEntry.id]: true,
+        [settledDuplicate.id]: true,
+      },
+    })
+
+    expect(getSemanticDuplicateCandidates([settledEntry.id, settledDuplicate.id])).toHaveLength(0)
+
+    const candidates = getSemanticDuplicateCandidates([
+      newEntry.id,
+      settledEntry.id,
+      settledDuplicate.id,
+    ])
+
+    expect(
+      candidates.some(
+        (candidate) =>
+          candidate.keepEntryId === newEntry.id &&
+          [settledEntry.id, settledDuplicate.id].includes(candidate.testEntryId),
+      ),
+    ).toBe(true)
   })
 
   it("bumps revision when the evaluator changes", () => {
