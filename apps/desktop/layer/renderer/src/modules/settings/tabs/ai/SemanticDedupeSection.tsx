@@ -12,11 +12,17 @@ import {
   SettingTabbedSegment,
 } from "../../control"
 
-const reasoningEffortOptions: SemanticDedupeReasoningEffort[] = ["minimal", "low", "medium", "high"]
+const reasoningEffortOptions: SemanticDedupeReasoningEffort[] = ["low", "medium", "high", "xhigh"]
+
+const normalizeReasoningEffort = (value: string): SemanticDedupeReasoningEffort =>
+  reasoningEffortOptions.includes(value as SemanticDedupeReasoningEffort)
+    ? (value as SemanticDedupeReasoningEffort)
+    : "low"
 
 export const SemanticDedupeSection = () => {
   const { t } = useTranslation("ai")
   const settings = useAISettingValue()
+  const reasoningEffort = normalizeReasoningEffort(settings.semanticDedupeReasoningEffort)
   const effortValues = useMemo(
     () =>
       reasoningEffortOptions.map((value) => ({
@@ -61,7 +67,7 @@ export const SemanticDedupeSection = () => {
             onValueChanged={(value) =>
               setAISetting("semanticDedupeReasoningEffort", value as SemanticDedupeReasoningEffort)
             }
-            value={settings.semanticDedupeReasoningEffort}
+            value={reasoningEffort}
             values={effortValues}
           />
 

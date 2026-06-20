@@ -235,7 +235,7 @@ export interface AISettings {
   byok: UserByokSettings
 }
 
-export type SemanticDedupeReasoningEffort = "minimal" | "low" | "medium" | "high"
+export type SemanticDedupeReasoningEffort = "low" | "medium" | "high" | "xhigh"
 
 export type ByokProviderName = "openai" | "google" | "vercel-ai-gateway" | "openrouter"
 

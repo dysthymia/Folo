@@ -72,6 +72,7 @@ interface CodexSemanticDedupeOutput {
 
 const REQUESTED_CODEX_MODEL = "gpt-5.3-codex-spark"
 const DEFAULT_CODEX_REASONING_EFFORT = "low"
+const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const
 const CODEX_TIMEOUT = 20_000
 const MAX_CANDIDATES_PER_REQUEST = 16
 const MAX_OUTPUT_BYTES = 1024 * 1024
@@ -135,10 +136,23 @@ const unique = <T>(items: T[]) => Array.from(new Set(items))
 const getRequestedCodexModel = (options?: SemanticDedupeCodexOptions) =>
   options?.model?.trim() || process.env.FOLO_SEMANTIC_DEDUPE_CODEX_MODEL || REQUESTED_CODEX_MODEL
 
+const normalizeCodexReasoningEffort = (reasoningEffort: string | null | undefined) => {
+  const normalizedReasoningEffort = reasoningEffort?.trim()
+
+  if (!normalizedReasoningEffort) return DEFAULT_CODEX_REASONING_EFFORT
+  if (normalizedReasoningEffort === "minimal") return "low"
+
+  return CODEX_REASONING_EFFORTS.includes(
+    normalizedReasoningEffort as (typeof CODEX_REASONING_EFFORTS)[number],
+  )
+    ? normalizedReasoningEffort
+    : DEFAULT_CODEX_REASONING_EFFORT
+}
+
 const getCodexReasoningEffort = (options?: SemanticDedupeCodexOptions) =>
-  options?.reasoningEffort?.trim() ||
-  process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT ||
-  DEFAULT_CODEX_REASONING_EFFORT
+  normalizeCodexReasoningEffort(
+    options?.reasoningEffort || process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT,
+  )
 
 const getCodexCandidates = () =>
   unique(

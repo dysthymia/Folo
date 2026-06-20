@@ -221,7 +221,7 @@
   "semantic_dedupe.effort.label": "Reasoning effort",
   "semantic_dedupe.effort.low": "Low",
   "semantic_dedupe.effort.medium": "Medium",
-  "semantic_dedupe.effort.minimal": "Minimal",
+  "semantic_dedupe.effort.xhigh": "Extra High",
   "semantic_dedupe.enabled.description": "Use AI to detect semantically duplicate timeline items and keep only the best item visible.",
   "semantic_dedupe.enabled.label": "Enable AI deduplication",
   "semantic_dedupe.model.description": "Codex model used for semantic dedupe. Leave the default unless you know another model is available.",

@@ -221,7 +221,7 @@
   "semantic_dedupe.effort.label": "推論強度",
   "semantic_dedupe.effort.low": "低",
   "semantic_dedupe.effort.medium": "中",
-  "semantic_dedupe.effort.minimal": "最小",
+  "semantic_dedupe.effort.xhigh": "超高",
   "semantic_dedupe.enabled.description": "AI を使ってタイムライン内の意味的に重複する項目を検出し、最適な項目だけを表示します。",
   "semantic_dedupe.enabled.label": "AI 重複排除を有効化",
   "semantic_dedupe.model.description": "意味的重複排除に使う Codex モデルです。他のモデルが利用できる場合を除き、既定値のままにしてください。",

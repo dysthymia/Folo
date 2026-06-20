@@ -221,7 +221,7 @@
   "semantic_dedupe.effort.label": "Effort de raisonnement",
   "semantic_dedupe.effort.low": "Faible",
   "semantic_dedupe.effort.medium": "Moyen",
-  "semantic_dedupe.effort.minimal": "Minimal",
+  "semantic_dedupe.effort.xhigh": "Très élevé",
   "semantic_dedupe.enabled.description": "Utiliser l'IA pour détecter les éléments sémantiquement dupliqués dans la timeline et ne garder visible que le meilleur élément.",
   "semantic_dedupe.enabled.label": "Activer la déduplication IA",
   "semantic_dedupe.model.description": "Modèle Codex utilisé pour la déduplication sémantique. Conservez la valeur par défaut sauf si vous savez qu'un autre modèle est disponible.",
