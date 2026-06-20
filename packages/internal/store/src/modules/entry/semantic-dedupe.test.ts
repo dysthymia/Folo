@@ -4,10 +4,12 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { useFeedStore } from "../feed/store"
 import type { FeedModel } from "../feed/types"
 import { useSubscriptionStore } from "../subscription/store"
+import type { SemanticDuplicateCandidate } from "./semantic-dedupe"
 import {
   getSemanticDuplicateCandidates,
   getSemanticDuplicateEntryRole,
   registerSemanticDuplicateEvaluator,
+  semanticDedupeActions,
   useSemanticDedupeStore,
 } from "./semantic-dedupe"
 import { useEntryStore } from "./store"
@@ -142,14 +144,87 @@ describe("semantic duplicate entry marking", () => {
 
   it("bumps revision when the evaluator changes", () => {
     expect(useSemanticDedupeStore.getState().revision).toBe(0)
+    expect(useSemanticDedupeStore.getState().debug.evaluatorSource).toBe("none")
 
-    const dispose = registerSemanticDuplicateEvaluator(async () => [])
+    const dispose = registerSemanticDuplicateEvaluator(async () => [], "dev-server")
 
     expect(useSemanticDedupeStore.getState().revision).toBe(1)
+    expect(useSemanticDedupeStore.getState().debug.evaluatorSource).toBe("dev-server")
 
     dispose()
 
     expect(useSemanticDedupeStore.getState().revision).toBe(2)
+    expect(useSemanticDedupeStore.getState().debug.evaluatorSource).toBe("none")
+  })
+
+  it("tracks processing debug state", () => {
+    const candidate: SemanticDuplicateCandidate = {
+      entries: [
+        {
+          description: "First description",
+          feedTitle: "Feed A",
+          id: "entry-a",
+          publishedAt: "2026-06-19T12:00:00.000Z",
+          title: "First title",
+          urlHost: "example.com",
+        },
+        {
+          description: "Second description",
+          feedTitle: "Feed B",
+          id: "entry-b",
+          publishedAt: "2026-06-19T12:01:00.000Z",
+          title: "Second title",
+          urlHost: "example.org",
+        },
+      ],
+      keepEntryId: "entry-a",
+      pairKey: "entry-a::entry-b",
+      similarity: 0.9,
+      testEntryId: "entry-b",
+    }
+
+    semanticDedupeActions.recordScan(10, [candidate])
+    semanticDedupeActions.recordProcessingStarted([candidate])
+
+    expect(useSemanticDedupeStore.getState().debug).toMatchObject({
+      isProcessing: true,
+      lastCandidateCount: 1,
+      lastScannedEntryCount: 10,
+      recentCandidates: [
+        {
+          pairKey: "entry-a::entry-b",
+          similarity: 0.9,
+          titles: ["First title", "Second title"],
+        },
+      ],
+    })
+
+    semanticDedupeActions.recordProcessingFinished([
+      {
+        confidence: 0.91,
+        duplicate: true,
+        hideEntryId: "entry-b",
+        keepEntryId: "entry-a",
+        pairKey: "entry-a::entry-b",
+        reason: "Same event",
+      },
+    ])
+
+    expect(useSemanticDedupeStore.getState().debug).toMatchObject({
+      isProcessing: false,
+      lastDuplicateCount: 1,
+      lastEvaluationCount: 1,
+      lastError: null,
+      recentEvaluations: [
+        {
+          confidence: 0.91,
+          duplicate: true,
+          pairKey: "entry-a::entry-b",
+          reason: "Same event",
+        },
+      ],
+      totalRuns: 1,
+    })
   })
 
   it("marks confident duplicate and kept entries without filtering them", () => {

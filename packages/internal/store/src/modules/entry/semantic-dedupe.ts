@@ -46,6 +46,8 @@ export type SemanticDuplicateEvaluator = (
   candidates: SemanticDuplicateCandidate[],
 ) => Promise<SemanticDuplicateEvaluation[]>
 
+export type SemanticDuplicateEvaluatorSource = "custom" | "dev-server" | "electron" | "none"
+
 export interface SemanticDuplicateDecision extends SemanticDuplicateEvaluation {
   entryIds: [string, string]
   updatedAt: string
@@ -53,7 +55,39 @@ export interface SemanticDuplicateDecision extends SemanticDuplicateEvaluation {
 
 export type SemanticDuplicateEntryRole = "duplicate" | "keeper" | null
 
+export interface SemanticDedupeDebugRecentCandidate {
+  pairKey: string
+  similarity: number
+  titles: [string, string]
+}
+
+export interface SemanticDedupeDebugRecentEvaluation {
+  confidence: number
+  duplicate: boolean
+  pairKey: string
+  reason: string | null
+}
+
+interface SemanticDedupeDebugState {
+  evaluatorSource: SemanticDuplicateEvaluatorSource
+  isProcessing: boolean
+  lastCandidateCount: number
+  lastDuplicateCount: number
+  lastError: string | null
+  lastEvaluationCount: number
+  lastRunDurationMs: number | null
+  lastRunFinishedAt: string | null
+  lastRunStartedAt: string | null
+  lastScanAt: string | null
+  lastScannedEntryCount: number
+  recentCandidates: SemanticDedupeDebugRecentCandidate[]
+  recentEvaluations: SemanticDedupeDebugRecentEvaluation[]
+  totalErrors: number
+  totalRuns: number
+}
+
 interface SemanticDedupeStore {
+  debug: SemanticDedupeDebugState
   decisions: Record<string, SemanticDuplicateDecision>
   isHydrated: boolean
   ownerKey: string | null
@@ -61,7 +95,26 @@ interface SemanticDedupeStore {
   revision: number
 }
 
+const createDefaultDebugState = (): SemanticDedupeDebugState => ({
+  evaluatorSource: "none",
+  isProcessing: false,
+  lastCandidateCount: 0,
+  lastDuplicateCount: 0,
+  lastError: null,
+  lastEvaluationCount: 0,
+  lastRunDurationMs: null,
+  lastRunFinishedAt: null,
+  lastRunStartedAt: null,
+  lastScanAt: null,
+  lastScannedEntryCount: 0,
+  recentCandidates: [],
+  recentEvaluations: [],
+  totalErrors: 0,
+  totalRuns: 0,
+})
+
 const defaultState: SemanticDedupeStore = {
+  debug: createDefaultDebugState(),
   decisions: {},
   isHydrated: false,
   ownerKey: null,
@@ -149,9 +202,11 @@ let isProcessingCandidates = false
 
 export const registerSemanticDuplicateEvaluator = (
   evaluator: SemanticDuplicateEvaluator | null,
+  source: SemanticDuplicateEvaluatorSource = evaluator ? "custom" : "none",
 ) => {
   semanticDuplicateEvaluator = evaluator
   set((state) => {
+    state.debug.evaluatorSource = evaluator ? source : "none"
     state.revision += 1
   })
 
@@ -159,6 +214,7 @@ export const registerSemanticDuplicateEvaluator = (
     if (semanticDuplicateEvaluator === evaluator) {
       semanticDuplicateEvaluator = null
       set((state) => {
+        state.debug.evaluatorSource = "none"
         state.revision += 1
       })
     }
@@ -193,6 +249,67 @@ export const semanticDedupeActions = {
         delete state.pendingPairKeys[pairKey]
       }
       state.revision += 1
+    })
+  },
+  recordProcessingFailed: (error: unknown) => {
+    const finishedAt = new Date().toISOString()
+    const message = error instanceof Error ? error.message : "Semantic duplicate evaluation failed."
+
+    set((state) => {
+      state.debug.isProcessing = false
+      state.debug.lastError = message
+      state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
+      state.debug.lastRunFinishedAt = finishedAt
+      state.debug.totalErrors += 1
+    })
+  },
+  recordProcessingFinished: (evaluations: SemanticDuplicateEvaluation[]) => {
+    const finishedAt = new Date().toISOString()
+
+    set((state) => {
+      state.debug.isProcessing = false
+      state.debug.lastDuplicateCount = evaluations.filter(
+        (evaluation) =>
+          evaluation.duplicate && evaluation.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
+      ).length
+      state.debug.lastError = null
+      state.debug.lastEvaluationCount = evaluations.length
+      state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
+      state.debug.lastRunFinishedAt = finishedAt
+      state.debug.recentEvaluations = evaluations.slice(0, 5).map((evaluation) => ({
+        confidence: evaluation.confidence,
+        duplicate: evaluation.duplicate,
+        pairKey: evaluation.pairKey,
+        reason: evaluation.reason ?? null,
+      }))
+      state.debug.totalRuns += 1
+    })
+  },
+  recordProcessingStarted: (candidates: SemanticDuplicateCandidate[]) => {
+    set((state) => {
+      state.debug.isProcessing = true
+      state.debug.lastError = null
+      state.debug.lastEvaluationCount = 0
+      state.debug.lastRunDurationMs = null
+      state.debug.lastRunFinishedAt = null
+      state.debug.lastRunStartedAt = new Date().toISOString()
+      state.debug.recentCandidates = candidates.slice(0, 5).map((candidate) => ({
+        pairKey: candidate.pairKey,
+        similarity: candidate.similarity,
+        titles: [candidate.entries[0].title, candidate.entries[1].title],
+      }))
+    })
+  },
+  recordScan: (entryCount: number, candidates: SemanticDuplicateCandidate[]) => {
+    set((state) => {
+      state.debug.lastCandidateCount = candidates.length
+      state.debug.lastScanAt = new Date().toISOString()
+      state.debug.lastScannedEntryCount = entryCount
+      state.debug.recentCandidates = candidates.slice(0, 5).map((candidate) => ({
+        pairKey: candidate.pairKey,
+        similarity: candidate.similarity,
+        titles: [candidate.entries[0].title, candidate.entries[1].title],
+      }))
     })
   },
   upsertEvaluations: (
@@ -251,6 +368,13 @@ export const semanticDedupeActions = {
 }
 
 const getPairKey = (entryIdA: string, entryIdB: string) => [entryIdA, entryIdB].sort().join("::")
+
+const getRunDuration = (startedAt: string | null, finishedAt: string) => {
+  if (!startedAt) return null
+
+  const duration = Date.parse(finishedAt) - Date.parse(startedAt)
+  return Number.isFinite(duration) && duration >= 0 ? duration : null
+}
 
 const truncateDescription = (description: string | null | undefined) =>
   (description ?? "").replaceAll(/\s+/g, " ").trim().slice(0, MAX_DESCRIPTION_LENGTH)
@@ -461,19 +585,23 @@ export const useSemanticDedupeProcessor = (entryIds: string[]) => {
 
     const currentEntryIds = stableEntryIds ? stableEntryIds.split("\n") : []
     const candidates = getSemanticDuplicateCandidates(currentEntryIds)
+    semanticDedupeActions.recordScan(currentEntryIds.length, candidates)
     if (candidates.length === 0) return
 
     isProcessingCandidates = true
+    semanticDedupeActions.recordProcessingStarted(candidates)
     semanticDedupeActions.markCandidatesPending(candidates)
 
     semanticDuplicateEvaluator(candidates)
       .then((evaluations) => {
         semanticDedupeActions.upsertEvaluations(candidates, evaluations)
+        semanticDedupeActions.recordProcessingFinished(evaluations)
       })
-      .catch(() => {
+      .catch((error) => {
         semanticDedupeActions.clearPendingCandidates(
           candidates.map((candidate) => candidate.pairKey),
         )
+        semanticDedupeActions.recordProcessingFailed(error)
       })
       .finally(() => {
         isProcessingCandidates = false
