@@ -16,6 +16,10 @@ import { useCurrentModal } from "~/components/ui/modal/stacked/hooks"
 import { followClient } from "~/lib/api-client"
 import { toastFetchError } from "~/lib/error-parser"
 
+import {
+  addSelectedItemIdsWithinQuota,
+  getInitialSelectedItemIds,
+} from "./OpmlSelectionModal.utils"
 import type { ParsedFeedItem } from "./types"
 
 export const OpmlSelectionModal = ({
@@ -88,8 +92,8 @@ export const OpmlSelectionModal = ({
 
   const { t } = useTranslation()
   const [searchQuery, setSearchQuery] = useState("")
-  const [selectedItems, setSelectedItems] = useState<Set<string>>(
-    () => new Set(parsedData.subscriptions.map((_, index) => index.toString())),
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(() =>
+    getInitialSelectedItemIds(parsedData.subscriptions.length, parsedData.remaining),
   )
 
   const fuse = useMemo(() => {
@@ -138,20 +142,7 @@ export const OpmlSelectionModal = ({
         // Select all filtered items, but respect quota
         const filteredIndices = filteredSubscriptions.map(({ refIndex }) => refIndex.toString())
         setSelectedItems((prev) => {
-          const newSet = new Set(prev)
-
-          // If we would exceed quota, only select up to the remaining limit
-          let addedCount = 0
-          for (const index of filteredIndices) {
-            if (newSet.size + addedCount >= parsedData.remaining) {
-              break
-            }
-            if (!newSet.has(index)) {
-              addedCount++
-            }
-            newSet.add(index)
-          }
-          return newSet
+          return addSelectedItemIdsWithinQuota(prev, filteredIndices, parsedData.remaining)
         })
       } else {
         // Deselect all filtered items - no quota restrictions for deselection
@@ -353,4 +344,6 @@ export const OpmlSelectionModal = ({
   )
 }
 
-const NumberDisplay = ({ value }) => <span className="font-bold text-text">{value ?? 0}</span>
+const NumberDisplay = ({ value }: { value?: number | null }) => (
+  <span className="font-bold text-text">{value ?? 0}</span>
+)
