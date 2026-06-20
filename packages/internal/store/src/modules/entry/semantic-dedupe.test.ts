@@ -142,6 +142,55 @@ describe("semantic duplicate entry marking", () => {
     })
   })
 
+  it("prioritizes newer entry candidates before older higher-similarity pairs", () => {
+    const newestEntry = createEntry({
+      description: "Alpha protocol reports a service outage during peak traffic.",
+      id: "entry-newest-a",
+      publishedAt: "2026-06-19T12:03:00.000Z",
+      title: "Alpha protocol outage update",
+    })
+    const newestCandidate = createEntry({
+      description: "Alpha protocol warns users about an outage during peak traffic.",
+      id: "entry-newest-b",
+      publishedAt: "2026-06-19T12:02:00.000Z",
+      title: "Alpha protocol outage alert",
+    })
+    const olderEntry = createEntry({
+      description: "Ethereum staking reward plan is released by the foundation.",
+      id: "entry-older-a",
+      publishedAt: "2026-06-19T11:03:00.000Z",
+      title: "Ethereum staking reward plan",
+    })
+    const olderCandidate = createEntry({
+      description: "Ethereum staking reward plans are released by the foundation.",
+      id: "entry-older-b",
+      publishedAt: "2026-06-19T11:02:00.000Z",
+      title: "Ethereum staking reward plans",
+    })
+
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: {
+        [newestEntry.id]: newestEntry,
+        [newestCandidate.id]: newestCandidate,
+        [olderEntry.id]: olderEntry,
+        [olderCandidate.id]: olderCandidate,
+      },
+      entryIdSet: new Set([newestEntry.id, newestCandidate.id, olderEntry.id, olderCandidate.id]),
+    }))
+
+    const candidates = getSemanticDuplicateCandidates(
+      [newestEntry.id, newestCandidate.id, olderEntry.id, olderCandidate.id],
+      { maxCandidates: 1 },
+    )
+
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]).toMatchObject({
+      keepEntryId: newestEntry.id,
+      testEntryId: newestCandidate.id,
+    })
+  })
+
   it("bumps revision when the evaluator changes", () => {
     expect(useSemanticDedupeStore.getState().revision).toBe(0)
     expect(useSemanticDedupeStore.getState().debug.evaluatorSource).toBe("none")

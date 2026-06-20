@@ -539,10 +539,14 @@ export const getSemanticDuplicateCandidates = (
   const selectedTestEntryIds = new Set<string>()
   return candidates
     .sort((candidateA, candidateB) => {
+      // Entry ids are passed in timeline order, so newer entries should be evaluated first.
+      if (candidateA.index !== candidateB.index) {
+        return candidateA.index - candidateB.index
+      }
       if (candidateB.similarity !== candidateA.similarity) {
         return candidateB.similarity - candidateA.similarity
       }
-      return candidateA.index - candidateB.index
+      return candidateA.testEntryId.localeCompare(candidateB.testEntryId)
     })
     .filter((candidate) => {
       if (selectedTestEntryIds.has(candidate.testEntryId)) return false
