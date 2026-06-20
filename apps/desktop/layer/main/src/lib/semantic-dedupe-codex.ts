@@ -33,7 +33,25 @@ export interface SemanticDuplicateEvaluation {
 }
 
 export interface EvaluateSemanticDuplicatesOutput {
+  debug?: SemanticDedupeCodexRunInfo
   results: SemanticDuplicateEvaluation[]
+}
+
+export interface SemanticDedupeCodexRunInfo {
+  candidateCount: number
+  command: string | null
+  durationMs: number | null
+  fallbackUsed: boolean
+  inputCandidateCount: number
+  reasoningEffort: string | null
+  requestedModel: string | null
+  usedModel: string | null
+}
+
+type CodexRunDebug = Omit<SemanticDedupeCodexRunInfo, "candidateCount" | "inputCandidateCount">
+
+interface CodexRunResult {
+  debug: CodexRunDebug
 }
 
 interface CodexSemanticDedupeOutput {
@@ -109,6 +127,9 @@ ${JSON.stringify({ candidates }, null, 2)}
 
 const unique = <T>(items: T[]) => Array.from(new Set(items))
 
+const getRequestedCodexModel = () =>
+  process.env.FOLO_SEMANTIC_DEDUPE_CODEX_MODEL || REQUESTED_CODEX_MODEL
+
 const getCodexCandidates = () =>
   unique(
     [process.env.CODEX_BIN, "codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"].filter(
@@ -118,7 +139,7 @@ const getCodexCandidates = () =>
 
 const getCodexModelCandidates = () =>
   unique([
-    process.env.FOLO_SEMANTIC_DEDUPE_CODEX_MODEL || REQUESTED_CODEX_MODEL,
+    getRequestedCodexModel(),
     process.env.FOLO_SEMANTIC_DEDUPE_CODEX_FALLBACK_MODEL || null,
   ]).filter((model) => !model || !unavailableCodexModels.has(model))
 
@@ -141,6 +162,7 @@ const runCodex = async ({
 }) => {
   let lastError: Error | null = null
   let lastCommandError: Error | null = null
+  const requestedModel = getRequestedCodexModel()
 
   for (const model of getCodexModelCandidates()) {
     const args = [
@@ -162,7 +184,8 @@ const runCodex = async ({
 
     for (const command of getCodexCandidates()) {
       try {
-        return await new Promise<string>((resolve, reject) => {
+        const startedAt = Date.now()
+        return await new Promise<CodexRunResult>((resolve, reject) => {
           const stdout: Buffer[] = []
           const stderr: Buffer[] = []
           const child = spawn(command, args, {
@@ -185,7 +208,16 @@ const runCodex = async ({
           child.on("close", (code) => {
             clearTimeout(timeout)
             if (code === 0) {
-              resolve(Buffer.concat(stdout).toString("utf8"))
+              resolve({
+                debug: {
+                  command,
+                  durationMs: Date.now() - startedAt,
+                  fallbackUsed: model !== requestedModel,
+                  reasoningEffort: CODEX_REASONING_EFFORT,
+                  requestedModel,
+                  usedModel: model ?? "codex default",
+                },
+              })
               return
             }
 
@@ -292,7 +324,7 @@ export const evaluateSemanticDuplicateCandidates = async ({
   const outputPath = join(runtimeDir, `codex-output-${randomUUID()}.json`)
 
   try {
-    await runCodex({
+    const runResult = await runCodex({
       outputPath,
       prompt: createPrompt(candidates),
       schemaPath,
@@ -310,6 +342,11 @@ export const evaluateSemanticDuplicateCandidates = async ({
     )
 
     return {
+      debug: {
+        ...runResult.debug,
+        candidateCount: candidates.length,
+        inputCandidateCount: inputCandidates.length,
+      },
       results: candidates.map(
         (candidate) =>
           evaluationByPairKey.get(candidate.pairKey) ?? createFallbackEvaluation(candidate),

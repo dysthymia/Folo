@@ -1,10 +1,12 @@
 import type {
+  SemanticDedupeEvaluatorRunInfo,
   SemanticDuplicateCandidate,
   SemanticDuplicateEvaluation,
 } from "@follow/store/entry/semantic-dedupe"
 import {
   registerSemanticDuplicateEvaluator,
   SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
+  semanticDedupeActions,
   useSemanticDedupeHydration,
   useSemanticDedupeStore,
 } from "@follow/store/entry/semantic-dedupe"
@@ -37,12 +39,57 @@ const isSemanticDuplicateEvaluation = (value: unknown): value is SemanticDuplica
   )
 }
 
-const parseSemanticDedupeResponse = (payload: unknown): SemanticDuplicateEvaluation[] => {
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === "string"
+
+const parseEvaluatorRunInfo = (value: unknown): SemanticDedupeEvaluatorRunInfo | null => {
+  if (!isRecord(value)) return null
+
+  if (
+    typeof value.candidateCount !== "number" ||
+    !Number.isFinite(value.candidateCount) ||
+    typeof value.inputCandidateCount !== "number" ||
+    !Number.isFinite(value.inputCandidateCount) ||
+    typeof value.fallbackUsed !== "boolean" ||
+    !isNullableString(value.command) ||
+    !isNullableString(value.reasoningEffort) ||
+    !isNullableString(value.requestedModel) ||
+    !isNullableString(value.usedModel)
+  ) {
+    return null
+  }
+
+  const durationMs =
+    typeof value.durationMs === "number" && Number.isFinite(value.durationMs)
+      ? value.durationMs
+      : null
+
+  return {
+    candidateCount: value.candidateCount,
+    command: value.command,
+    durationMs,
+    fallbackUsed: value.fallbackUsed,
+    inputCandidateCount: value.inputCandidateCount,
+    reasoningEffort: value.reasoningEffort,
+    requestedModel: value.requestedModel,
+    usedModel: value.usedModel,
+  }
+}
+
+const parseSemanticDedupeResponse = (
+  payload: unknown,
+): {
+  debug: SemanticDedupeEvaluatorRunInfo | null
+  results: SemanticDuplicateEvaluation[]
+} => {
   if (!isRecord(payload) || !Array.isArray(payload.results)) {
     throw new Error("Invalid semantic dedupe response.")
   }
 
-  return payload.results.filter(isSemanticDuplicateEvaluation)
+  return {
+    debug: parseEvaluatorRunInfo(payload.debug),
+    results: payload.results.filter(isSemanticDuplicateEvaluation),
+  }
 }
 
 const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCandidate[]) => {
@@ -55,10 +102,20 @@ const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCand
   })
 
   if (!response.ok) {
-    throw new Error(`Semantic dedupe dev server failed with ${response.status}.`)
+    const payload = (await response.json().catch(() => null)) as unknown
+    const message =
+      isRecord(payload) && typeof payload.error === "string"
+        ? payload.error
+        : `Semantic dedupe dev server failed with ${response.status}.`
+    throw new Error(message)
   }
 
-  return parseSemanticDedupeResponse((await response.json()) as unknown)
+  const parsed = parseSemanticDedupeResponse((await response.json()) as unknown)
+  if (parsed.debug) {
+    semanticDedupeActions.recordEvaluatorRun(parsed.debug)
+  }
+
+  return parsed.results
 }
 
 export const SemanticDedupeProvider = () => {
@@ -72,6 +129,10 @@ export const SemanticDedupeProvider = () => {
       return registerSemanticDuplicateEvaluator(
         async (candidates: SemanticDuplicateCandidate[]) => {
           const result = await semanticDedupeService.evaluateCandidates({ candidates })
+          const debug = isRecord(result) ? parseEvaluatorRunInfo(result.debug) : null
+          if (debug) {
+            semanticDedupeActions.recordEvaluatorRun(debug)
+          }
           return result.results as SemanticDuplicateEvaluation[]
         },
         "electron",
@@ -148,6 +209,7 @@ const SemanticDedupeDebugPanel = () => {
       ? "off"
       : "idle"
   const statusLabel = `${status} · queued ${debug.queuedEntryCount} · pending ${snapshot.pendingCount}`
+  const { lastEvaluatorRun } = debug
 
   return (
     <div
@@ -205,6 +267,26 @@ const SemanticDedupeDebugPanel = () => {
                 value={`${snapshot.decisionCount} (${snapshot.confidentDuplicateCount})`}
               />
               <DebugMetric label="last run" value={formatDuration(debug.lastRunDurationMs)} />
+              <DebugMetric
+                label="codex"
+                value={formatDuration(lastEvaluatorRun?.durationMs ?? null)}
+              />
+              <DebugMetric label="model" value={lastEvaluatorRun?.usedModel ?? "-"} />
+              <DebugMetric label="requested" value={lastEvaluatorRun?.requestedModel ?? "-"} />
+              <DebugMetric
+                label="fallback"
+                value={lastEvaluatorRun ? (lastEvaluatorRun.fallbackUsed ? "yes" : "no") : "-"}
+              />
+              <DebugMetric
+                label="pairs"
+                value={
+                  lastEvaluatorRun
+                    ? `${lastEvaluatorRun.candidateCount}/${lastEvaluatorRun.inputCandidateCount}`
+                    : "-"
+                }
+              />
+              <DebugMetric label="effort" value={lastEvaluatorRun?.reasoningEffort ?? "-"} />
+              <DebugMetric label="command" value={lastEvaluatorRun?.command ?? "-"} />
               <DebugMetric
                 label="updated"
                 value={formatTime(debug.lastRunFinishedAt ?? debug.lastScanAt)}

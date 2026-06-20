@@ -289,6 +289,32 @@ describe("semantic duplicate entry marking", () => {
     expect(useSemanticDedupeStore.getState().debug.queuedEntryCount).toBe(0)
   })
 
+  it("tracks evaluator run debug state", () => {
+    semanticDedupeActions.recordEvaluatorRun({
+      candidateCount: 16,
+      command: "/opt/homebrew/bin/codex",
+      durationMs: 1234,
+      fallbackUsed: false,
+      inputCandidateCount: 20,
+      reasoningEffort: "low",
+      requestedModel: "GPT-5.3-Codex-Spark",
+      usedModel: "GPT-5.3-Codex-Spark",
+    })
+
+    expect(useSemanticDedupeStore.getState().debug.lastEvaluatorRun).toMatchObject({
+      candidateCount: 16,
+      durationMs: 1234,
+      fallbackUsed: false,
+      inputCandidateCount: 20,
+      requestedModel: "GPT-5.3-Codex-Spark",
+      usedModel: "GPT-5.3-Codex-Spark",
+    })
+
+    semanticDedupeActions.hydrate("user-1")
+
+    expect(useSemanticDedupeStore.getState().debug.lastEvaluatorRun).toBeNull()
+  })
+
   it("marks confident duplicate and kept entries without filtering them", () => {
     useSemanticDedupeStore.setState({
       decisions: {

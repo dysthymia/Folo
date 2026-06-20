@@ -55,6 +55,17 @@ export interface SemanticDuplicateDecision extends SemanticDuplicateEvaluation {
 
 export type SemanticDuplicateEntryRole = "duplicate" | "keeper" | null
 
+export interface SemanticDedupeEvaluatorRunInfo {
+  candidateCount: number
+  command: string | null
+  durationMs: number | null
+  fallbackUsed: boolean
+  inputCandidateCount: number
+  reasoningEffort: string | null
+  requestedModel: string | null
+  usedModel: string | null
+}
+
 export interface SemanticDedupeDebugRecentCandidate {
   pairKey: string
   similarity: number
@@ -81,6 +92,7 @@ interface SemanticDedupeDebugState {
   lastRunStartedAt: string | null
   lastScanAt: string | null
   lastScannedEntryCount: number
+  lastEvaluatorRun: SemanticDedupeEvaluatorRunInfo | null
   queuedEntryCount: number
   recentCandidates: SemanticDedupeDebugRecentCandidate[]
   recentEvaluations: SemanticDedupeDebugRecentEvaluation[]
@@ -110,6 +122,7 @@ const createDefaultDebugState = (): SemanticDedupeDebugState => ({
   lastRunStartedAt: null,
   lastScanAt: null,
   lastScannedEntryCount: 0,
+  lastEvaluatorRun: null,
   queuedEntryCount: 0,
   recentCandidates: [],
   recentEvaluations: [],
@@ -219,6 +232,7 @@ export const registerSemanticDuplicateEvaluator = (
   }
   set((state) => {
     state.debug.evaluatorSource = evaluator ? source : "none"
+    state.debug.lastEvaluatorRun = evaluator ? state.debug.lastEvaluatorRun : null
     state.debug.queuedEntryCount = evaluator ? state.debug.queuedEntryCount : 0
     state.revision += 1
   })
@@ -229,6 +243,7 @@ export const registerSemanticDuplicateEvaluator = (
       queuedEntryIds = null
       set((state) => {
         state.debug.evaluatorSource = "none"
+        state.debug.lastEvaluatorRun = null
         state.debug.queuedEntryCount = 0
         state.revision += 1
       })
@@ -244,6 +259,7 @@ export const semanticDedupeActions = {
       state.ownerKey = ownerKey ?? null
       state.decisions = ownerKey ? readDecisionsFromStorage(ownerKey) : {}
       state.pendingPairKeys = {}
+      state.debug.lastEvaluatorRun = null
       state.debug.queuedEntryCount = 0
       state.isHydrated = true
       state.revision += 1
@@ -279,6 +295,11 @@ export const semanticDedupeActions = {
       state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
       state.debug.lastRunFinishedAt = finishedAt
       state.debug.totalErrors += 1
+    })
+  },
+  recordEvaluatorRun: (runInfo: SemanticDedupeEvaluatorRunInfo) => {
+    set((state) => {
+      state.debug.lastEvaluatorRun = runInfo
     })
   },
   recordProcessingFinished: (evaluations: SemanticDuplicateEvaluation[]) => {
