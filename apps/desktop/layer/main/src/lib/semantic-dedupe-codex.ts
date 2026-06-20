@@ -138,10 +138,9 @@ const getCodexCandidates = () =>
   ).filter((candidate) => !candidate.startsWith("/") || existsSync(candidate))
 
 const getCodexModelCandidates = () =>
-  unique([
-    getRequestedCodexModel(),
-    process.env.FOLO_SEMANTIC_DEDUPE_CODEX_FALLBACK_MODEL || null,
-  ]).filter((model) => !model || !unavailableCodexModels.has(model))
+  unique([getRequestedCodexModel(), process.env.FOLO_SEMANTIC_DEDUPE_CODEX_FALLBACK_MODEL]).filter(
+    (model): model is string => !!model && !unavailableCodexModels.has(model),
+  )
 
 const isUnsupportedModelError = (error: Error) => error.message.includes("model is not supported")
 
