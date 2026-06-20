@@ -9,6 +9,7 @@ import { ByokSection } from "./ai/byok"
 import { MCPServicesSection } from "./ai/mcp/MCPServicesSection"
 import { PanelStyleSection } from "./ai/PanelStyleSection"
 import { PersonalizePromptSection } from "./ai/PersonalizePromptSection"
+import { SemanticDedupeSection } from "./ai/SemanticDedupeSection"
 import { AIShortcutsSection } from "./ai/shortcuts/AIShortcutsSection"
 import { TaskSchedulingSection } from "./ai/tasks"
 import { UsageAnalysisSection } from "./ai/usage"
@@ -43,6 +44,12 @@ export const SettingAI = () => {
             label: t("settings.autoScrollWhenStreaming.label"),
             description: t("settings.autoScrollWhenStreaming.description"),
           }),
+
+          {
+            type: "title",
+            value: t("semantic_dedupe.title"),
+          },
+          SemanticDedupeSection,
 
           {
             type: "title",

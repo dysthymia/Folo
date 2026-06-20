@@ -219,6 +219,12 @@ export interface AISettings {
   aiTimelinePrompt: string
   shortcuts: AIShortcut[]
 
+  // Semantic dedupe
+  semanticDedupeEnabled: boolean
+  semanticDedupeModel: string
+  semanticDedupeReasoningEffort: SemanticDedupeReasoningEffort
+  semanticDedupeDebugPanel: boolean
+
   // MCP Services (stored locally, actual connections managed via server API)
   mcpEnabled: boolean
   mcpServices: MCPService[]
@@ -228,6 +234,8 @@ export interface AISettings {
 
   byok: UserByokSettings
 }
+
+export type SemanticDedupeReasoningEffort = "minimal" | "low" | "medium" | "high"
 
 export type ByokProviderName = "openai" | "google" | "vercel-ai-gateway" | "openrouter"
 

@@ -5,12 +5,14 @@ import { join } from "pathe"
 
 import type {
   EvaluateSemanticDuplicatesOutput,
+  SemanticDedupeCodexOptions,
   SemanticDuplicateCandidate,
 } from "../../lib/semantic-dedupe-codex"
 import { evaluateSemanticDuplicateCandidates } from "../../lib/semantic-dedupe-codex"
 
 interface EvaluateSemanticDuplicatesInput {
   candidates: SemanticDuplicateCandidate[]
+  options?: SemanticDedupeCodexOptions
 }
 
 const getRuntimeDir = () => join(app.getPath("userData"), "semantic-dedupe")
@@ -25,6 +27,7 @@ export class SemanticDedupeService extends IpcService {
   ): Promise<EvaluateSemanticDuplicatesOutput> {
     return evaluateSemanticDuplicateCandidates({
       candidates: input.candidates,
+      options: input.options,
       runtimeDir: getRuntimeDir(),
     })
   }

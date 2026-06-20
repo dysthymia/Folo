@@ -134,12 +134,28 @@ const isSemanticDuplicateCandidate = (value: unknown): value is SemanticDuplicat
   )
 }
 
+const isSemanticDedupeOptions = (
+  value: unknown,
+): value is { model?: string; reasoningEffort?: string } => {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+
+  return (
+    (value.model === undefined || typeof value.model === "string") &&
+    (value.reasoningEffort === undefined || typeof value.reasoningEffort === "string")
+  )
+}
+
 const isSemanticDedupeDevRequest = (
   value: unknown,
-): value is { candidates: SemanticDuplicateCandidate[] } =>
+): value is {
+  candidates: SemanticDuplicateCandidate[]
+  options?: { model?: string; reasoningEffort?: string }
+} =>
   isRecord(value) &&
   Array.isArray(value.candidates) &&
-  value.candidates.every(isSemanticDuplicateCandidate)
+  value.candidates.every(isSemanticDuplicateCandidate) &&
+  isSemanticDedupeOptions(value.options)
 
 const setSemanticDedupeResponseHeaders = (req: IncomingMessage, res: ServerResponse) => {
   const origin = Array.isArray(req.headers.origin) ? undefined : req.headers.origin
@@ -232,8 +248,12 @@ const semanticDedupeDevServer = (): PluginOption => ({
       }
 
       try {
-        const { candidates } = await readSemanticDedupeRequest(req)
-        const result = await evaluateSemanticDuplicateCandidates({ candidates, runtimeDir })
+        const { candidates, options } = await readSemanticDedupeRequest(req)
+        const result = await evaluateSemanticDuplicateCandidates({
+          candidates,
+          options,
+          runtimeDir,
+        })
         sendSemanticDedupeJson(res, 200, result)
       } catch (error) {
         const message = error instanceof Error ? error.message : "Semantic dedupe failed."

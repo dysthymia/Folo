@@ -26,6 +26,7 @@ import { debounce } from "es-toolkit/compat"
 import { useAtomValue } from "jotai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import { useAISettingKey } from "~/atoms/settings/ai"
 import { useGeneralSettingKey } from "~/atoms/settings/general"
 import { ROUTE_FEED_PENDING } from "~/constants/app"
 import { useFeature } from "~/hooks/biz/useFeature"
@@ -273,13 +274,16 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
   const query = remoteQuery.isReady ? remoteQuery : localQuery
   const rawEntryIds: string[] = query.entriesIds
-  useSemanticDedupeProcessor(rawEntryIds)
+  const semanticDedupeEnabled = useAISettingKey("semanticDedupeEnabled")
+  useSemanticDedupeProcessor(semanticDedupeEnabled ? rawEntryIds : [])
   const semanticDedupeRevision = useSemanticDedupeRevision()
   const entryIds = useMemo(() => {
     void semanticDedupeRevision
 
+    if (!semanticDedupeEnabled) return rawEntryIds
+
     return rawEntryIds.filter((entryId) => getSemanticDuplicateEntryRole(entryId) !== "duplicate")
-  }, [rawEntryIds, semanticDedupeRevision])
+  }, [rawEntryIds, semanticDedupeEnabled, semanticDedupeRevision])
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

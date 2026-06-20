@@ -48,6 +48,11 @@ export interface SemanticDedupeCodexRunInfo {
   usedModel: string | null
 }
 
+export interface SemanticDedupeCodexOptions {
+  model?: string | null
+  reasoningEffort?: string | null
+}
+
 type CodexRunDebug = Omit<SemanticDedupeCodexRunInfo, "candidateCount" | "inputCandidateCount">
 
 interface CodexRunResult {
@@ -66,7 +71,7 @@ interface CodexSemanticDedupeOutput {
 }
 
 const REQUESTED_CODEX_MODEL = "gpt-5.3-codex-spark"
-const CODEX_REASONING_EFFORT = process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT ?? "low"
+const DEFAULT_CODEX_REASONING_EFFORT = "low"
 const CODEX_TIMEOUT = 20_000
 const MAX_CANDIDATES_PER_REQUEST = 16
 const MAX_OUTPUT_BYTES = 1024 * 1024
@@ -127,8 +132,13 @@ ${JSON.stringify({ candidates }, null, 2)}
 
 const unique = <T>(items: T[]) => Array.from(new Set(items))
 
-const getRequestedCodexModel = () =>
-  process.env.FOLO_SEMANTIC_DEDUPE_CODEX_MODEL || REQUESTED_CODEX_MODEL
+const getRequestedCodexModel = (options?: SemanticDedupeCodexOptions) =>
+  options?.model?.trim() || process.env.FOLO_SEMANTIC_DEDUPE_CODEX_MODEL || REQUESTED_CODEX_MODEL
+
+const getCodexReasoningEffort = (options?: SemanticDedupeCodexOptions) =>
+  options?.reasoningEffort?.trim() ||
+  process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT ||
+  DEFAULT_CODEX_REASONING_EFFORT
 
 const getCodexCandidates = () =>
   unique(
@@ -137,10 +147,11 @@ const getCodexCandidates = () =>
     ),
   ).filter((candidate) => !candidate.startsWith("/") || existsSync(candidate))
 
-const getCodexModelCandidates = () =>
-  unique([getRequestedCodexModel(), process.env.FOLO_SEMANTIC_DEDUPE_CODEX_FALLBACK_MODEL]).filter(
-    (model): model is string => !!model && !unavailableCodexModels.has(model),
-  )
+const getCodexModelCandidates = (options?: SemanticDedupeCodexOptions) =>
+  unique([
+    getRequestedCodexModel(options),
+    process.env.FOLO_SEMANTIC_DEDUPE_CODEX_FALLBACK_MODEL,
+  ]).filter((model): model is string => !!model && !unavailableCodexModels.has(model))
 
 const isUnsupportedModelError = (error: Error) => error.message.includes("model is not supported")
 
@@ -151,19 +162,22 @@ const collectOutput = (buffer: Buffer[], chunk: Buffer) => {
 }
 
 const runCodex = async ({
+  options,
   outputPath,
   prompt,
   schemaPath,
 }: {
+  options?: SemanticDedupeCodexOptions
   outputPath: string
   prompt: string
   schemaPath: string
 }) => {
   let lastError: Error | null = null
   let lastCommandError: Error | null = null
-  const requestedModel = getRequestedCodexModel()
+  const requestedModel = getRequestedCodexModel(options)
+  const reasoningEffort = getCodexReasoningEffort(options)
 
-  for (const model of getCodexModelCandidates()) {
+  for (const model of getCodexModelCandidates(options)) {
     const args = [
       "exec",
       "--ephemeral",
@@ -173,7 +187,7 @@ const runCodex = async ({
       "read-only",
       ...(model ? ["-m", model] : []),
       "-c",
-      `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`,
+      `model_reasoning_effort="${reasoningEffort}"`,
       "--output-schema",
       schemaPath,
       "--output-last-message",
@@ -212,7 +226,7 @@ const runCodex = async ({
                   command,
                   durationMs: Date.now() - startedAt,
                   fallbackUsed: model !== requestedModel,
-                  reasoningEffort: CODEX_REASONING_EFFORT,
+                  reasoningEffort,
                   requestedModel,
                   usedModel: model ?? "codex default",
                 },
@@ -307,9 +321,11 @@ const createFallbackEvaluation = (
 
 export const evaluateSemanticDuplicateCandidates = async ({
   candidates: inputCandidates,
+  options,
   runtimeDir,
 }: {
   candidates: SemanticDuplicateCandidate[]
+  options?: SemanticDedupeCodexOptions
   runtimeDir: string
 }): Promise<EvaluateSemanticDuplicatesOutput> => {
   const candidates = inputCandidates.slice(0, MAX_CANDIDATES_PER_REQUEST)
@@ -324,6 +340,7 @@ export const evaluateSemanticDuplicateCandidates = async ({
 
   try {
     const runResult = await runCodex({
+      options,
       outputPath,
       prompt: createPrompt(candidates),
       schemaPath,

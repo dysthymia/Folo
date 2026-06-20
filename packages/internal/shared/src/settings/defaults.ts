@@ -164,6 +164,12 @@ export const defaultAISettings: AISettings = {
   aiTimelinePrompt: "",
   shortcuts: [],
 
+  // Semantic dedupe
+  semanticDedupeEnabled: true,
+  semanticDedupeModel: "gpt-5.3-codex-spark",
+  semanticDedupeReasoningEffort: "low",
+  semanticDedupeDebugPanel: false,
+
   // MCP Services
   mcpEnabled: false,
   mcpServices: [],

@@ -14,12 +14,18 @@ import { useWhoami } from "@follow/store/user/hooks"
 import { cn } from "@follow/utils/utils"
 import { useEffect, useState } from "react"
 
+import { useAISettingSelector } from "~/atoms/settings/ai"
 import { ipcServices } from "~/lib/client"
 
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
-const SEMANTIC_DEDUPE_REQUESTED_MODEL = "gpt-5.3-codex-spark"
-const SEMANTIC_DEDUPE_REASONING_EFFORT = "low"
+const SEMANTIC_DEDUPE_DEFAULT_MODEL = "gpt-5.3-codex-spark"
+const SEMANTIC_DEDUPE_DEFAULT_REASONING_EFFORT = "low"
 const SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT = 30_000
+
+interface SemanticDedupeEvaluatorOptions {
+  model: string
+  reasoningEffort: string
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -95,16 +101,28 @@ const parseSemanticDedupeResponse = (
   }
 }
 
-const recordPendingEvaluatorRun = (candidateCount: number) => {
+const normalizeSemanticDedupeOptions = (
+  options: SemanticDedupeEvaluatorOptions,
+): SemanticDedupeEvaluatorOptions => ({
+  model: options.model.trim() || SEMANTIC_DEDUPE_DEFAULT_MODEL,
+  reasoningEffort: options.reasoningEffort || SEMANTIC_DEDUPE_DEFAULT_REASONING_EFFORT,
+})
+
+const recordPendingEvaluatorRun = (
+  candidateCount: number,
+  options: SemanticDedupeEvaluatorOptions,
+) => {
+  const normalizedOptions = normalizeSemanticDedupeOptions(options)
+
   semanticDedupeActions.recordEvaluatorRun({
     candidateCount,
     command: "running",
     durationMs: null,
     fallbackUsed: false,
     inputCandidateCount: candidateCount,
-    reasoningEffort: SEMANTIC_DEDUPE_REASONING_EFFORT,
-    requestedModel: SEMANTIC_DEDUPE_REQUESTED_MODEL,
-    usedModel: SEMANTIC_DEDUPE_REQUESTED_MODEL,
+    reasoningEffort: normalizedOptions.reasoningEffort,
+    requestedModel: normalizedOptions.model,
+    usedModel: normalizedOptions.model,
   })
 }
 
@@ -136,7 +154,10 @@ const withSemanticDedupeTimeout = async <Result,>(operation: Promise<Result>) =>
   }
 }
 
-const fetchSemanticDedupeEvaluation = async (candidates: SemanticDuplicateCandidate[]) => {
+const fetchSemanticDedupeEvaluation = async (
+  candidates: SemanticDuplicateCandidate[],
+  options: SemanticDedupeEvaluatorOptions,
+) => {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => {
     controller.abort()
@@ -144,7 +165,10 @@ const fetchSemanticDedupeEvaluation = async (candidates: SemanticDuplicateCandid
 
   try {
     return await fetch(SEMANTIC_DEDUPE_DEV_ENDPOINT, {
-      body: JSON.stringify({ candidates }),
+      body: JSON.stringify({
+        candidates,
+        options: normalizeSemanticDedupeOptions(options),
+      }),
       headers: {
         "Content-Type": "application/json",
       },
@@ -161,10 +185,13 @@ const fetchSemanticDedupeEvaluation = async (candidates: SemanticDuplicateCandid
   }
 }
 
-const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCandidate[]) => {
-  recordPendingEvaluatorRun(candidates.length)
+const evaluateCandidatesWithDevServer = async (
+  candidates: SemanticDuplicateCandidate[],
+  options: SemanticDedupeEvaluatorOptions,
+) => {
+  recordPendingEvaluatorRun(candidates.length, options)
 
-  const response = await fetchSemanticDedupeEvaluation(candidates)
+  const response = await fetchSemanticDedupeEvaluation(candidates, options)
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as unknown
@@ -185,18 +212,32 @@ const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCand
 
 export const SemanticDedupeProvider = () => {
   const user = useWhoami()
+  const semanticDedupeSettings = useAISettingSelector((settings) => ({
+    debugPanel: settings.semanticDedupeDebugPanel,
+    enabled: settings.semanticDedupeEnabled,
+    model: settings.semanticDedupeModel,
+    reasoningEffort: settings.semanticDedupeReasoningEffort,
+  }))
 
   useSemanticDedupeHydration(user?.id)
 
   useEffect(() => {
+    if (!semanticDedupeSettings.enabled) {
+      return registerSemanticDuplicateEvaluator(null)
+    }
+
+    const evaluatorOptions = normalizeSemanticDedupeOptions({
+      model: semanticDedupeSettings.model,
+      reasoningEffort: semanticDedupeSettings.reasoningEffort,
+    })
     const semanticDedupeService = ipcServices?.semanticDedupe
     if (window.electron && semanticDedupeService) {
       return registerSemanticDuplicateEvaluator(
         async (candidates: SemanticDuplicateCandidate[]) => {
-          recordPendingEvaluatorRun(candidates.length)
+          recordPendingEvaluatorRun(candidates.length, evaluatorOptions)
 
           const result = await withSemanticDedupeTimeout(
-            semanticDedupeService.evaluateCandidates({ candidates }),
+            semanticDedupeService.evaluateCandidates({ candidates, options: evaluatorOptions }),
           )
           const debug = isRecord(result) ? parseEvaluatorRunInfo(result.debug) : null
           if (debug) {
@@ -209,13 +250,20 @@ export const SemanticDedupeProvider = () => {
     }
 
     if (import.meta.env.DEV) {
-      return registerSemanticDuplicateEvaluator(evaluateCandidatesWithDevServer, "dev-server")
+      return registerSemanticDuplicateEvaluator(
+        (candidates) => evaluateCandidatesWithDevServer(candidates, evaluatorOptions),
+        "dev-server",
+      )
     }
 
     return registerSemanticDuplicateEvaluator(null)
-  }, [])
+  }, [
+    semanticDedupeSettings.enabled,
+    semanticDedupeSettings.model,
+    semanticDedupeSettings.reasoningEffort,
+  ])
 
-  if (!import.meta.env.DEV) return null
+  if (!semanticDedupeSettings.debugPanel) return null
 
   return <SemanticDedupeDebugPanel />
 }
