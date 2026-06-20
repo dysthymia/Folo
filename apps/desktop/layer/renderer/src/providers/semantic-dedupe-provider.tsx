@@ -17,7 +17,7 @@ import { useEffect, useState } from "react"
 import { ipcServices } from "~/lib/client"
 
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
-const SEMANTIC_DEDUPE_REQUESTED_MODEL = "GPT-5.3-Codex-Spark"
+const SEMANTIC_DEDUPE_REQUESTED_MODEL = "gpt-5.3-codex-spark"
 const SEMANTIC_DEDUPE_REASONING_EFFORT = "low"
 const SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT = 30_000
 
