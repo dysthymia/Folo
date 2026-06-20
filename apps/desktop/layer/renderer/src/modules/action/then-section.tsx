@@ -1,8 +1,6 @@
 import { Button } from "@follow/components/ui/button/index.js"
 import { Input } from "@follow/components/ui/input/index.js"
 import type { ActionAction } from "@follow/store/action/constant"
-import { useActionRule } from "@follow/store/action/hooks"
-import { actionActions } from "@follow/store/action/store"
 import { cn } from "@follow/utils/utils"
 import type { ActionId } from "@follow-app/client-sdk"
 import { merge } from "es-toolkit/compat"
@@ -18,6 +16,7 @@ import {
 } from "~/components/ui/dropdown-menu/dropdown-menu.js"
 
 import { useSettingModal } from "../settings/modal/useSettingModal"
+import { useActionScope, useScopedActionActions, useScopedActionRule } from "./action-scope"
 import { availableActionMap } from "./constants"
 
 type ThenSectionProps = {
@@ -27,13 +26,15 @@ type ThenSectionProps = {
 
 export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSectionProps) => {
   const { t } = useTranslation("settings")
-  const result = useActionRule(index, (a) => a.result)
+  const scope = useActionScope()
+  const scopedActionActions = useScopedActionActions()
+  const result = useScopedActionRule(index, (a) => a.result)
 
-  const rewriteRules = useActionRule(index, (a) => a.result.rewriteRules)
-  const webhooks = useActionRule(index, (a) => a.result.webhooks)
+  const rewriteRules = useScopedActionRule(index, (a) => a.result.rewriteRules)
+  const webhooks = useScopedActionRule(index, (a) => a.result.webhooks)
   const settingModalPresent = useSettingModal()
 
-  const disabled = useActionRule(index, (a) => a.result.disabled)
+  const disabled = useScopedActionRule(index, (a) => a.result.disabled)
 
   const availableActions = useMemo(() => {
     const extendedAvailableActionMap: Record<
@@ -51,7 +52,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                 disabled={disabled}
                 className="flex items-center justify-between rounded-lg bg-fill-quaternary px-4 py-3 text-xs text-text-tertiary transition-colors hover:bg-fill-tertiary hover:text-text disabled:opacity-50"
                 onClick={() => {
-                  actionActions.addRewriteRule(index)
+                  scopedActionActions.addRewriteRule(index)
                 }}
               >
                 <span>{t("actions.action_card.rewrite_rules")}</span>
@@ -61,7 +62,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
               <div className="flex flex-col gap-3">
                 {rewriteRules.map((rule, rewriteIdx) => {
                   const change = (key: "from" | "to", value: string) => {
-                    actionActions.updateRewriteRule({
+                    scopedActionActions.updateRewriteRule({
                       index,
                       rewriteRuleIndex: rewriteIdx,
                       key,
@@ -99,7 +100,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                           ariaLabel={t("actions.action_card.add")}
                           disabled={disabled}
                           onClick={() => {
-                            actionActions.addRewriteRule(index)
+                            scopedActionActions.addRewriteRule(index)
                           }}
                         />
                         <IconButton
@@ -108,7 +109,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                           ariaLabel={t("actions.action_card.summary.delete")}
                           disabled={disabled}
                           onClick={() => {
-                            actionActions.deleteRewriteRule(index, rewriteIdx)
+                            scopedActionActions.deleteRewriteRule(index, rewriteIdx)
                           }}
                         />
                       </div>
@@ -129,7 +130,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                 disabled={disabled}
                 className="flex items-center justify-between rounded-lg bg-fill-quaternary px-4 py-3 text-xs text-text-tertiary transition-colors hover:bg-fill-tertiary hover:text-text disabled:opacity-50"
                 onClick={() => {
-                  actionActions.addWebhook(index)
+                  scopedActionActions.addWebhook(index)
                 }}
               >
                 <span>{t("actions.action_card.webhooks")}</span>
@@ -149,7 +150,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                         className="h-9"
                         placeholder="https://"
                         onChange={(event) => {
-                          actionActions.updateWebhook({
+                          scopedActionActions.updateWebhook({
                             index,
                             webhookIndex: webhookIdx,
                             value: event.target.value,
@@ -162,7 +163,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                           ariaLabel={t("actions.action_card.add")}
                           disabled={disabled}
                           onClick={() => {
-                            actionActions.addWebhook(index)
+                            scopedActionActions.addWebhook(index)
                           }}
                         />
                         <IconButton
@@ -171,7 +172,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                           ariaLabel={t("actions.action_card.summary.delete")}
                           disabled={disabled}
                           onClick={() => {
-                            actionActions.deleteWebhook(index, webhookIdx)
+                            scopedActionActions.deleteWebhook(index, webhookIdx)
                           }}
                         />
                       </div>
@@ -184,8 +185,14 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
         ),
       },
     })
-    return Object.values(extendedAvailableActionMap)
-  }, [disabled, index, rewriteRules, t, webhooks])
+    const actions = Object.values(extendedAvailableActionMap)
+
+    if (scope === "local") {
+      return actions.filter((action) => action.value === "block" || action.value === "silence")
+    }
+
+    return actions
+  }, [disabled, index, rewriteRules, scope, scopedActionActions, t, webhooks])
 
   const enabledActions = useMemo(() => {
     if (!result) return []
@@ -243,7 +250,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                         if (action.onEnable) {
                           action.onEnable(index)
                         } else {
-                          actionActions.patchRule(index, { result: { [action.value]: true } })
+                          scopedActionActions.patchRule(index, { result: { [action.value]: true } })
                         }
                       }}
                     >
@@ -311,7 +318,7 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                           disabled={disabled}
                           className="hover:text-red"
                           onClick={() => {
-                            actionActions.deleteRuleAction(index, action.value)
+                            scopedActionActions.deleteRuleAction(index, action.value)
                           }}
                         />
                       </div>
@@ -342,7 +349,9 @@ export const ThenSection = ({ index, variant: _variant = "detail" }: ThenSection
                             if (action.onEnable) {
                               action.onEnable(index)
                             } else {
-                              actionActions.patchRule(index, { result: { [action.value]: true } })
+                              scopedActionActions.patchRule(index, {
+                                result: { [action.value]: true },
+                              })
                             }
                           }}
                         >

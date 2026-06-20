@@ -2,8 +2,6 @@ import { Button } from "@follow/components/ui/button/index.js"
 import { Input } from "@follow/components/ui/input/index.js"
 import * as ScrollArea from "@follow/components/ui/scroll-area/ScrollArea.js"
 import { Switch } from "@follow/components/ui/switch/index.jsx"
-import { useActionRule, useActionRules, useUpdateActionsMutation } from "@follow/store/action/hooks"
-import { actionActions } from "@follow/store/action/store"
 import { nextFrame } from "@follow/utils"
 import { cn } from "@follow/utils/utils"
 import { useEffect, useState } from "react"
@@ -11,6 +9,12 @@ import { useTranslation } from "react-i18next"
 
 import { useDialog } from "~/components/ui/modal/stacked/hooks"
 
+import {
+  useScopedActionActions,
+  useScopedActionRule,
+  useScopedActionRules,
+  useScopedUpdateActionsMutation,
+} from "./action-scope"
 import { buildActionSummary, buildConditionSummary, getRuleDisplayName } from "./rule-summary"
 import { ThenSection } from "./then-section"
 import { WhenSection } from "./when-section"
@@ -28,7 +32,7 @@ export const RuleCard = ({
   defaultOpen = false,
   onOpenChange,
 }: RuleCardProps) => {
-  const ruleExists = useActionRules((rules) => Boolean(rules[index]))
+  const ruleExists = useScopedActionRules((rules) => Boolean(rules[index]))
 
   if (!ruleExists) {
     return null
@@ -71,8 +75,8 @@ const CompactRuleCard = ({
   onOpenChange?: (open: boolean) => void
 }) => {
   const { t } = useTranslation("settings")
-  const rule = useActionRule(index)
-  const disabled = useActionRule(index, (a) => a.result.disabled)
+  const rule = useScopedActionRule(index)
+  const disabled = useScopedActionRule(index, (a) => a.result.disabled)
   const [open, setOpen] = useState(defaultOpen)
 
   useEffect(() => {
@@ -133,9 +137,10 @@ const CompactRuleCard = ({
 
 const RuleCardToolbar = ({ index }: { index: number }) => {
   const { t } = useTranslation("settings")
-  const rule = useActionRule(index)
-  const ruleCount = useActionRules((s) => s.length)
-  const mutation = useUpdateActionsMutation()
+  const rule = useScopedActionRule(index)
+  const ruleCount = useScopedActionRules((s) => s.length)
+  const scopedActionActions = useScopedActionActions()
+  const mutation = useScopedUpdateActionsMutation()
   const { ask } = useDialog()
 
   if (!rule) {
@@ -154,14 +159,14 @@ const RuleCardToolbar = ({ index }: { index: number }) => {
         variant: "danger",
         message: t("actions.action_card.summary.delete_message"),
         onConfirm: () => {
-          actionActions.deleteRule(index)
+          scopedActionActions.deleteRule(index)
           nextFrame(() => {
             mutation.mutate()
           })
         },
       })
     } else {
-      actionActions.deleteRule(index)
+      scopedActionActions.deleteRule(index)
     }
   }
 
@@ -172,14 +177,14 @@ const RuleCardToolbar = ({ index }: { index: number }) => {
         placeholder={t("actions.action_card.name")}
         className="h-9 min-w-[160px] flex-1 bg-transparent px-3 text-base font-semibold shadow-none ring-0 focus-visible:ring-0"
         onChange={(e) => {
-          actionActions.patchRule(index, { name: e.target.value })
+          scopedActionActions.patchRule(index, { name: e.target.value })
         }}
       />
       <div className="flex items-center gap-3">
         <Switch
           checked={!disabled}
           onCheckedChange={(checked) => {
-            actionActions.patchRule(index, {
+            scopedActionActions.patchRule(index, {
               result: { disabled: !checked },
             })
           }}

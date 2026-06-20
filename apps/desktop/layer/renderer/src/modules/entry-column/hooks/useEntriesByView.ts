@@ -1,4 +1,6 @@
 import { FeedViewType, getView } from "@follow/constants"
+import { useLocalActionHydration, useLocalActionRevision } from "@follow/store/action/local-hooks"
+import { filterLocalActionEntryIds } from "@follow/store/action/local-match"
 import { useCollectionEntryList } from "@follow/store/collection/hooks"
 import { isOnboardingEntryUrl } from "@follow/store/constants/onboarding"
 import {
@@ -19,6 +21,7 @@ import type { UseEntriesReturn } from "@follow/store/entry/types"
 import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
 import { useFolderFeedsByFeedId } from "@follow/store/subscription/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
+import { useWhoami } from "@follow/store/user/hooks"
 import { nextFrame } from "@follow/utils"
 import { isBizId } from "@follow/utils/utils"
 import { useMutation } from "@tanstack/react-query"
@@ -126,6 +129,7 @@ const useLocalEntries = (): UseEntriesReturn => {
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
   )
+  const localActionRevision = useLocalActionRevision()
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
@@ -160,6 +164,7 @@ const useLocalEntries = (): UseEntriesReturn => {
   const allEntries = useEntryStore(
     useCallback(
       (state) => {
+        void localActionRevision
         const ids = isCollection
           ? entryIdsByCollections
           : showEntriesByView
@@ -184,7 +189,7 @@ const useLocalEntries = (): UseEntriesReturn => {
         })
 
         const titleDedupedEntryIds = dedupeEntryIdsByTitle({
-          entryIds: visibleEntryIds,
+          entryIds: filterLocalActionEntryIds(visibleEntryIds),
           getTitle: (entryId) => state.data[entryId]?.title,
         })
 
@@ -199,6 +204,7 @@ const useLocalEntries = (): UseEntriesReturn => {
         entryIdsByView,
         isCollection,
         localQueryKey,
+        localActionRevision,
         showEntriesByView,
         unreadOnly,
       ],
@@ -259,6 +265,9 @@ const useLocalEntries = (): UseEntriesReturn => {
 
 export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
   const { view, listId } = useRouteParams()
+  const user = useWhoami()
+
+  useLocalActionHydration(user?.id)
 
   const remoteQuery = useRemoteEntries()
   const localQuery = useLocalEntries()

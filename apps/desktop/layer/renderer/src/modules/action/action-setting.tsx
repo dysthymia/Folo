@@ -1,14 +1,10 @@
 import { Button } from "@follow/components/ui/button/index.js"
 import { LoadingWithIcon } from "@follow/components/ui/loading/index.jsx"
 import * as ScrollArea from "@follow/components/ui/scroll-area/ScrollArea.js"
-import {
-  useActionRules,
-  useIsActionDataDirty,
-  usePrefetchActions,
-  useUpdateActionsMutation,
-} from "@follow/store/action/hooks"
+import { SegmentGroup, SegmentItem } from "@follow/components/ui/segment/index.js"
+import { useLocalActionHydration } from "@follow/store/action/local-hooks"
 import type { ActionItem } from "@follow/store/action/store"
-import { actionActions } from "@follow/store/action/store"
+import { useWhoami } from "@follow/store/user/hooks"
 import { nextFrame } from "@follow/utils"
 import { JsonObfuscatedCodec } from "@follow/utils/json-codec"
 import { cn } from "@follow/utils/utils"
@@ -34,6 +30,15 @@ import { getI18n } from "~/i18n"
 import { copyToClipboard, readFromClipboard } from "~/lib/clipboard"
 import { toastFetchError } from "~/lib/error-parser"
 import { downloadJsonFile, selectJsonFile } from "~/lib/export"
+import type { ActionScope } from "~/modules/action/action-scope"
+import {
+  ActionScopeProvider,
+  useScopedActionActions,
+  useScopedActionDataDirty,
+  useScopedActionRules,
+  useScopedPrefetchActions,
+  useScopedUpdateActionsMutation,
+} from "~/modules/action/action-scope"
 import { RuleCard } from "~/modules/action/rule-card"
 import {
   buildActionSummary,
@@ -84,11 +89,31 @@ const EmptyActionPlaceholder = ({ onCreateRule }: { onCreateRule: () => void }) 
 }
 
 export const ActionSetting = () => {
-  const actions = useActionRules()
+  const [scope, setScope] = useState<ActionScope>("cloud")
+  const user = useWhoami()
+
+  useLocalActionHydration(user?.id)
+
+  return (
+    <ActionScopeProvider value={scope}>
+      <ActionSettingContent scope={scope} onScopeChange={setScope} />
+    </ActionScopeProvider>
+  )
+}
+
+const ActionSettingContent = ({
+  onScopeChange,
+  scope,
+}: {
+  onScopeChange: (scope: ActionScope) => void
+  scope: ActionScope
+}) => {
+  const actions = useScopedActionRules()
+  const scopedActionActions = useScopedActionActions()
   const { t } = useTranslation("settings")
 
   const [selectedRuleIndex, setSelectedRuleIndex] = useState(0)
-  const actionQuery = usePrefetchActions()
+  const actionQuery = useScopedPrefetchActions()
 
   useEffect(() => {
     if (actions.length === 0) {
@@ -115,14 +140,20 @@ export const ActionSetting = () => {
 
   const handleCreateRule = () => {
     const nextIndex = actions.length
-    actionActions.addRule((number) => t("actions.actionName", { number }))
+    scopedActionActions.addRule((number) => t("actions.actionName", { number }))
     setSelectedRuleIndex(nextIndex)
   }
 
   return (
     <>
       <ActionButtonGroup onCreateRule={handleCreateRule} />
-      <ShareImportSection />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SegmentGroup value={scope} onValueChanged={(value) => onScopeChange(value as ActionScope)}>
+          <SegmentItem value="cloud" label={t("actions.scope.cloud")} />
+          <SegmentItem value="local" label={t("actions.scope.local")} />
+        </SegmentGroup>
+        <ShareImportSection />
+      </div>
       {hasActions ? (
         <div className="flex min-h-0 w-full flex-1 flex-col @[960px]:absolute @[960px]:inset-x-0 @[960px]:bottom-0 @[960px]:top-12">
           <div className="hidden h-full flex-1 @[960px]:flex @[960px]:h-0 @[960px]:overflow-hidden @[960px]:rounded-lg @[960px]:border @[960px]:border-fill-secondary">
@@ -169,24 +200,25 @@ export const ActionSetting = () => {
 
 const ShareImportSection = () => {
   const { t } = useTranslation("settings")
-  const actionLength = useActionRules((actions) => actions.length)
+  const actionLength = useScopedActionRules((actions) => actions.length)
+  const scopedActionActions = useScopedActionActions()
   const hasActions = actionLength > 0
 
   const handleExport = useCallback(() => {
     try {
-      const jsonData = actionActions.exportRules()
+      const jsonData = scopedActionActions.exportRules()
       const filename = generateExportFilename()
       downloadJsonFile(jsonData, filename)
       toast.success(`Action rules exported successfully as ${filename}`)
     } catch {
       toast.error("Failed to export action rules")
     }
-  }, [])
+  }, [scopedActionActions])
 
   const handleImport = useCallback(async () => {
     try {
       const jsonData = await selectJsonFile()
-      const result = actionActions.importRules(jsonData)
+      const result = scopedActionActions.importRules(jsonData)
 
       if (result.success) {
         toast.success(result.message)
@@ -199,12 +231,12 @@ const ShareImportSection = () => {
       }
       toast.error("Failed to import action rules")
     }
-  }, [])
+  }, [scopedActionActions])
 
   const foloPrefix = "folo:actions#"
   const handleCopyToClipboard = useCallback(async () => {
     try {
-      const jsonData = actionActions.exportRules()
+      const jsonData = scopedActionActions.exportRules()
       const codecData = JsonObfuscatedCodec.encode(jsonData)
       await copyToClipboard(`${foloPrefix}${codecData}`)
       toast.success("Action rules copied to clipboard")
@@ -212,7 +244,7 @@ const ShareImportSection = () => {
       toast.error("Failed to copy action rules to clipboard")
       console.error(error)
     }
-  }, [foloPrefix])
+  }, [foloPrefix, scopedActionActions])
 
   const handleImportFromClipboard = useCallback(async () => {
     try {
@@ -223,7 +255,7 @@ const ShareImportSection = () => {
       }
       const codecData = clipboardData.slice(foloPrefix.length)
       const jsonData = JsonObfuscatedCodec.decode(codecData)
-      const result = actionActions.importRules(jsonData)
+      const result = scopedActionActions.importRules(jsonData)
 
       if (result.success) {
         toast.success(result.message)
@@ -238,10 +270,10 @@ const ShareImportSection = () => {
       }
       console.error(error)
     }
-  }, [foloPrefix])
+  }, [foloPrefix, scopedActionActions])
 
   return (
-    <div className="mb-4 flex justify-end">
+    <div className="flex justify-end">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -295,10 +327,11 @@ const RuleList = ({
   onSelect: (index: number) => void
   onDelete: (index: number) => void
 }) => {
-  const rules = useActionRules()
+  const rules = useScopedActionRules()
   const { t } = useTranslation("settings")
-  const ruleCount = useActionRules((s) => s.length)
-  const mutation = useUpdateActionsMutation()
+  const ruleCount = useScopedActionRules((s) => s.length)
+  const scopedActionActions = useScopedActionActions()
+  const mutation = useScopedUpdateActionsMutation()
   const { ask } = useDialog()
   const showContextMenu = useShowContextMenu()
 
@@ -310,7 +343,7 @@ const RuleList = ({
           variant: "danger",
           message: t("actions.action_card.summary.delete_message"),
           onConfirm: () => {
-            actionActions.deleteRule(index)
+            scopedActionActions.deleteRule(index)
             onDelete(index)
             nextFrame(() => {
               mutation.mutate()
@@ -318,11 +351,11 @@ const RuleList = ({
           },
         })
       } else {
-        actionActions.deleteRule(index)
+        scopedActionActions.deleteRule(index)
         onDelete(index)
       }
     },
-    [ruleCount, ask, t, mutation, onDelete],
+    [ruleCount, ask, t, mutation, onDelete, scopedActionActions],
   )
 
   if (rules.length === 0) {
@@ -406,13 +439,13 @@ const RuleListItem = ({
 
 const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
   const queryClient = useQueryClient()
-  const actionLength = useActionRules((actions) => actions.length)
-  const isDirty = useIsActionDataDirty()
+  const actionLength = useScopedActionRules((actions) => actions.length)
+  const isDirty = useScopedActionDataDirty()
   const { t } = useTranslation("settings")
 
   useUnSavedBlocker(isDirty)
 
-  const mutation = useUpdateActionsMutation({
+  const mutation = useScopedUpdateActionsMutation({
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["entries"],
@@ -430,7 +463,7 @@ const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
   useEffect(() => {
     setRightView(
       <HeaderActionGroup>
-        <HeaderActionButton variant="primary" icon="i-mingcute-add-line" onClick={onCreateRule}>
+        <HeaderActionButton variant="primary" icon="i-mgc-add-cute-re" onClick={onCreateRule}>
           {t("actions.newRule")}
         </HeaderActionButton>
 

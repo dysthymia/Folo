@@ -1,12 +1,15 @@
 import type { FeedViewType } from "@follow/constants"
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
-import { useCallback, useMemo } from "react"
+import { useCallback, useEffect, useMemo } from "react"
 
 import { FEED_COLLECTION_LIST } from "../../constants/app"
 import { queryClient } from "../../context"
+import { useLocalActionRevision } from "../action/local-hooks"
+import { filterLocalActionEntryIds, getLocalActionSilenceEntryIds } from "../action/local-match"
 import { useFeedUnreadIsDirty } from "../feed/hooks"
 import { isEntryHiddenFromTimeline } from "../subscription/getter"
 import { useSyncUnreadWhenUnMatch } from "../unread/hooks"
+import { unreadSyncService } from "../unread/store"
 import {
   getEntryIdsByCategorySelector,
   getEntryIdsByFeedIdSelector,
@@ -74,6 +77,7 @@ export const useEntriesQuery = (
 
   const fetchUnread = unreadOnly
   const feedUnreadDirty = useFeedUnreadIsDirty((feedId as string) || "")
+  const localActionRevision = useLocalActionRevision()
 
   const isPop =
     "history" in globalThis && "isPop" in globalThis.history && !!globalThis.history.isPop
@@ -175,7 +179,18 @@ export const useEntriesQuery = (
     })
   }, [query.data, query.isLoading, query.isError, hidePrivateSubscriptionsInTimeline])
 
-  const entriesIds = fetchedEntryIds
+  useEffect(() => {
+    void localActionRevision
+    const silenceEntryIds = getLocalActionSilenceEntryIds(fetchedEntryIds)
+    if (silenceEntryIds.length === 0) return
+
+    unreadSyncService.queueEntriesAsRead(silenceEntryIds)
+  }, [fetchedEntryIds, localActionRevision])
+
+  const entriesIds = useMemo(() => {
+    void localActionRevision
+    return filterLocalActionEntryIds(fetchedEntryIds)
+  }, [fetchedEntryIds, localActionRevision])
 
   useSyncUnreadWhenUnMatch(entriesIds)
 

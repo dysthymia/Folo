@@ -10,13 +10,13 @@ import {
 } from "@follow/components/ui/select/index.jsx"
 import { ResponsiveSelect } from "@follow/components/ui/select/responsive.js"
 import { filterFieldOptions, filterOperatorOptions } from "@follow/store/action/constant"
-import { useActionRule } from "@follow/store/action/hooks"
-import { actionActions } from "@follow/store/action/store"
 import type { ActionFeedField, ActionOperation } from "@follow-app/client-sdk"
 import { Fragment } from "react"
 import { useTranslation } from "react-i18next"
 
 import { ViewSelectContent } from "~/modules/feed/view-select-content"
+
+import { useScopedActionActions, useScopedActionRule } from "./action-scope"
 
 type WhenSectionProps = {
   index: number
@@ -24,19 +24,20 @@ type WhenSectionProps = {
 
 export const WhenSection = ({ index }: WhenSectionProps) => {
   const { t } = useTranslation("settings")
+  const scopedActionActions = useScopedActionActions()
 
-  const disabled = useActionRule(index, (a) => a.result.disabled)
-  const condition = useActionRule(index, (a) => a.condition) ?? []
+  const disabled = useScopedActionRule(index, (a) => a.result.disabled)
+  const condition = useScopedActionRule(index, (a) => a.condition) ?? []
 
   const mode = condition.length > 0 ? "filter" : "all"
 
   const handleModeChange = (value: "all" | "filter") => {
     if (value === "all" && condition.length > 0) {
-      actionActions.toggleRuleFilter(index)
+      scopedActionActions.toggleRuleFilter(index)
     }
 
     if (value === "filter" && condition.length === 0) {
-      actionActions.toggleRuleFilter(index)
+      scopedActionActions.toggleRuleFilter(index)
     }
   }
 
@@ -74,7 +75,7 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
                     }
 
                     const change = (key: string, value: string | number) => {
-                      actionActions.pathCondition(actionConditionIndex, {
+                      scopedActionActions.pathCondition(actionConditionIndex, {
                         [key]: value,
                       })
                     }
@@ -115,7 +116,7 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
                             className="flex size-9 shrink-0 items-center justify-center self-end rounded-lg border border-fill-secondary bg-transparent text-text-secondary transition-colors hover:border-fill hover:bg-fill-quinary hover:text-text disabled:opacity-50 @[800px]:self-center"
                             disabled={disabled}
                             onClick={() => {
-                              actionActions.deleteConditionItem(actionConditionIndex)
+                              scopedActionActions.deleteConditionItem(actionConditionIndex)
                             }}
                           >
                             <i className="i-mgc-delete-2-cute-re" />
@@ -137,7 +138,7 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
                     buttonClassName="w-fit border-dashed border-border "
                     disabled={disabled}
                     onClick={() => {
-                      actionActions.addConditionItem({
+                      scopedActionActions.addConditionItem({
                         ruleIndex: index,
                         groupIndex: orConditionIdx,
                       })
@@ -162,7 +163,7 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
             size="sm"
             buttonClassName="w-fit border-dashed border-border "
             onClick={() => {
-              actionActions.addConditionGroup({ ruleIndex: index })
+              scopedActionActions.addConditionGroup({ ruleIndex: index })
             }}
             disabled={disabled}
           >

@@ -31,6 +31,7 @@ import {
   LazyPWAPrompt,
   LazyReloadPrompt,
 } from "./lazy/index"
+import { LocalActionProvider } from "./local-action-provider"
 import { SemanticDedupeProvider } from "./semantic-dedupe-provider"
 import { ServerConfigsProvider } from "./server-configs-provider"
 import { SettingSync } from "./setting-sync"
@@ -50,6 +51,7 @@ export const RootProviders: FC<PropsWithChildren> = ({ children }) => (
 
                   <UserProvider />
                   <ServerConfigsProvider />
+                  <LocalActionProvider />
                   <SemanticDedupeProvider />
 
                   <StableRouterProvider />
