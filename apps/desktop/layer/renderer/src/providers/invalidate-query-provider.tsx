@@ -6,6 +6,8 @@ import { useEffect, useRef } from "react"
 import { appLog } from "~/lib/log"
 
 const staleTime = 600_000 // 10min
+const shouldInvalidateVisibleQuery = (query: { queryKey: readonly unknown[] }) =>
+  query.queryKey[0] !== "entries"
 
 export class ElectronCloseEvent extends Event {
   static type = "electron-close"
@@ -52,10 +54,7 @@ const InvalidateQueryProviderElectron = () => {
       } else {
         appLog("Window switch to visible, invalidate all queries except entries")
         queryClient.invalidateQueries({
-          predicate(query) {
-            // Ignore entries queries
-            return query.queryKey[0] !== "entries"
-          },
+          predicate: shouldInvalidateVisibleQuery,
         })
       }
       currentTimeRef.current = 0
@@ -95,8 +94,10 @@ const InvalidateQueryProviderWebApp = () => {
     currentTimeRef.current = now
     currentVisibilityRef.current = pageVisibility
     if (pageVisibility) {
-      appLog("Window switch to visible, invalidate all queries")
-      queryClient.invalidateQueries()
+      appLog("Window switch to visible, invalidate all queries except entries")
+      queryClient.invalidateQueries({
+        predicate: shouldInvalidateVisibleQuery,
+      })
     }
   }, [pageVisibility, queryClient])
   return null
