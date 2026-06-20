@@ -132,8 +132,8 @@ describe("semantic duplicate entry marking", () => {
 
     expect(candidates).toHaveLength(1)
     expect(candidates[0]).toMatchObject({
-      keepEntryId: firstEntry.id,
-      testEntryId: secondEntry.id,
+      keepEntryId: secondEntry.id,
+      testEntryId: firstEntry.id,
     })
     expect(candidates[0]?.entries[0]).toMatchObject({
       description: firstEntry.description,
@@ -187,8 +187,8 @@ describe("semantic duplicate entry marking", () => {
 
     expect(candidates).toHaveLength(1)
     expect(candidates[0]).toMatchObject({
-      keepEntryId: newestEntry.id,
-      testEntryId: newestCandidate.id,
+      keepEntryId: newestCandidate.id,
+      testEntryId: newestEntry.id,
     })
   })
 
@@ -239,8 +239,8 @@ describe("semantic duplicate entry marking", () => {
     expect(
       candidates.some(
         (candidate) =>
-          candidate.keepEntryId === newEntry.id &&
-          [settledEntry.id, settledDuplicate.id].includes(candidate.testEntryId),
+          candidate.testEntryId === newEntry.id &&
+          [settledEntry.id, settledDuplicate.id].includes(candidate.keepEntryId),
       ),
     ).toBe(true)
   })

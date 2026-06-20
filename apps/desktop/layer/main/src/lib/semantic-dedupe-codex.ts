@@ -115,7 +115,7 @@ Rules:
 - Return duplicate=true only when both entries describe the same core event, entities, facts, and conclusion.
 - Return duplicate=false when they are only the same topic, when one is a later update, when numbers differ, when the time window differs, or when a key fact changes.
 - feedTitle and urlHost are supporting context, not decisive by themselves.
-- Prefer keepEntryId unless the other entry is clearly more complete or more recent.
+- Prefer keepEntryId unless the other entry is clearly more complete or materially better.
 - Use title and description. Do not infer facts that are not present.
 - Be conservative. If uncertain, duplicate=false or confidence below 0.85.
 

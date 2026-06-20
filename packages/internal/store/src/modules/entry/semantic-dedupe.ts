@@ -248,6 +248,8 @@ const set = createImmerSetter(useSemanticDedupeStore)
 
 let semanticDuplicateEvaluator: SemanticDuplicateEvaluator | null = null
 let isProcessingCandidates = false
+let observedEntryIds: string[] | null = null
+let processingEntryIds: string[] | null = null
 let queuedEntryIds: string[] | null = null
 let lastFailedEntryIdsKey: string | null = null
 
@@ -260,6 +262,8 @@ export const registerSemanticDuplicateEvaluator = (
   semanticDuplicateEvaluator = evaluator
   lastFailedEntryIdsKey = null
   if (!evaluator) {
+    observedEntryIds = null
+    processingEntryIds = null
     queuedEntryIds = null
   }
   set((state) => {
@@ -272,6 +276,8 @@ export const registerSemanticDuplicateEvaluator = (
   return () => {
     if (semanticDuplicateEvaluator === evaluator) {
       semanticDuplicateEvaluator = null
+      observedEntryIds = null
+      processingEntryIds = null
       queuedEntryIds = null
       set((state) => {
         state.debug.evaluatorSource = "none"
@@ -285,6 +291,8 @@ export const registerSemanticDuplicateEvaluator = (
 
 export const semanticDedupeActions = {
   hydrate: (ownerKey: string | undefined) => {
+    observedEntryIds = null
+    processingEntryIds = null
     queuedEntryIds = null
     lastFailedEntryIdsKey = null
     const persistedState = ownerKey
@@ -606,10 +614,10 @@ export const getSemanticDuplicateCandidates = (
       candidates.push({
         entries: [left.context, right.context],
         index: left.index,
-        keepEntryId: left.context.id,
+        keepEntryId: right.context.id,
         pairKey,
         similarity,
-        testEntryId: right.context.id,
+        testEntryId: left.context.id,
       })
     }
   }
@@ -685,18 +693,20 @@ const processQueuedSemanticDedupeEntries = async () => {
   const entryIds = queuedEntryIds
   queuedEntryIds = null
   if (!entryIds) return
+  processingEntryIds = entryIds
 
   const evaluator = semanticDuplicateEvaluator
   const candidates = getSemanticDuplicateCandidates(entryIds)
   semanticDedupeActions.recordScan(entryIds.length, candidates)
   if (candidates.length === 0) {
     semanticDedupeActions.markEntriesSettled(entryIds)
+    processingEntryIds = null
     semanticDedupeActions.recordProcessingQueued(0)
     return
   }
 
   isProcessingCandidates = true
-  semanticDedupeActions.recordProcessingQueued(0)
+  semanticDedupeActions.recordProcessingQueued(entryIds.length)
   semanticDedupeActions.recordProcessingStarted(candidates)
   semanticDedupeActions.markCandidatesPending(candidates)
 
@@ -711,11 +721,13 @@ const processQueuedSemanticDedupeEntries = async () => {
     }
   } catch (error) {
     lastFailedEntryIdsKey = entryIds.join("\n")
+    processingEntryIds = null
     queuedEntryIds = null
     semanticDedupeActions.clearPendingCandidates(candidates.map((candidate) => candidate.pairKey))
     semanticDedupeActions.recordProcessingFailed(error)
   } finally {
     isProcessingCandidates = false
+    processingEntryIds = null
 
     if (queuedEntryIds && hasSemanticDuplicateEvaluator()) {
       queueMicrotask(() => {
@@ -729,9 +741,21 @@ const enqueueSemanticDedupeEntries = (entryIds: string[]) => {
   const entryIdsKey = entryIds.join("\n")
   if (entryIdsKey === lastFailedEntryIdsKey) return
 
-  queuedEntryIds = mergeEntryIds(entryIds, queuedEntryIds)
+  observedEntryIds = getNextObservedEntryIds(entryIds)
+  queuedEntryIds = mergeEntryIds(
+    observedEntryIds,
+    mergeEntryIds(processingEntryIds ?? [], queuedEntryIds),
+  )
   semanticDedupeActions.recordProcessingQueued(queuedEntryIds.length)
   void processQueuedSemanticDedupeEntries()
+}
+
+const getNextObservedEntryIds = (entryIds: string[]) => {
+  if (!observedEntryIds || entryIds.length === 0) return entryIds
+
+  const observedEntryIdSet = new Set(observedEntryIds)
+  const hasOverlap = entryIds.some((entryId) => observedEntryIdSet.has(entryId))
+  return hasOverlap ? mergeEntryIds(entryIds, observedEntryIds) : entryIds
 }
 
 const mergeEntryIds = (nextEntryIds: string[], existingEntryIds: string[] | null) => {
