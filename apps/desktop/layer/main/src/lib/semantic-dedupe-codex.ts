@@ -50,7 +50,7 @@ interface CodexSemanticDedupeOutput {
 const REQUESTED_CODEX_MODEL = "GPT-5.3-Codex-Spark"
 const CODEX_REASONING_EFFORT = process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT ?? "low"
 const CODEX_TIMEOUT = 20_000
-const MAX_CANDIDATES_PER_REQUEST = 8
+const MAX_CANDIDATES_PER_REQUEST = 16
 const MAX_OUTPUT_BYTES = 1024 * 1024
 const unavailableCodexModels = new Set<string>()
 
