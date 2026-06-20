@@ -227,6 +227,19 @@ describe("semantic duplicate entry marking", () => {
     })
   })
 
+  it("tracks queued debug state", () => {
+    semanticDedupeActions.recordProcessingQueued(20)
+
+    expect(useSemanticDedupeStore.getState().debug).toMatchObject({
+      queuedEntryCount: 20,
+    })
+    expect(useSemanticDedupeStore.getState().debug.lastQueuedAt).toEqual(expect.any(String))
+
+    semanticDedupeActions.hydrate("user-1")
+
+    expect(useSemanticDedupeStore.getState().debug.queuedEntryCount).toBe(0)
+  })
+
   it("marks confident duplicate and kept entries without filtering them", () => {
     useSemanticDedupeStore.setState({
       decisions: {

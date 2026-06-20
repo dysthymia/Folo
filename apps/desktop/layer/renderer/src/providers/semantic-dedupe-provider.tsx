@@ -147,7 +147,7 @@ const SemanticDedupeDebugPanel = () => {
     : debug.evaluatorSource === "none"
       ? "off"
       : "idle"
-  const statusLabel = `${status} · pending ${snapshot.pendingCount} · decisions ${snapshot.decisionCount}`
+  const statusLabel = `${status} · queued ${debug.queuedEntryCount} · pending ${snapshot.pendingCount}`
 
   return (
     <div
@@ -199,6 +199,7 @@ const SemanticDedupeDebugPanel = () => {
                 value={`${debug.lastScannedEntryCount} / ${debug.lastCandidateCount}`}
               />
               <DebugMetric label="pending" value={snapshot.pendingCount.toString()} />
+              <DebugMetric label="queued" value={debug.queuedEntryCount.toString()} />
               <DebugMetric
                 label="decisions"
                 value={`${snapshot.decisionCount} (${snapshot.confidentDuplicateCount})`}

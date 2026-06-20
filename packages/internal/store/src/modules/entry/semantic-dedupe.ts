@@ -74,12 +74,14 @@ interface SemanticDedupeDebugState {
   lastCandidateCount: number
   lastDuplicateCount: number
   lastError: string | null
+  lastQueuedAt: string | null
   lastEvaluationCount: number
   lastRunDurationMs: number | null
   lastRunFinishedAt: string | null
   lastRunStartedAt: string | null
   lastScanAt: string | null
   lastScannedEntryCount: number
+  queuedEntryCount: number
   recentCandidates: SemanticDedupeDebugRecentCandidate[]
   recentEvaluations: SemanticDedupeDebugRecentEvaluation[]
   totalErrors: number
@@ -101,12 +103,14 @@ const createDefaultDebugState = (): SemanticDedupeDebugState => ({
   lastCandidateCount: 0,
   lastDuplicateCount: 0,
   lastError: null,
+  lastQueuedAt: null,
   lastEvaluationCount: 0,
   lastRunDurationMs: null,
   lastRunFinishedAt: null,
   lastRunStartedAt: null,
   lastScanAt: null,
   lastScannedEntryCount: 0,
+  queuedEntryCount: 0,
   recentCandidates: [],
   recentEvaluations: [],
   totalErrors: 0,
@@ -199,22 +203,33 @@ const set = createImmerSetter(useSemanticDedupeStore)
 
 let semanticDuplicateEvaluator: SemanticDuplicateEvaluator | null = null
 let isProcessingCandidates = false
+let queuedEntryIds: string[] | null = null
+let lastFailedEntryIdsKey: string | null = null
+
+const hasSemanticDuplicateEvaluator = () => semanticDuplicateEvaluator !== null
 
 export const registerSemanticDuplicateEvaluator = (
   evaluator: SemanticDuplicateEvaluator | null,
   source: SemanticDuplicateEvaluatorSource = evaluator ? "custom" : "none",
 ) => {
   semanticDuplicateEvaluator = evaluator
+  lastFailedEntryIdsKey = null
+  if (!evaluator) {
+    queuedEntryIds = null
+  }
   set((state) => {
     state.debug.evaluatorSource = evaluator ? source : "none"
+    state.debug.queuedEntryCount = evaluator ? state.debug.queuedEntryCount : 0
     state.revision += 1
   })
 
   return () => {
     if (semanticDuplicateEvaluator === evaluator) {
       semanticDuplicateEvaluator = null
+      queuedEntryIds = null
       set((state) => {
         state.debug.evaluatorSource = "none"
+        state.debug.queuedEntryCount = 0
         state.revision += 1
       })
     }
@@ -223,10 +238,13 @@ export const registerSemanticDuplicateEvaluator = (
 
 export const semanticDedupeActions = {
   hydrate: (ownerKey: string | undefined) => {
+    queuedEntryIds = null
+    lastFailedEntryIdsKey = null
     set((state) => {
       state.ownerKey = ownerKey ?? null
       state.decisions = ownerKey ? readDecisionsFromStorage(ownerKey) : {}
       state.pendingPairKeys = {}
+      state.debug.queuedEntryCount = 0
       state.isHydrated = true
       state.revision += 1
     })
@@ -283,6 +301,12 @@ export const semanticDedupeActions = {
         reason: evaluation.reason ?? null,
       }))
       state.debug.totalRuns += 1
+    })
+  },
+  recordProcessingQueued: (entryCount: number) => {
+    set((state) => {
+      state.debug.lastQueuedAt = new Date().toISOString()
+      state.debug.queuedEntryCount = entryCount
     })
   },
   recordProcessingStarted: (candidates: SemanticDuplicateCandidate[]) => {
@@ -572,6 +596,61 @@ export const useSemanticDedupeHydration = (ownerKey: string | null | undefined) 
   }, [ownerKey])
 }
 
+const processQueuedSemanticDedupeEntries = async () => {
+  if (isProcessingCandidates) return
+  if (!semanticDuplicateEvaluator) return
+
+  const entryIds = queuedEntryIds
+  queuedEntryIds = null
+  if (!entryIds) return
+
+  const evaluator = semanticDuplicateEvaluator
+  const candidates = getSemanticDuplicateCandidates(entryIds)
+  semanticDedupeActions.recordScan(entryIds.length, candidates)
+  if (candidates.length === 0) {
+    semanticDedupeActions.recordProcessingQueued(0)
+    return
+  }
+
+  isProcessingCandidates = true
+  semanticDedupeActions.recordProcessingQueued(0)
+  semanticDedupeActions.recordProcessingStarted(candidates)
+  semanticDedupeActions.markCandidatesPending(candidates)
+
+  try {
+    const evaluations = await evaluator(candidates)
+    semanticDedupeActions.upsertEvaluations(candidates, evaluations)
+    semanticDedupeActions.recordProcessingFinished(evaluations)
+
+    if (!queuedEntryIds && semanticDuplicateEvaluator === evaluator) {
+      queuedEntryIds = entryIds
+      semanticDedupeActions.recordProcessingQueued(entryIds.length)
+    }
+  } catch (error) {
+    lastFailedEntryIdsKey = entryIds.join("\n")
+    queuedEntryIds = null
+    semanticDedupeActions.clearPendingCandidates(candidates.map((candidate) => candidate.pairKey))
+    semanticDedupeActions.recordProcessingFailed(error)
+  } finally {
+    isProcessingCandidates = false
+
+    if (queuedEntryIds && hasSemanticDuplicateEvaluator()) {
+      queueMicrotask(() => {
+        void processQueuedSemanticDedupeEntries()
+      })
+    }
+  }
+}
+
+const enqueueSemanticDedupeEntries = (entryIds: string[]) => {
+  const entryIdsKey = entryIds.join("\n")
+  if (entryIdsKey === lastFailedEntryIdsKey) return
+
+  queuedEntryIds = entryIds
+  semanticDedupeActions.recordProcessingQueued(entryIds.length)
+  void processQueuedSemanticDedupeEntries()
+}
+
 export const useSemanticDedupeProcessor = (entryIds: string[]) => {
   const isReady = useSemanticDedupeIsReady()
   const revision = useSemanticDedupeRevision()
@@ -581,30 +660,8 @@ export const useSemanticDedupeProcessor = (entryIds: string[]) => {
     void revision
 
     if (!isReady) return
-    if (!semanticDuplicateEvaluator || isProcessingCandidates) return
-
+    if (!semanticDuplicateEvaluator) return
     const currentEntryIds = stableEntryIds ? stableEntryIds.split("\n") : []
-    const candidates = getSemanticDuplicateCandidates(currentEntryIds)
-    semanticDedupeActions.recordScan(currentEntryIds.length, candidates)
-    if (candidates.length === 0) return
-
-    isProcessingCandidates = true
-    semanticDedupeActions.recordProcessingStarted(candidates)
-    semanticDedupeActions.markCandidatesPending(candidates)
-
-    semanticDuplicateEvaluator(candidates)
-      .then((evaluations) => {
-        semanticDedupeActions.upsertEvaluations(candidates, evaluations)
-        semanticDedupeActions.recordProcessingFinished(evaluations)
-      })
-      .catch((error) => {
-        semanticDedupeActions.clearPendingCandidates(
-          candidates.map((candidate) => candidate.pairKey),
-        )
-        semanticDedupeActions.recordProcessingFailed(error)
-      })
-      .finally(() => {
-        isProcessingCandidates = false
-      })
+    enqueueSemanticDedupeEntries(currentEntryIds)
   }, [isReady, revision, stableEntryIds])
 }
