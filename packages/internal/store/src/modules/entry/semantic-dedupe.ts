@@ -339,6 +339,7 @@ export const semanticDedupeActions = {
       state.debug.lastError = message
       state.debug.lastRunDurationMs = getRunDuration(state.debug.lastRunStartedAt, finishedAt)
       state.debug.lastRunFinishedAt = finishedAt
+      state.debug.queuedEntryCount = 0
       if (state.debug.lastEvaluatorRun?.command === "running") {
         state.debug.lastEvaluatorRun.durationMs = state.debug.lastRunDurationMs
         state.debug.lastEvaluatorRun.command = "failed"

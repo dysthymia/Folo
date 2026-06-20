@@ -202,8 +202,6 @@ const useLocalEntries = (): UseEntriesReturn => {
     ),
   )
 
-  useSemanticDedupeProcessor(allEntries)
-
   useEffect(() => {
     stickyVisibleStateRef.current = {
       queryKey: localQueryKey,
@@ -273,6 +271,7 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
   const query = remoteQuery.isReady ? remoteQuery : localQuery
   const entryIds: string[] = query.entriesIds
+  useSemanticDedupeProcessor(entryIds)
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

@@ -17,9 +17,6 @@ import {
   getEntryIsInboxSelector,
   getHasEntrySelector,
 } from "./getter"
-import {
-  useSemanticDedupeProcessor,
-} from "./semantic-dedupe"
 import { entrySyncServices, useEntryStore } from "./store"
 import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
 import { dedupeEntryIdsByTitle } from "./utils"
@@ -177,8 +174,6 @@ export const useEntriesQuery = (
       getTitle: (entryId) => titleByEntryId.get(entryId),
     })
   }, [query.data, query.isLoading, query.isError, hidePrivateSubscriptionsInTimeline])
-
-  useSemanticDedupeProcessor(fetchedEntryIds)
 
   const entriesIds = fetchedEntryIds
 

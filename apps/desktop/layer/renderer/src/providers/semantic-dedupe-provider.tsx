@@ -19,6 +19,7 @@ import { ipcServices } from "~/lib/client"
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
 const SEMANTIC_DEDUPE_REQUESTED_MODEL = "GPT-5.3-Codex-Spark"
 const SEMANTIC_DEDUPE_REASONING_EFFORT = "low"
+const SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT = 30_000
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -107,16 +108,63 @@ const recordPendingEvaluatorRun = (candidateCount: number) => {
   })
 }
 
+const createSemanticDedupeTimeoutError = () =>
+  new Error(
+    `Semantic dedupe evaluator timed out after ${Math.round(
+      SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT / 1000,
+    )}s.`,
+  )
+
+const isAbortError = (error: unknown) => error instanceof Error && error.name === "AbortError"
+
+const withSemanticDedupeTimeout = async <Result,>(operation: Promise<Result>) => {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(createSemanticDedupeTimeoutError())
+        }, SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT)
+      }),
+    ])
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+    }
+  }
+}
+
+const fetchSemanticDedupeEvaluation = async (candidates: SemanticDuplicateCandidate[]) => {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT)
+
+  try {
+    return await fetch(SEMANTIC_DEDUPE_DEV_ENDPOINT, {
+      body: JSON.stringify({ candidates }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw createSemanticDedupeTimeoutError()
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 const evaluateCandidatesWithDevServer = async (candidates: SemanticDuplicateCandidate[]) => {
   recordPendingEvaluatorRun(candidates.length)
 
-  const response = await fetch(SEMANTIC_DEDUPE_DEV_ENDPOINT, {
-    body: JSON.stringify({ candidates }),
-    headers: {
-      "Content-Type": "application/json",
-    },
-    method: "POST",
-  })
+  const response = await fetchSemanticDedupeEvaluation(candidates)
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as unknown
@@ -147,7 +195,9 @@ export const SemanticDedupeProvider = () => {
         async (candidates: SemanticDuplicateCandidate[]) => {
           recordPendingEvaluatorRun(candidates.length)
 
-          const result = await semanticDedupeService.evaluateCandidates({ candidates })
+          const result = await withSemanticDedupeTimeout(
+            semanticDedupeService.evaluateCandidates({ candidates }),
+          )
           const debug = isRecord(result) ? parseEvaluatorRunInfo(result.debug) : null
           if (debug) {
             semanticDedupeActions.recordEvaluatorRun(debug)

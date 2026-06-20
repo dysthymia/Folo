@@ -369,6 +369,39 @@ describe("semantic duplicate entry marking", () => {
     expect(useSemanticDedupeStore.getState().debug.lastEvaluatorRun).toBeNull()
   })
 
+  it("clears queued debug count when processing fails", () => {
+    useSemanticDedupeStore.setState((state) => ({
+      debug: {
+        ...state.debug,
+        isProcessing: true,
+        lastEvaluatorRun: {
+          candidateCount: 16,
+          command: "running",
+          durationMs: null,
+          fallbackUsed: false,
+          inputCandidateCount: 16,
+          reasoningEffort: "low",
+          requestedModel: "GPT-5.3-Codex-Spark",
+          usedModel: "GPT-5.3-Codex-Spark",
+        },
+        lastRunStartedAt: new Date(Date.now() - 1000).toISOString(),
+        queuedEntryCount: 42,
+      },
+    }))
+
+    semanticDedupeActions.recordProcessingFailed(new Error("Semantic dedupe timed out."))
+
+    expect(useSemanticDedupeStore.getState().debug).toMatchObject({
+      isProcessing: false,
+      lastError: "Semantic dedupe timed out.",
+      queuedEntryCount: 0,
+    })
+    expect(useSemanticDedupeStore.getState().debug.lastEvaluatorRun).toMatchObject({
+      command: "failed",
+      durationMs: expect.any(Number),
+    })
+  })
+
   it("marks confident duplicate and kept entries without filtering them", () => {
     useSemanticDedupeStore.setState({
       decisions: {
