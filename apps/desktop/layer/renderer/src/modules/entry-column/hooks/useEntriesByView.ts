@@ -10,7 +10,9 @@ import {
   useEntryIdsByView,
 } from "@follow/store/entry/hooks"
 import {
+  getSemanticDuplicateEntryRole,
   useSemanticDedupeProcessor,
+  useSemanticDedupeRevision,
 } from "@follow/store/entry/semantic-dedupe"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
@@ -270,8 +272,14 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
   // We need to add an interface to incrementally update the data based on the version hash.
 
   const query = remoteQuery.isReady ? remoteQuery : localQuery
-  const entryIds: string[] = query.entriesIds
-  useSemanticDedupeProcessor(entryIds)
+  const rawEntryIds: string[] = query.entriesIds
+  useSemanticDedupeProcessor(rawEntryIds)
+  const semanticDedupeRevision = useSemanticDedupeRevision()
+  const entryIds = useMemo(() => {
+    void semanticDedupeRevision
+
+    return rawEntryIds.filter((entryId) => getSemanticDuplicateEntryRole(entryId) !== "duplicate")
+  }, [rawEntryIds, semanticDedupeRevision])
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

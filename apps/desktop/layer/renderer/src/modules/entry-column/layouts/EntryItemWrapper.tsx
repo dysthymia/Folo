@@ -225,7 +225,6 @@ export const EntryItemWrapper: FC<
           !isWide ? "rounded-none @[650px]:rounded-md" : "rounded-md",
           isAll && "!rounded-none",
           (isActive || isContextMenuOpen) && "!bg-theme-item-active",
-          semanticDuplicateRole === "duplicate" && "opacity-60 blur-[0.4px] saturate-50",
           itemClassName,
         )}
         onClick={handleClick}
