@@ -21,7 +21,7 @@ const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
 const SEMANTIC_DEDUPE_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 const SEMANTIC_DEDUPE_DEFAULT_REASONING_EFFORT = "low"
 const SEMANTIC_DEDUPE_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const
-const SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT = 30_000
+const SEMANTIC_DEDUPE_EVALUATOR_TIMEOUT = 60_000
 
 interface SemanticDedupeEvaluatorOptions {
   model: string

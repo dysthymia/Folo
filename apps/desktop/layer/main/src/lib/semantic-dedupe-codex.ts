@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
@@ -73,9 +73,39 @@ interface CodexSemanticDedupeOutput {
 const REQUESTED_CODEX_MODEL = "gpt-5.3-codex-spark"
 const DEFAULT_CODEX_REASONING_EFFORT = "low"
 const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const
-const CODEX_TIMEOUT = 20_000
-const MAX_CANDIDATES_PER_REQUEST = 16
+const CODEX_TIMEOUT = 45_000
+const MAX_CANDIDATES_PER_REQUEST = 8
 const MAX_OUTPUT_BYTES = 1024 * 1024
+const CERTIFICATE_FILE_CANDIDATES = [
+  process.env.SSL_CERT_FILE,
+  process.env.CURL_CA_BUNDLE,
+  "/opt/homebrew/etc/ca-certificates/cert.pem",
+  "/usr/local/etc/openssl@3/cert.pem",
+  "/etc/ssl/cert.pem",
+  "/etc/ssl/certs/ca-certificates.crt",
+].filter((candidate): candidate is string => !!candidate)
+const CODEX_ENV_PASSTHROUGH_KEYS = [
+  "ALL_PROXY",
+  "CODEX_HOME",
+  "HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOGNAME",
+  "NO_PROXY",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+  "USER",
+  "all_proxy",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+] as const
 const unavailableCodexModels = new Set<string>()
 
 const outputSchema = {
@@ -154,12 +184,64 @@ const getCodexReasoningEffort = (options?: SemanticDedupeCodexOptions) =>
     options?.reasoningEffort || process.env.FOLO_SEMANTIC_DEDUPE_CODEX_REASONING_EFFORT,
   )
 
-const getCodexCandidates = () =>
-  unique(
+const isPathLikeCommand = (command: string) =>
+  command.includes("/") || (process.platform === "win32" && command.includes("\\"))
+
+const getPathSeparator = () => (process.platform === "win32" ? ";" : ":")
+
+const getExecutableExtensions = () => {
+  if (process.platform !== "win32") return [""]
+
+  return process.env.PATHEXT?.split(";").filter(Boolean) ?? [".EXE", ".CMD", ".BAT"]
+}
+
+const resolveCommandCandidate = (command: string) => {
+  if (isPathLikeCommand(command)) {
+    return existsSync(command) ? command : null
+  }
+
+  for (const pathEntry of (process.env.PATH ?? "").split(getPathSeparator())) {
+    if (!pathEntry) continue
+
+    for (const extension of getExecutableExtensions()) {
+      const commandPath = join(pathEntry, `${command}${extension}`)
+      if (existsSync(commandPath)) return commandPath
+    }
+  }
+
+  return null
+}
+
+const getCommandDedupeKey = (command: string) => {
+  try {
+    return realpathSync(command)
+  } catch {
+    return command
+  }
+}
+
+const getCodexCandidates = () => {
+  const seenCommands = new Set<string>()
+  const commands: string[] = []
+  const candidates = unique(
     [process.env.CODEX_BIN, "codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"].filter(
       (candidate): candidate is string => !!candidate,
     ),
-  ).filter((candidate) => !candidate.startsWith("/") || existsSync(candidate))
+  )
+
+  for (const candidate of candidates) {
+    const command = resolveCommandCandidate(candidate)
+    if (!command) continue
+
+    const dedupeKey = getCommandDedupeKey(command)
+    if (seenCommands.has(dedupeKey)) continue
+
+    seenCommands.add(dedupeKey)
+    commands.push(command)
+  }
+
+  return commands
+}
 
 const getCodexModelCandidates = (options?: SemanticDedupeCodexOptions) =>
   unique([
@@ -168,6 +250,37 @@ const getCodexModelCandidates = (options?: SemanticDedupeCodexOptions) =>
   ]).filter((model): model is string => !!model && !unavailableCodexModels.has(model))
 
 const isUnsupportedModelError = (error: Error) => error.message.includes("model is not supported")
+
+const getCertificateFile = () =>
+  CERTIFICATE_FILE_CANDIDATES.find((certificateFile) => existsSync(certificateFile))
+
+const getBaseCodexEnvironment = () => {
+  const env: NodeJS.ProcessEnv = {}
+
+  for (const key of CODEX_ENV_PASSTHROUGH_KEYS) {
+    const value = process.env[key]
+    if (value) env[key] = value
+  }
+
+  return env
+}
+
+const getCodexEnvironment = () => {
+  const certificateFile = getCertificateFile()
+  const env: NodeJS.ProcessEnv = {
+    ...getBaseCodexEnvironment(),
+    NO_COLOR: "1",
+  }
+
+  if (!certificateFile) return env
+
+  return {
+    ...env,
+    CURL_CA_BUNDLE: env.CURL_CA_BUNDLE || certificateFile,
+    NODE_EXTRA_CA_CERTS: env.NODE_EXTRA_CA_CERTS || certificateFile,
+    SSL_CERT_FILE: env.SSL_CERT_FILE || certificateFile,
+  }
+}
 
 const collectOutput = (buffer: Buffer[], chunk: Buffer) => {
   const nextSize = buffer.reduce((size, item) => size + item.byteLength, 0) + chunk.byteLength
@@ -195,6 +308,7 @@ const runCodex = async ({
     const args = [
       "exec",
       "--ephemeral",
+      "--ignore-user-config",
       "--skip-git-repo-check",
       "--ignore-rules",
       "--sandbox",
@@ -217,10 +331,7 @@ const runCodex = async ({
           const stderr: Buffer[] = []
           const child = spawn(command, args, {
             cwd: tmpdir(),
-            env: {
-              ...process.env,
-              NO_COLOR: "1",
-            },
+            env: getCodexEnvironment(),
             stdio: ["pipe", "pipe", "pipe"],
           })
 
