@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { useFeedStore } from "../feed/store"
 import type { FeedModel } from "../feed/types"
 import { useSubscriptionStore } from "../subscription/store"
+import type { SubscriptionModel } from "../subscription/types"
 import type { SemanticDuplicateCandidate } from "./semantic-dedupe"
 import {
   getSemanticDuplicateCandidates,
@@ -49,6 +50,20 @@ const createEntry = ({
     url: `https://example.com/${id}`,
   }) as EntryModel
 
+const createSubscription = (category: string | null): SubscriptionModel => ({
+  category,
+  createdAt: null,
+  feedId: "feed-1",
+  hideFromTimeline: false,
+  inboxId: null,
+  isPrivate: false,
+  listId: null,
+  title: null,
+  type: "feed",
+  userId: "user-1",
+  view: FeedViewType.Articles,
+})
+
 describe("semantic duplicate entry marking", () => {
   beforeEach(() => {
     useEntryStore.setState({
@@ -82,10 +97,12 @@ describe("semantic duplicate entry marking", () => {
         [FeedViewType.SocialMedia]: {},
         [FeedViewType.Videos]: {},
       },
-      data: {},
+      data: {
+        "feed-1": createSubscription("AI"),
+      },
       feedIdByView: emptyEntryIdByView(),
       listIdByView: emptyEntryIdByView(),
-      subscriptionIdSet: new Set(),
+      subscriptionIdSet: new Set(["feed-1"]),
     })
     useSemanticDedupeStore.setState({
       decisions: {},
@@ -142,6 +159,55 @@ describe("semantic duplicate entry marking", () => {
       title: firstEntry.title,
       urlHost: "example.com",
     })
+  })
+
+  it("skips entries outside the semantic dedupe category allowlist", () => {
+    const firstEntry = createEntry({
+      description: "Iran says vessels crossing the Strait of Hormuz must submit applications.",
+      id: "entry-a",
+      title: "伊朗宣布霍尔木兹海峡通行新规：须提前48小时提交申请",
+    })
+    const secondEntry = createEntry({
+      description:
+        "Ships passing through the Strait of Hormuz must apply at least 48 hours in advance.",
+      id: "entry-b",
+      title: "伊朗要求船舶通过霍尔木兹海峡须至少提前 48 小时申请",
+    })
+
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: {
+        [firstEntry.id]: firstEntry,
+        [secondEntry.id]: secondEntry,
+      },
+      entryIdSet: new Set([firstEntry.id, secondEntry.id]),
+    }))
+    useSubscriptionStore.setState((state) => ({
+      ...state,
+      data: {
+        "feed-1": createSubscription("News"),
+      },
+    }))
+    useSemanticDedupeStore.setState({
+      decisions: {
+        "entry-a::entry-b": {
+          confidence: 0.96,
+          duplicate: true,
+          entryIds: ["entry-a", "entry-b"],
+          hideEntryId: "entry-b",
+          keepEntryId: "entry-a",
+          pairKey: "entry-a::entry-b",
+          reason: null,
+          updatedAt: "2026-06-19T12:00:00.000Z",
+        },
+      },
+      revision: 1,
+    })
+
+    expect(getSemanticDuplicateCandidates([firstEntry.id, secondEntry.id])).toHaveLength(0)
+    expect(getSemanticDuplicateEntryRole("entry-a")).toBeNull()
+    expect(getSemanticDuplicateEntryRole("entry-b")).toBeNull()
+    expect(getSemanticDuplicateEntriesForKeeper("entry-a")).toEqual([])
   })
 
   it("prioritizes newer entry candidates before older higher-similarity pairs", () => {
@@ -404,6 +470,38 @@ describe("semantic duplicate entry marking", () => {
   })
 
   it("marks confident duplicate and kept entries", () => {
+    const entryA = createEntry({
+      description: "First duplicate description.",
+      id: "entry-a",
+      title: "First duplicate title",
+    })
+    const entryB = createEntry({
+      description: "Second duplicate description.",
+      id: "entry-b",
+      title: "Second duplicate title",
+    })
+    const entryC = createEntry({
+      description: "Low confidence duplicate description.",
+      id: "entry-c",
+      title: "Low confidence duplicate title",
+    })
+    const entryD = createEntry({
+      description: "Another low confidence duplicate description.",
+      id: "entry-d",
+      title: "Another low confidence duplicate title",
+    })
+
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: {
+        [entryA.id]: entryA,
+        [entryB.id]: entryB,
+        [entryC.id]: entryC,
+        [entryD.id]: entryD,
+      },
+      entryIdSet: new Set([entryA.id, entryB.id, entryC.id, entryD.id]),
+    }))
+
     useSemanticDedupeStore.setState({
       decisions: {
         "entry-a::entry-b": {

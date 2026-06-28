@@ -251,6 +251,30 @@ const getCodexModelCandidates = (options?: SemanticDedupeCodexOptions) =>
 
 const isUnsupportedModelError = (error: Error) => error.message.includes("model is not supported")
 
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback
+
+const truncateLogMessage = (message: string, maxLength = 800) =>
+  message.length > maxLength ? `${message.slice(0, maxLength)}...` : message
+
+const summarizeCodexErrorOutput = (rawOutput: string) => {
+  const trimmedOutput = rawOutput.trim()
+  if (!trimmedOutput) return ""
+
+  const relevantLines = trimmedOutput
+    .split(/\r?\n/)
+    .filter((line) =>
+      /bad certificate|error|failed|invalid_request_error|no native root ca|not supported|stream disconnected|timed out|unsupported/i.test(
+        line,
+      ),
+    )
+
+  return truncateLogMessage(
+    (relevantLines.length > 0 ? relevantLines : trimmedOutput.split(/\r?\n/).slice(-12)).join("\n"),
+    1_200,
+  )
+}
+
 const getCertificateFile = () =>
   CERTIFICATE_FILE_CANDIDATES.find((certificateFile) => existsSync(certificateFile))
 
@@ -361,7 +385,7 @@ const runCodex = async ({
 
             reject(
               new Error(
-                Buffer.concat(stderr).toString("utf8").trim() ||
+                summarizeCodexErrorOutput(Buffer.concat(stderr).toString("utf8")) ||
                   `Codex semantic duplicate check exited with ${code}`,
               ),
             )
@@ -458,6 +482,16 @@ export const evaluateSemanticDuplicateCandidates = async ({
     return { results: [] }
   }
 
+  const startedAt = Date.now()
+  const requestedModel = getRequestedCodexModel(options)
+  const reasoningEffort = getCodexReasoningEffort(options)
+  console.info("[semantic-dedupe] start", {
+    candidates: candidates.length,
+    inputCandidates: inputCandidates.length,
+    model: requestedModel,
+    reasoningEffort,
+  })
+
   await mkdir(runtimeDir, { recursive: true })
 
   const schemaPath = await ensureOutputSchema(runtimeDir)
@@ -481,6 +515,20 @@ export const evaluateSemanticDuplicateCandidates = async ({
         .filter((evaluation): evaluation is SemanticDuplicateEvaluation => !!evaluation)
         .map((evaluation) => [evaluation.pairKey, evaluation]),
     )
+    const results = candidates.map(
+      (candidate) =>
+        evaluationByPairKey.get(candidate.pairKey) ?? createFallbackEvaluation(candidate),
+    )
+
+    console.info("[semantic-dedupe] finished", {
+      candidates: candidates.length,
+      codexDurationMs: runResult.debug.durationMs,
+      duplicates: results.filter((result) => result.duplicate).length,
+      durationMs: Date.now() - startedAt,
+      inputCandidates: inputCandidates.length,
+      model: runResult.debug.usedModel,
+      reasoningEffort: runResult.debug.reasoningEffort,
+    })
 
     return {
       debug: {
@@ -488,11 +536,18 @@ export const evaluateSemanticDuplicateCandidates = async ({
         candidateCount: candidates.length,
         inputCandidateCount: inputCandidates.length,
       },
-      results: candidates.map(
-        (candidate) =>
-          evaluationByPairKey.get(candidate.pairKey) ?? createFallbackEvaluation(candidate),
-      ),
+      results,
     }
+  } catch (error) {
+    console.error("[semantic-dedupe] failed", {
+      candidates: candidates.length,
+      durationMs: Date.now() - startedAt,
+      error: truncateLogMessage(getErrorMessage(error, "Semantic dedupe failed.")),
+      inputCandidates: inputCandidates.length,
+      model: requestedModel,
+      reasoningEffort,
+    })
+    throw error
   } finally {
     void rm(outputPath, { force: true })
   }

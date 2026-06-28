@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react"
 import { createImmerSetter, createZustandStore } from "../../lib/helper"
 import { getFeedById } from "../feed/getter"
 import { getSubscriptionByEntryId } from "../subscription/getter"
+import { getDefaultCategory } from "../subscription/utils"
 import { getEntry } from "./getter"
 import type { EntryModel } from "./types"
 import { getEntryTitleDedupeKey } from "./utils"
@@ -15,6 +16,7 @@ const MAX_CANDIDATES_PER_RUN = 8
 const MAX_DESCRIPTION_LENGTH = 400
 const MIN_TITLE_SIMILARITY = 0.42
 const MIN_CONTEXT_SIMILARITY = 0.32
+const SEMANTIC_DEDUPE_ALLOWED_CATEGORIES = new Set(["ai", "blockchain", "internet", "互联网"])
 
 export interface SemanticDuplicateEntryContext {
   id: string
@@ -485,6 +487,27 @@ export const semanticDedupeActions = {
 
 const getPairKey = (entryIdA: string, entryIdB: string) => [entryIdA, entryIdB].sort().join("::")
 
+const normalizeSemanticDedupeCategory = (category: string | null | undefined) =>
+  category?.trim().toLowerCase() ?? null
+
+const getEntrySemanticDedupeCategory = (entryId: string) => {
+  const subscription = getSubscriptionByEntryId(entryId)
+  return subscription?.category || getDefaultCategory(subscription)
+}
+
+const isSemanticDedupeEligibleEntry = (entryId: string) => {
+  const category = normalizeSemanticDedupeCategory(getEntrySemanticDedupeCategory(entryId))
+
+  return !!category && SEMANTIC_DEDUPE_ALLOWED_CATEGORIES.has(category)
+}
+
+const getSemanticDedupeEligibleEntryIds = (entryIds: string[]) =>
+  entryIds.filter(isSemanticDedupeEligibleEntry)
+
+const logSemanticDedupe = (event: string, details: Record<string, unknown>) => {
+  console.info(`[semantic-dedupe] ${event}`, details)
+}
+
 const getRunDuration = (startedAt: string | null, finishedAt: string) => {
   if (!startedAt) return null
 
@@ -511,6 +534,7 @@ const getUrlHost = (...urls: Array<string | null | undefined>) => {
 const buildEntryContext = (entryId: string): SemanticDuplicateEntryContext | null => {
   const entry = getEntry(entryId)
   if (!entry?.title) return null
+  if (!isSemanticDedupeEligibleEntry(entry.id)) return null
 
   const feed = entry.feedId ? getFeedById(entry.feedId) : undefined
   const subscription = getSubscriptionByEntryId(entry.id)
@@ -678,17 +702,26 @@ const getSemanticDuplicateEntryRoleFromDecisions = (
 }
 
 export const getSemanticDuplicateEntryRole = (entryId: string) =>
-  getSemanticDuplicateEntryRoleFromDecisions(useSemanticDedupeStore.getState().decisions, entryId)
+  isSemanticDedupeEligibleEntry(entryId)
+    ? getSemanticDuplicateEntryRoleFromDecisions(
+        useSemanticDedupeStore.getState().decisions,
+        entryId,
+      )
+    : null
 
 export const useSemanticDuplicateEntryRole = (entryId: string) =>
   useSemanticDedupeStore((state) =>
-    getSemanticDuplicateEntryRoleFromDecisions(state.decisions, entryId),
+    isSemanticDedupeEligibleEntry(entryId)
+      ? getSemanticDuplicateEntryRoleFromDecisions(state.decisions, entryId)
+      : null,
   )
 
 const getSemanticDuplicateEntriesForKeeperFromDecisions = (
   decisions: Record<string, SemanticDuplicateDecision>,
   entryId: string,
 ): SemanticDuplicateRelatedEntry[] => {
+  if (!isSemanticDedupeEligibleEntry(entryId)) return []
+
   const relatedEntryIds = new Set<string>()
   const relatedEntries: SemanticDuplicateRelatedEntry[] = []
 
@@ -696,6 +729,7 @@ const getSemanticDuplicateEntriesForKeeperFromDecisions = (
     if (!isConfidentDuplicateDecision(decision)) continue
     if (decision.keepEntryId !== entryId) continue
     if (!decision.hideEntryId || relatedEntryIds.has(decision.hideEntryId)) continue
+    if (!isSemanticDedupeEligibleEntry(decision.hideEntryId)) continue
 
     const duplicateEntry = getEntry(decision.hideEntryId)
     if (!duplicateEntry) continue
@@ -747,17 +781,29 @@ const processQueuedSemanticDedupeEntries = async () => {
   processingEntryIds = entryIds
 
   const evaluator = semanticDuplicateEvaluator
-  const candidates = getSemanticDuplicateCandidates(entryIds)
-  semanticDedupeActions.recordScan(entryIds.length, candidates)
+  const eligibleEntryIds = getSemanticDedupeEligibleEntryIds(entryIds)
+  const candidates = getSemanticDuplicateCandidates(eligibleEntryIds)
+  semanticDedupeActions.recordScan(eligibleEntryIds.length, candidates)
+  logSemanticDedupe("scan", {
+    candidates: candidates.length,
+    eligibleEntries: eligibleEntryIds.length,
+    queuedEntries: entryIds.length,
+  })
   if (candidates.length === 0) {
-    semanticDedupeActions.markEntriesSettled(entryIds)
+    semanticDedupeActions.markEntriesSettled(eligibleEntryIds)
     processingEntryIds = null
     semanticDedupeActions.recordProcessingQueued(0)
+    if (eligibleEntryIds.length === 0 && entryIds.length > 0) {
+      logSemanticDedupe("skip", {
+        reason: "no eligible categories",
+        queuedEntries: entryIds.length,
+      })
+    }
     return
   }
 
   isProcessingCandidates = true
-  semanticDedupeActions.recordProcessingQueued(entryIds.length)
+  semanticDedupeActions.recordProcessingQueued(eligibleEntryIds.length)
   semanticDedupeActions.recordProcessingStarted(candidates)
   semanticDedupeActions.markCandidatesPending(candidates)
 
@@ -768,7 +814,7 @@ const processQueuedSemanticDedupeEntries = async () => {
 
     if (!queuedEntryIds && semanticDuplicateEvaluator === evaluator) {
       queuedEntryIds = entryIds
-      semanticDedupeActions.recordProcessingQueued(entryIds.length)
+      semanticDedupeActions.recordProcessingQueued(eligibleEntryIds.length)
     }
   } catch (error) {
     lastFailedEntryIdsKey = entryIds.join("\n")
@@ -797,7 +843,9 @@ const enqueueSemanticDedupeEntries = (entryIds: string[]) => {
     observedEntryIds,
     mergeEntryIds(processingEntryIds ?? [], queuedEntryIds),
   )
-  semanticDedupeActions.recordProcessingQueued(queuedEntryIds.length)
+  semanticDedupeActions.recordProcessingQueued(
+    getSemanticDedupeEligibleEntryIds(queuedEntryIds).length,
+  )
   void processQueuedSemanticDedupeEntries()
 }
 

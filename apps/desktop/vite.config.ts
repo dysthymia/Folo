@@ -181,6 +181,9 @@ const sendSemanticDedupeJson = (res: ServerResponse, statusCode: number, payload
   res.end(JSON.stringify(payload))
 }
 
+const truncateSemanticDedupeMessage = (message: string, maxLength = 1_000) =>
+  message.length > maxLength ? `${message.slice(0, maxLength)}...` : message
+
 const readSemanticDedupeBody = async (req: IncomingMessage) =>
   new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -256,7 +259,9 @@ const semanticDedupeDevServer = (): PluginOption => ({
         })
         sendSemanticDedupeJson(res, 200, result)
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Semantic dedupe failed."
+        const message = truncateSemanticDedupeMessage(
+          error instanceof Error ? error.message : "Semantic dedupe failed.",
+        )
         server.config.logger.error(`[semantic-dedupe] ${message}`)
         sendSemanticDedupeJson(res, 500, { error: message })
       }
