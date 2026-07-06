@@ -54,7 +54,7 @@ const refreshSessionQueries = () =>
 const plugins = [
   ...baseAuthPlugins,
   expoClient({
-    scheme: "follow",
+    scheme: "folo",
     storagePrefix,
     storage: {
       setItem(key: string, value: string) {

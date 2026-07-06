@@ -9,9 +9,11 @@ export const tracker = new TrackerPoints()
 
 export {
   type CaptureExceptionPayload,
+  createPostHogBeforeSend,
   FirebaseAdapter,
   type FirebaseAdapterConfig,
   type IdentifyPayload,
+  POSTHOG_SAMPLE_RATE,
   PostHogAdapter,
   type PostHogAdapterConfig,
   ProxyAdapter,

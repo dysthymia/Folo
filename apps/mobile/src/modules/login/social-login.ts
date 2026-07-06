@@ -1,7 +1,12 @@
+export const nativeOAuthCallbackURL = "folo://"
+
 type LoginWithSocialProviderOptions = {
   providerId: string
   setPendingProviderId: (providerId: string | null) => void
-  signInWithProvider: (providerId: string) => Promise<void>
+  signInWithProvider: (
+    providerId: string,
+    options: { callbackURL: typeof nativeOAuthCallbackURL },
+  ) => Promise<void>
   signInWithAppleIdentityToken: () => Promise<void>
   syncSession: () => Promise<boolean>
   trackLogin: () => void
@@ -23,7 +28,7 @@ export async function loginWithSocialProvider({
     if (providerId === "apple") {
       await signInWithAppleIdentityToken()
     } else {
-      await signInWithProvider(providerId)
+      await signInWithProvider(providerId, { callbackURL: nativeOAuthCallbackURL })
     }
 
     const hasSession = await syncSession()

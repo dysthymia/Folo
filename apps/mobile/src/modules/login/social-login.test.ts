@@ -32,7 +32,7 @@ describe("loginWithSocialProvider", () => {
     })
 
     expect(result).toBe(true)
-    expect(signInWithProvider).toHaveBeenCalledWith("google")
+    expect(signInWithProvider).toHaveBeenCalledWith("google", { callbackURL: "folo://" })
     expect(trackLogin).toHaveBeenCalledTimes(1)
     expect(sequence).toEqual(["pending:google", "sign-in:google", "sync", "track", "pending:none"])
   })
@@ -56,6 +56,21 @@ describe("loginWithSocialProvider", () => {
     expect(trackLogin).not.toHaveBeenCalled()
     expect(setPendingProviderId).toHaveBeenNthCalledWith(1, "github")
     expect(setPendingProviderId).toHaveBeenLastCalledWith(null)
+  })
+
+  it("uses the Folo native app scheme as the OAuth callback URL", async () => {
+    const signInWithProvider = vi.fn(async () => {})
+
+    await loginWithSocialProvider({
+      providerId: "github",
+      setPendingProviderId: vi.fn(),
+      signInWithProvider,
+      signInWithAppleIdentityToken: vi.fn(async () => {}),
+      syncSession: async () => false,
+      trackLogin: vi.fn(),
+    })
+
+    expect(signInWithProvider).toHaveBeenCalledWith("github", { callbackURL: "folo://" })
   })
 
   it("uses the Apple token flow for Apple sign in", async () => {

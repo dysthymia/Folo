@@ -78,10 +78,10 @@ export function SocialLogin({ onPressEmail }: { isRegister: boolean; onPressEmai
               void loginWithSocialProvider({
                 providerId: provider.id,
                 setPendingProviderId,
-                signInWithProvider: async (providerId) => {
+                signInWithProvider: async (providerId, { callbackURL }) => {
                   await signIn.social({
                     provider: providerId as SocialProviderSignInInput["provider"],
-                    callbackURL: "/",
+                    callbackURL,
                   })
                 },
                 signInWithAppleIdentityToken: async () => {

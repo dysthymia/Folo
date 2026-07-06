@@ -46,7 +46,7 @@ const createMigrationHeaders = async () => {
     "X-Client-Id": getClientId(),
     "X-Session-Id": getSessionId(),
     "User-Agent": await getUserAgent(),
-    "expo-origin": "follow://",
+    "expo-origin": "folo://",
     "x-skip-oauth-proxy": "true",
   }
 }

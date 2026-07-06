@@ -1,5 +1,10 @@
 import { env } from "@follow/shared/env.desktop"
-import { setFirebaseTracker, setPostHogTracker, tracker } from "@follow/tracker"
+import {
+  createPostHogBeforeSend,
+  setFirebaseTracker,
+  setPostHogTracker,
+  tracker,
+} from "@follow/tracker"
 import { captureAttributionFromURL, getAttributionForAnalytics } from "@follow/utils"
 import type { AuthSessionResponse } from "@follow-app/client-sdk"
 import posthog from "posthog-js"
@@ -30,6 +35,7 @@ export const initAnalytics = async () => {
       api_host: env.VITE_POSTHOG_HOST,
       person_profiles: "identified_only",
       defaults: "2025-05-24",
+      before_send: createPostHogBeforeSend(),
       capture_exceptions: {
         capture_unhandled_errors: true,
         capture_unhandled_rejections: true,

@@ -3,6 +3,25 @@ import type PostHogReactNative from "posthog-react-native"
 
 import type { CaptureExceptionPayload, IdentifyPayload, TrackerAdapter, TrackPayload } from "./base"
 
+export const POSTHOG_SAMPLE_RATE = 0.05
+
+const normalizeSampleRate = (sampleRate: number): number => {
+  if (!Number.isFinite(sampleRate)) return 1
+
+  return Math.min(Math.max(sampleRate, 0), 1)
+}
+
+export const createPostHogBeforeSend = (
+  sampleRate = POSTHOG_SAMPLE_RATE,
+  sampleRandom: () => number = Math.random,
+) => {
+  const normalizedSampleRate = normalizeSampleRate(sampleRate)
+  const isSampled =
+    normalizedSampleRate >= 1 || (normalizedSampleRate > 0 && sampleRandom() < normalizedSampleRate)
+
+  return <T>(event: T): T | null => (isSampled ? event : null)
+}
+
 export interface PostHogAdapterConfig {
   instance: PostHog | PostHogReactNative
   enabled?: boolean

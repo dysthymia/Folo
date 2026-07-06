@@ -1,5 +1,10 @@
 import { whoami } from "@follow/store/user/getters"
-import { setFirebaseTracker, setPostHogTracker, tracker } from "@follow/tracker"
+import {
+  createPostHogBeforeSend,
+  setFirebaseTracker,
+  setPostHogTracker,
+  tracker,
+} from "@follow/tracker"
 import type { AuthUser } from "@follow-app/client-sdk"
 import { getAnalytics } from "@react-native-firebase/analytics"
 import { nativeApplicationVersion, nativeBuildVersion } from "expo-application"
@@ -14,6 +19,7 @@ export const initAnalytics = async () => {
     setPostHogTracker(
       new PostHog(proxyEnv.POSTHOG_KEY, {
         host: proxyEnv.POSTHOG_HOST,
+        before_send: createPostHogBeforeSend(),
         errorTracking: {
           autocapture: {
             uncaughtExceptions: true,
