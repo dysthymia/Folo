@@ -64,6 +64,7 @@ describe("useEntriesQuery", () => {
   })
 
   test("coalesces repeated next-page requests while one is still in flight", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000)
     const pendingPageResolvers: Array<(value: EntriesResponse) => void> = []
     const fetchEntriesSpy = vi
       .spyOn(entrySyncServices, "fetchEntries")
@@ -112,6 +113,9 @@ describe("useEntriesQuery", () => {
         expect(entriesQuery?.isSuccess).toBe(true)
       })
     })
+    expect(entriesQuery?.fetchedTime).toBe(1_000)
+
+    nowSpy.mockReturnValue(2_000)
 
     let firstFetch: Promise<unknown> | undefined
     let secondFetch: Promise<unknown> | undefined
@@ -134,6 +138,7 @@ describe("useEntriesQuery", () => {
         expect(entriesQuery?.entriesIds).toEqual(["entry-1", "entry-2"])
       })
     })
+    expect(entriesQuery?.fetchedTime).toBe(1_000)
 
     await act(async () => {
       firstFetch = entriesQuery?.fetchNextPage()

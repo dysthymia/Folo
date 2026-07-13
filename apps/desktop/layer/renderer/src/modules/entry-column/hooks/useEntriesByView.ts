@@ -88,13 +88,6 @@ const useRemoteEntries = (): UseEntriesReturn => {
   ])
   const query = useEntriesQuery(entriesOptions)
 
-  const [fetchedTime, setFetchedTime] = useState<number>()
-  useEffect(() => {
-    if (!query.isFetching) {
-      setFetchedTime(Date.now())
-    }
-  }, [query.isFetching])
-
   const refetch = useCallback(async () => void query.refetch(), [query])
   const fetchNextPage = useCallback(async () => void query.fetchNextPage(), [query])
 
@@ -114,7 +107,7 @@ const useRemoteEntries = (): UseEntriesReturn => {
     isFetching: query.isFetching,
     hasNextPage: query.hasNextPage,
     error: query.isError ? query.error : null,
-    fetchedTime,
+    fetchedTime: query.fetchedTime,
     queryKey: query.queryKey,
   }
 }

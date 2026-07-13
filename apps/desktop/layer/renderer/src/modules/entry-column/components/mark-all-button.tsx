@@ -25,6 +25,7 @@ interface MarkAllButtonProps {
   className?: string
   which?: ReactNode
   shortcut?: boolean
+  fetchedTime?: number
 }
 
 export const MarkAllReadButton = ({
@@ -32,6 +33,7 @@ export const MarkAllReadButton = ({
   className,
   which = "all",
   shortcut,
+  fetchedTime,
 }: MarkAllButtonProps & { ref?: React.Ref<HTMLButtonElement | null> }) => {
   const { t } = useTranslation()
   const { t: commonT } = useTranslation("common")
@@ -67,7 +69,7 @@ export const MarkAllReadButton = ({
         duration: 3000,
         onAutoClose() {
           if (cancel) return
-          markAllByRoute(routerParams)
+          markAllByRoute(routerParams, getSnapshotFilter(fetchedTime))
         },
         action: {
           label: (
@@ -82,7 +84,7 @@ export const MarkAllReadButton = ({
         },
       })
     })
-  }, [ensureLogin, t])
+  }, [ensureLogin, fetchedTime, t])
 
   const markAllAsReadShortcut = useCommandShortcuts()[COMMAND_ID.subscription.markAllAsRead]
   return (
@@ -106,13 +108,17 @@ export const MarkAllReadButton = ({
       ref={ref}
       onClick={() => {
         if (!ensureLogin()) return
-        markAllByRoute(getRouteParams())
+        markAllByRoute(getRouteParams(), getSnapshotFilter(fetchedTime))
       }}
     >
       <i className="i-mgc-check-circle-cute-re" />
     </ActionButton>
   )
 }
+
+// “全部标为已读”只作用于当前列表快照，避免覆盖打开列表后新到达的条目。
+const getSnapshotFilter = (fetchedTime?: number): MarkAllFilter | undefined =>
+  fetchedTime ? { insertedBefore: fetchedTime } : undefined
 
 const ConfirmMarkAllReadInfo = ({ undo }: { undo: () => any }) => {
   const { t } = useTranslation()

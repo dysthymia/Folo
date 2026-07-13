@@ -59,6 +59,7 @@ export const EntryListContentPicture = ({
     hasNextPage,
     isFetching,
     isFetchingNextPage,
+    fetchedTime,
     isReady,
   } = useEntries({
     viewId: view,
@@ -139,7 +140,7 @@ export const EntryListContentPicture = ({
           </View>
         ) : (
           <View>
-            <GridEntryListFooter />
+            <GridEntryListFooter fetchedTime={fetchedTime} />
             {hasEndSpacer && <EntryListEndScrollSpacer />}
           </View>
         )

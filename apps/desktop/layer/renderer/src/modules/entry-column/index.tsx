@@ -269,6 +269,7 @@ function EntryColumnContent() {
         refetch={actions.refetch}
         isRefreshing={isRefreshing}
         onBeforeRefresh={scrollTimelineToTop}
+        fetchedTime={state.fetchedTime}
       />
 
       <EntryColumnWrapper

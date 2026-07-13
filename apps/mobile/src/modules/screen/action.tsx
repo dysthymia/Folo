@@ -60,7 +60,10 @@ interface HeaderActionButtonProps {
   variant?: "primary" | "secondary"
 }
 
-export const MarkAllAsReadActionButton = ({ variant = "secondary" }: HeaderActionButtonProps) => {
+export const MarkAllAsReadActionButton = ({
+  variant = "secondary",
+  fetchedTime,
+}: HeaderActionButtonProps & { fetchedTime?: number }) => {
   const { t } = useTranslation()
   const { size, color } = useButtonVariant({ variant })
 
@@ -69,7 +72,9 @@ export const MarkAllAsReadActionButton = ({ variant = "secondary" }: HeaderActio
       label={t("operation.mark_all_as_read")}
       normalIcon={<CheckCircleCuteReIcon height={size} width={size} color={color} />}
       onPress={() => {
-        Dialog.show(MarkAllAsReadDialog)
+        Dialog.show(MarkAllAsReadDialog, {
+          context: { fetchedTime },
+        })
       }}
     />
   )

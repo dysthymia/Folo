@@ -31,10 +31,11 @@ const createEntry = (
   feedId: string,
   read = false,
   publishedAt = new Date("2026-01-01T00:00:00.000Z"),
+  insertedAt = new Date("2026-01-01T00:00:00.000Z"),
 ): EntryModel => ({
   id,
   guid: `${id}-guid`,
-  insertedAt: new Date("2026-01-01T00:00:00.000Z"),
+  insertedAt,
   publishedAt,
   feedId,
   read,
@@ -145,6 +146,54 @@ describe("unreadSyncService", () => {
     resolveMarkAllAsRead({ data: { read: { feed1: 2 } } })
     await markBatchAsRead
 
+    expect(useUnreadStore.getState().data.feed1).toBe(1)
+  })
+
+  it("keeps entries inserted after the rendered list snapshot unread", async () => {
+    const snapshotTime = new Date("2026-01-01T01:00:00.000Z").getTime()
+    const entries = {
+      entry1: createEntry(
+        "entry1",
+        "feed1",
+        false,
+        new Date("2026-01-01T00:05:00.000Z"),
+        new Date("2026-01-01T00:10:00.000Z"),
+      ),
+      entry2: createEntry(
+        "entry2",
+        "feed1",
+        false,
+        new Date("2026-01-01T00:03:00.000Z"),
+        new Date("2026-01-01T03:00:00.000Z"),
+      ),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    useUnreadStore.setState({ data: { feed1: 2 } })
+    markAllAsReadMock.mockResolvedValue({ data: { read: { feed1: 1 } } })
+
+    await unreadSyncService.markBatchAsRead({
+      view: FeedViewType.Articles,
+      filter: {
+        feedIdList: ["feed1"],
+      },
+      time: {
+        insertedBefore: snapshotTime,
+      },
+      excludePrivate: false,
+    })
+
+    expect(markAllAsReadMock).toHaveBeenCalledWith({
+      view: FeedViewType.Articles,
+      feedIdList: ["feed1"],
+      insertedBefore: snapshotTime,
+      excludePrivate: false,
+    })
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+    expect(useEntryStore.getState().data.entry2?.read).toBe(false)
     expect(useUnreadStore.getState().data.feed1).toBe(1)
   })
 

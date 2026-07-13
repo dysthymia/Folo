@@ -11,7 +11,9 @@ import { Dialog } from "@/src/lib/dialog"
 
 import { getFetchEntryPayload, useSelectedFeed, useSelectedView } from "../screen/atoms"
 
-export const MarkAllAsReadDialog: DialogComponent = () => {
+export const MarkAllAsReadDialog: DialogComponent<{ fetchedTime?: number }> = ({
+  ctx: dialogCtx,
+}) => {
   const { t } = useTranslation()
   const selectedView = useSelectedView()
   const selectedFeed = useSelectedFeed()
@@ -27,6 +29,7 @@ export const MarkAllAsReadDialog: DialogComponent = () => {
             unreadSyncService.markBatchAsRead({
               view: selectedView,
               filter: payload,
+              time: dialogCtx.fetchedTime ? { insertedBefore: dialogCtx.fetchedTime } : undefined,
               excludePrivate: getHideAllReadSubscriptions(),
             })
           }

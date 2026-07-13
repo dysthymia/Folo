@@ -112,14 +112,21 @@ export const useEntriesQuery = (
 
   const query = useInfiniteQuery({
     queryKey,
-    queryFn: ({ pageParam }) =>
-      entrySyncServices.fetchEntries({
+    queryFn: async ({ pageParam }) => {
+      const response = await entrySyncServices.fetchEntries({
         ...props,
         limit: aiSort ? 100 : limit,
         pageParam,
         read: unreadOnly ? false : undefined,
         excludePrivate: hidePrivateSubscriptionsInTimeline,
-      }),
+      })
+
+      // 将快照时间保存在每一页上，后续加载旧条目时不会推进第一页的已读边界。
+      return {
+        ...response,
+        fetchedAt: Date.now(),
+      }
+    },
 
     getNextPageParam: (lastPage) => {
       if (aiSort) return
@@ -198,6 +205,7 @@ export const useEntriesQuery = (
     return {
       ...query,
       fetchNextPage,
+      fetchedTime: query.data?.pages[0]?.fetchedAt,
       entriesIds,
       queryKey,
     }

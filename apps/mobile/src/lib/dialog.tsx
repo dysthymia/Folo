@@ -44,6 +44,7 @@ export interface DialogProps<Ctx> {
   id: string
 }
 interface ShowDialogOptions<Ctx> {
+  context?: Ctx
   override?: {
     onClose?: (ctx: Ctx & DialogContextType) => void
     onConfirm?: (ctx: Ctx & DialogContextType) => void
@@ -151,7 +152,7 @@ class DialogStatic {
       ...ctx,
       ...reactCtx,
     })
-    const ctx = {} as Ctx
+    const ctx = options?.context ?? ({} as Ctx)
     const children =
       "content" in propsOrComponent
         ? propsOrComponent.content

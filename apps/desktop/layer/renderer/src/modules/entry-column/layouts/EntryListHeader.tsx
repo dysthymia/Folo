@@ -44,7 +44,8 @@ export const EntryListHeader: FC<{
   refetch: () => void
   isRefreshing: boolean
   onBeforeRefresh?: () => void
-}> = ({ refetch, isRefreshing, onBeforeRefresh }) => {
+  fetchedTime?: number
+}> = ({ refetch, isRefreshing, onBeforeRefresh, fetchedTime }) => {
   const routerParams = useRouteParams()
   const { t } = useTranslation()
 
@@ -222,7 +223,7 @@ export const EntryListHeader: FC<{
                     <i className="i-mgc-round-cute-re" />
                   )}
                 </ActionButton>
-                <MarkAllReadButton shortcut />
+                <MarkAllReadButton shortcut fetchedTime={fetchedTime} />
               </>
             )}
           </div>

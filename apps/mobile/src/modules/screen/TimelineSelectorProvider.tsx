@@ -36,7 +36,7 @@ export function TimelineHeader({ feedId }: { feedId?: string }) {
   const isSubscriptions = screenType === "subscriptions"
   const isTablet = useIsTabletLayout()
 
-  const { isFetching } = useEntries()
+  const { fetchedTime, isFetching } = useEntries()
   const shouldHideDuplicatedTitle = isTablet && (isTimeline || isSubscriptions)
 
   return (
@@ -55,12 +55,12 @@ export function TimelineHeader({ feedId }: { feedId?: string }) {
           <View className="flex-row items-center justify-end">
             <ActionGroup>
               {isLoggedIn && <UnreadOnlyActionButton />}
-              {isLoggedIn && <MarkAllAsReadActionButton />}
+              {isLoggedIn && <MarkAllAsReadActionButton fetchedTime={fetchedTime} />}
               <FeedShareActionButton feedId={feedId} />
             </ActionGroup>
           </View>
         )
-      }, [feedId, isLoggedIn])}
+      }, [feedId, fetchedTime, isLoggedIn])}
       headerHideableBottom={isTimeline || isSubscriptions ? TimelineViewSelector : undefined}
       headerHideableBottomHeight={TIMELINE_VIEW_SELECTOR_HEIGHT}
     />

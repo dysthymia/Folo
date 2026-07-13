@@ -51,6 +51,7 @@ export const EntryListContentVideo = ({
     isFetching,
     isFetchingNextPage,
     hasNextPage,
+    fetchedTime,
     isReady,
   } = useEntries({
     viewId: view,
@@ -87,11 +88,11 @@ export const EntryListContentVideo = ({
         </View>
       ) : (
         <View>
-          <GridEntryListFooter />
+          <GridEntryListFooter fetchedTime={fetchedTime} />
           {hasEndSpacer && <EntryListEndScrollSpacer />}
         </View>
       ),
-    [hasEndSpacer, hasNextPage],
+    [fetchedTime, hasEndSpacer, hasNextPage],
   )
 
   const renderItem = useTypeScriptHappyCallback(({ item }: { item: string }) => {
