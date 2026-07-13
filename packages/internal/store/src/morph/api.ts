@@ -162,7 +162,9 @@ class APIMorph {
   }
 
   toCollections(
-    data: ExtractResponseData<InboxListEntryResponse | EntryListResponse>,
+    data:
+      | Array<InboxListEntry | EntryWithFeed>
+      | ExtractResponseData<InboxListEntryResponse | EntryListResponse>,
     view: FeedViewType,
   ): {
     collections: CollectionModel[]
@@ -192,7 +194,7 @@ class APIMorph {
     }
   }
 
-  toEntryList(data?: InboxListEntry[] | EntryWithFeed[]): EntryModel[] {
+  toEntryList(data?: Array<InboxListEntry | EntryWithFeed>): EntryModel[] {
     const entries: EntryModel[] = []
     for (const item of data ?? []) {
       entries.push({

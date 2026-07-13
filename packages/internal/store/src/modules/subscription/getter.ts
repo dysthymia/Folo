@@ -12,6 +12,9 @@ import { folderFeedsByFeedIdSelector } from "./selectors"
 import { useSubscriptionStore } from "./store"
 import { getDefaultCategory } from "./utils"
 
+const shouldIncludeInboxByView = (view: FeedViewType | undefined) =>
+  view === FeedViewType.All || view === FeedViewType.Articles
+
 export const getSubscriptionById = (id: string | undefined) => {
   if (!id) return
   return useSubscriptionStore.getState().data[id]
@@ -60,7 +63,7 @@ export const getSubscribedFeedIdAndInboxHandlesByView = ({
     .filter((i) => !excludePrivate || !state.data[i]?.isPrivate)
     .filter((i) => !excludeHidden || !state.data[i]?.hideFromTimeline)
 
-  const inboxIds = view === FeedViewType.Articles ? getInboxList().map((i) => i.id) : []
+  const inboxIds = shouldIncludeInboxByView(view) ? getInboxList().map((i) => i.id) : []
 
   const listFeedIds = Array.from(state.listIdByView[view] ?? [])
     .filter((i) => !excludePrivate || !state.data[i]?.isPrivate)
@@ -157,7 +160,7 @@ const sortGroupedSubscriptionByUnread = (
 // Store selector functions (for React hooks)
 export const getSubscriptionIdsByViewSelector = (state: StateType) => (view: FeedViewType) => {
   const feedIds = Array.from(state.feedIdByView[view] ?? [])
-  const inboxIds = view === FeedViewType.Articles ? getInboxList().map((i) => i.id) : []
+  const inboxIds = shouldIncludeInboxByView(view) ? getInboxList().map((i) => i.id) : []
   const listFeedIds = Array.from(state.listIdByView[view] ?? []).flatMap(
     (id) => getListFeedIds(id) ?? [],
   )

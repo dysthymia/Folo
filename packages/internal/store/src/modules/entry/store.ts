@@ -3,6 +3,7 @@ import { EntryService } from "@follow/database/services/entry"
 import type { EntryOpenSource } from "@follow/database/services/entry-open-stats"
 import { EntryOpenStatsService } from "@follow/database/services/entry-open-stats"
 import { isBizId } from "@follow/utils"
+import type { EntryListResponse, EntryWithFeed, InboxListEntry } from "@follow-app/client-sdk"
 import { cloneDeep } from "es-toolkit"
 import { debounce } from "es-toolkit/compat"
 
@@ -16,8 +17,9 @@ import { storeDbMorph } from "../../morph/store-db"
 import { collectionActions } from "../collection/store"
 import { clearAllFeedUnreadDirty, clearFeedUnreadDirty } from "../feed/hooks"
 import { feedActions } from "../feed/store"
+import { getInboxList } from "../inbox/getters"
 import { getSubscriptionById } from "../subscription/getter"
-import { getDefaultCategory } from "../subscription/utils"
+import { getDefaultCategory, getInboxStoreId } from "../subscription/utils"
 import type {
   FeedIdOrInboxHandle,
   InsertedBeforeTimeRangeFilter,
@@ -33,6 +35,10 @@ type FeedId = string
 type InboxId = string
 type Category = string
 type ListId = string
+type EntryResponseItem = EntryWithFeed | InboxListEntry
+type EntryListLikeResponse = Omit<EntryListResponse, "data"> & {
+  data: EntryResponseItem[]
+}
 
 interface EntryState {
   data: Record<EntryId, EntryModel>
@@ -222,6 +228,31 @@ class EntryActions implements Hydratable, Resetable {
     }
   }
 
+  private addEntryIdToInboxViews({
+    draft,
+    inboxHandle,
+    entryId,
+    hidePrivateSubscriptionsInTimeline,
+  }: {
+    draft: EntryState
+    inboxHandle?: InboxId | null
+    entryId: EntryId
+    hidePrivateSubscriptionsInTimeline?: boolean
+  }) {
+    if (!inboxHandle) return
+
+    const subscription = getSubscriptionById(getInboxStoreId(inboxHandle))
+    const ignore =
+      (hidePrivateSubscriptionsInTimeline && subscription?.isPrivate) ||
+      subscription?.hideFromTimeline
+
+    if (ignore) return
+
+    const view = typeof subscription?.view === "number" ? subscription.view : FeedViewType.Articles
+    draft.entryIdByView[view]!.add(entryId)
+    draft.entryIdByView[FeedViewType.All]!.add(entryId)
+  }
+
   private addEntryIdToList({
     draft,
     listId,
@@ -261,27 +292,33 @@ class EntryActions implements Hydratable, Resetable {
             inboxHandle,
             entryId: nextEntry.id,
           })
+          this.addEntryIdToInboxViews({
+            draft,
+            inboxHandle,
+            entryId: nextEntry.id,
+            hidePrivateSubscriptionsInTimeline,
+          })
         } else {
           this.addEntryIdToFeed({
             draft,
             feedId,
             entryId: nextEntry.id,
           })
+
+          this.addEntryIdToView({
+            draft,
+            feedId,
+            entryId: nextEntry.id,
+            sources,
+            hidePrivateSubscriptionsInTimeline,
+          })
+
+          this.addEntryIdToCategory({
+            draft,
+            feedId,
+            entryId: nextEntry.id,
+          })
         }
-
-        this.addEntryIdToView({
-          draft,
-          feedId,
-          entryId: nextEntry.id,
-          sources,
-          hidePrivateSubscriptionsInTimeline,
-        })
-
-        this.addEntryIdToCategory({
-          draft,
-          feedId,
-          entryId: nextEntry.id,
-        })
 
         nextEntry.sources
           ?.filter((s) => !!s && s !== "feed")
@@ -504,7 +541,13 @@ class EntryActions implements Hydratable, Resetable {
       delete draft.data[entryId]
       draft.entryIdSet.delete(entryId)
       draft.entryIdByInbox[entry.inboxHandle!]?.delete(entryId)
+      draft.entryIdByView[FeedViewType.Articles]!.delete(entryId)
       draft.entryIdByView[FeedViewType.All]!.delete(entryId)
+
+      const subscriptionView = getSubscriptionById(getInboxStoreId(entry.inboxHandle!))?.view
+      if (typeof subscriptionView === "number") {
+        draft.entryIdByView[subscriptionView]?.delete(entryId)
+      }
     })
   }
 
@@ -569,32 +612,15 @@ class EntrySyncServices {
       feedIdList,
     })
 
-    const res = params.inboxId
-      ? await api().entries.inbox.list({
-          publishedAfter: pageParam,
-          read,
-          limit,
-          isCollection,
-          inboxId: params.inboxId,
-          ...(aiSort && { aiSort }),
-          ...params,
-        })
-      : await api().entries.list(
-          {
-            publishedAfter: pageParam,
-            read,
-            limit,
-            isCollection,
-            excludePrivate,
-            ...(aiSort && { aiSort }),
-            ...params,
-          },
-          aiSort
-            ? {
-                timeout: 3 * 60 * 1000,
-              }
-            : undefined,
-        )
+    const res = await this.fetchEntriesResponse({
+      aiSort,
+      excludePrivate,
+      isCollection,
+      limit,
+      pageParam,
+      params,
+      read,
+    })
 
     // Mark feed unread dirty, so re-fetch the unread data when view feed unread entires in the next time
     if (read === false) {
@@ -641,6 +667,99 @@ class EntrySyncServices {
     feedActions.upsertMany(feeds)
 
     return res
+  }
+
+  private async fetchEntriesResponse({
+    aiSort,
+    excludePrivate,
+    isCollection,
+    limit,
+    pageParam,
+    params,
+    read,
+  }: {
+    aiSort?: boolean
+    excludePrivate?: boolean
+    isCollection?: boolean
+    limit?: number
+    pageParam?: string
+    params: ReturnType<typeof getEntriesParams>
+    read?: boolean
+  }): Promise<EntryListLikeResponse> {
+    if (params.inboxId) {
+      return api().entries.inbox.list({
+        publishedAfter: pageParam,
+        read,
+        limit,
+        inboxId: params.inboxId,
+      })
+    }
+
+    const entriesRequest = api().entries.list(
+      {
+        publishedAfter: pageParam,
+        read,
+        limit,
+        isCollection,
+        excludePrivate,
+        ...(aiSort && { aiSort }),
+        ...params,
+      },
+      aiSort
+        ? {
+            timeout: 3 * 60 * 1000,
+          }
+        : undefined,
+    )
+
+    // 邮件订阅走独立 inbox 接口，只在完整时间线合并，避免影响单个来源页。
+    if (!this.shouldFetchInboxTimeline(params)) {
+      return entriesRequest
+    }
+
+    const inboxIds = getInboxList().map((inbox) => inbox.id)
+    if (inboxIds.length === 0) {
+      return entriesRequest
+    }
+
+    const [entriesResponse, ...inboxResponses] = await Promise.all([
+      entriesRequest,
+      ...inboxIds.map((inboxId) =>
+        api().entries.inbox.list({
+          publishedAfter: pageParam,
+          read,
+          limit,
+          inboxId,
+        }),
+      ),
+    ])
+
+    const data = [
+      ...(entriesResponse.data ?? []),
+      ...inboxResponses.flatMap((response) => response.data ?? []),
+    ].sort(
+      (left, right) =>
+        new Date(right.entries.publishedAt).getTime() -
+        new Date(left.entries.publishedAt).getTime(),
+    )
+
+    return {
+      ...entriesResponse,
+      data: typeof limit === "number" ? data.slice(0, limit) : data,
+    }
+  }
+
+  private shouldFetchInboxTimeline(params: ReturnType<typeof getEntriesParams>) {
+    const isWholeTimeline =
+      !params.feedId &&
+      !params.feedIdList &&
+      !params.inboxId &&
+      !params.listId &&
+      !params.isCollection
+
+    return (
+      isWholeTimeline && (params.view === FeedViewType.All || params.view === FeedViewType.Articles)
+    )
   }
 
   async fetchEntryDetail(entryId: EntryId | undefined, isInbox?: boolean) {

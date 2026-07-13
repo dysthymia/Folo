@@ -5,7 +5,9 @@ import { apiContext } from "../../context"
 import type { FollowAPI } from "../../types"
 import { useCollectionStore } from "../collection/store"
 import { useFeedStore } from "../feed/store"
-import { entrySyncServices, useEntryStore } from "./store"
+import { useInboxStore } from "../inbox/store"
+import { entryActions, entrySyncServices, useEntryStore } from "./store"
+import type { EntryModel } from "./types"
 
 const {
   collectionDeleteManyMock,
@@ -84,6 +86,7 @@ const createCollectionResponseItem = (index: number) => ({
 
 describe("entrySyncServices.fetchEntries", () => {
   const listEntriesMock = vi.fn()
+  const listInboxEntriesMock = vi.fn()
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -112,11 +115,70 @@ describe("entrySyncServices.fetchEntries", () => {
     })
     useCollectionStore.setState({ collections: {} })
     useFeedStore.setState({ feeds: {} })
+    useInboxStore.setState({ inboxes: {} })
     apiContext.provide({
       entries: {
         list: listEntriesMock,
+        inbox: {
+          list: listInboxEntriesMock,
+        },
       },
     } as unknown as FollowAPI)
+  })
+
+  it("indexes inbox entries in the inbox, articles, and all timelines", () => {
+    const entry = createEntryModel({
+      id: "inbox-entry-1",
+      inboxHandle: "mailbox",
+      publishedAt: new Date("2026-03-03T00:00:00.000Z"),
+    })
+
+    entryActions.upsertManyInSession([entry])
+
+    const state = useEntryStore.getState()
+    expect(state.entryIdByInbox.mailbox).toContain("inbox-entry-1")
+    expect(state.entryIdByView[FeedViewType.Articles]).toContain("inbox-entry-1")
+    expect(state.entryIdByView[FeedViewType.All]).toContain("inbox-entry-1")
+
+    entryActions.deleteInboxEntryById("inbox-entry-1")
+
+    const nextState = useEntryStore.getState()
+    expect(nextState.entryIdByInbox.mailbox).not.toContain("inbox-entry-1")
+    expect(nextState.entryIdByView[FeedViewType.Articles]).not.toContain("inbox-entry-1")
+    expect(nextState.entryIdByView[FeedViewType.All]).not.toContain("inbox-entry-1")
+  })
+
+  it("merges inbox entries into whole all timeline fetches", async () => {
+    useInboxStore.setState({
+      inboxes: {
+        mailbox: {
+          id: "mailbox",
+          title: "Mailbox",
+          secret: "secret",
+          type: "inbox",
+        },
+      },
+    })
+    listEntriesMock.mockResolvedValue({
+      data: [createEntryResponseItem("feed-entry", "2026-03-01T00:00:00.000Z")],
+    })
+    listInboxEntriesMock.mockResolvedValue({
+      data: [createInboxEntryResponseItem("inbox-entry", "2026-03-02T00:00:00.000Z")],
+    })
+
+    const response = await entrySyncServices.fetchEntries({
+      view: FeedViewType.All,
+      limit: 40,
+    })
+
+    expect(listInboxEntriesMock).toHaveBeenCalledWith({
+      inboxId: "mailbox",
+      limit: 40,
+      publishedAfter: undefined,
+      read: undefined,
+    })
+    expect(response.data.map((item) => item.entries.id)).toEqual(["inbox-entry", "feed-entry"])
+    expect(useEntryStore.getState().entryIdByView[FeedViewType.All]).toContain("inbox-entry")
   })
 
   it("keeps known collection entries when the first collection page can have more pages", async () => {
@@ -149,4 +211,100 @@ describe("entrySyncServices.fetchEntries", () => {
     expect(Object.keys(useCollectionStore.getState().collections)).toHaveLength(25)
     expect(useCollectionStore.getState().collections["entry-1"]).toBeDefined()
   })
+})
+
+const createEntryModel = ({
+  id,
+  inboxHandle,
+  publishedAt,
+}: {
+  id: string
+  inboxHandle: string | null
+  publishedAt: Date
+}): EntryModel => ({
+  id,
+  title: id,
+  url: `https://example.com/${id}`,
+  content: null,
+  readabilityContent: null,
+  readabilityUpdatedAt: null,
+  description: null,
+  guid: id,
+  author: null,
+  authorUrl: null,
+  authorAvatar: null,
+  insertedAt: publishedAt,
+  publishedAt,
+  media: null,
+  categories: null,
+  attachments: null,
+  extra: null,
+  language: null,
+  feedId: inboxHandle,
+  inboxHandle,
+  read: false,
+  sources: null,
+  settings: null,
+})
+
+const createEntryResponseItem = (id: string, publishedAt: string) => ({
+  read: false,
+  from: [],
+  view: FeedViewType.Articles,
+  feeds: {
+    type: "feed",
+    id: "feed-1",
+    title: "Feed",
+    url: "https://example.com/feed.xml",
+    image: null,
+    description: null,
+    ownerUserId: null,
+    errorAt: null,
+    errorMessage: null,
+    siteUrl: "https://example.com",
+  },
+  entries: {
+    id,
+    title: id,
+    url: `https://example.com/${id}`,
+    description: null,
+    guid: id,
+    author: null,
+    authorUrl: null,
+    authorAvatar: null,
+    insertedAt: publishedAt,
+    publishedAt,
+    media: null,
+    categories: null,
+    attachments: null,
+    extra: null,
+    language: null,
+  },
+})
+
+const createInboxEntryResponseItem = (id: string, publishedAt: string) => ({
+  read: false,
+  feeds: {
+    type: "inbox",
+    id: "mailbox",
+    title: "Mailbox",
+    secret: "secret",
+  },
+  entries: {
+    id,
+    title: id,
+    url: `https://example.com/${id}`,
+    description: null,
+    guid: id,
+    author: null,
+    authorUrl: null,
+    authorAvatar: null,
+    insertedAt: publishedAt,
+    publishedAt,
+    media: null,
+    categories: null,
+    attachments: null,
+    extra: null,
+    language: null,
+  },
 })
