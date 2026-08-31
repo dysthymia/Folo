@@ -8,9 +8,9 @@ import {
   PopoverTrigger,
 } from "@follow/components/ui/popover/index.jsx"
 import { AnimatePresence, m } from "motion/react"
-import { memo, useEffect, useRef } from "react"
+import { memo, useEffect } from "react"
 
-import { usePopoverState } from "~/atoms/popover"
+import { dismissPopover, usePopoverValue } from "~/atoms/popover"
 import { HotkeyScope } from "~/constants"
 
 export const PopoverProvider: Component = ({ children }) => (
@@ -21,36 +21,31 @@ export const PopoverProvider: Component = ({ children }) => (
 )
 
 const Handler = memo(() => {
-  const ref = useRef<HTMLButtonElement>(null)
-  const [popoverState, setPopoverState] = usePopoverState()
+  const popoverState = usePopoverValue()
   const setGlobalFocusableScope = useSetGlobalFocusableScope()
 
   useEffect(() => {
     if (!popoverState.open) return
-    const triggerElement = ref.current
-    if (!triggerElement) return
 
-    triggerElement.dispatchEvent(
-      new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-      }),
-    )
-  }, [popoverState])
+    setGlobalFocusableScope(HotkeyScope.DropdownMenu, "append")
+    return () => {
+      setGlobalFocusableScope(HotkeyScope.DropdownMenu, "remove")
+    }
+  }, [popoverState.open, setGlobalFocusableScope])
+
+  const { modal, zIndex, ...contentProps } = popoverState.open ? (popoverState.props ?? {}) : {}
 
   return (
     <Popover
+      open={popoverState.open}
+      modal={modal}
       onOpenChange={(state) => {
-        if (state) {
-          setGlobalFocusableScope(HotkeyScope.DropdownMenu, "append")
-        } else {
-          setGlobalFocusableScope(HotkeyScope.DropdownMenu, "remove")
-          setPopoverState({ open: false })
+        if (!state) {
+          dismissPopover()
         }
       }}
     >
       <PopoverTrigger
-        ref={ref}
         className="pointer-events-none"
         style={
           popoverState.open
@@ -58,9 +53,14 @@ const Handler = memo(() => {
             : {}
         }
       />
-      <PopoverContent asChild forceMount>
-        <AnimatePresence>
-          {popoverState.open && (
+      <AnimatePresence>
+        {popoverState.open && (
+          <PopoverContent
+            {...contentProps}
+            asChild
+            forceMount
+            style={{ ...contentProps.style, zIndex }}
+          >
             <m.div
               className="mr-2 rounded-xl border bg-material-ultra-thick p-2 shadow-2xl backdrop-blur-background"
               initial={{ opacity: 0, scale: 0.95, y: -10 }}
@@ -71,9 +71,9 @@ const Handler = memo(() => {
               <PopoverArrow className="fill-border" />
               {popoverState.content}
             </m.div>
-          )}
-        </AnimatePresence>
-      </PopoverContent>
+          </PopoverContent>
+        )}
+      </AnimatePresence>
     </Popover>
   )
 })

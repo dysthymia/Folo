@@ -45,7 +45,7 @@ export function TimelineViewSelector() {
         height: TIMELINE_VIEW_SELECTOR_HEIGHT,
       }}
     >
-      <View style={readableContainerStyle}>
+      <View className="w-full" style={readableContainerStyle}>
         <ScrollView
           ref={scrollViewRef}
           style={styles.scrollView}
@@ -104,7 +104,7 @@ function ItemWrapper({
   const dragProgress = useTimelineSelectorDragProgress()
   const isTablet = useIsTabletLayout()
   const activeWidth = Math.max(
-    windowWidth - (INACTIVE_WIDTH + 12) * (activeViews.length - 1) - 8 * 2,
+    windowWidth - (INACTIVE_WIDTH + 12) * (activeViews.length - 1) - 12 * 2,
     ACTIVE_WIDTH,
   )
   const resolvedActiveWidth = isTablet

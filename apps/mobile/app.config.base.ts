@@ -111,6 +111,17 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     android: {
       package: "is.follow",
+      // Media selection uses system pickers; saving only needs write access on older Android versions.
+      blockedPermissions: [
+        "android.permission.ACCESS_MEDIA_LOCATION",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.RECORD_AUDIO",
+      ],
       adaptiveIcon: {
         foregroundImage: adaptiveIconPath,
         monochromeImage: adaptiveIconPath,
@@ -144,6 +155,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "expo-build-properties",
         {
           ios: {
+            deploymentTarget: "16.4",
             // Expo SDK 55 archive builds regress with use_frameworks + prebuilt RN core.
             buildReactNativeFromSource: true,
             useFrameworks: "static",
@@ -157,10 +169,12 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         {
           photosPermission: "Allow $(PRODUCT_NAME) to access your photos.",
           savePhotosPermission: "Allow $(PRODUCT_NAME) to save photos.",
-          isAccessMediaLocationEnabled: true,
+          isAccessMediaLocationEnabled: false,
+          granularPermissions: [],
         },
       ],
       "expo-apple-authentication",
+      "expo-status-bar",
       "expo-web-browser",
       "expo-image",
       "expo-sharing",
@@ -190,6 +204,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "expo-image-picker",
         {
           photosPermission: "Allow $(PRODUCT_NAME) to access your photos.",
+          cameraPermission: false,
+          microphonePermission: false,
         },
       ],
       [

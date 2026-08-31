@@ -3,7 +3,7 @@ import { IMAGE_PROXY_URL } from "@follow/utils/img-proxy"
 import ImageEditor from "@react-native-community/image-editor"
 import * as FileSystem from "expo-file-system/legacy"
 import type { ImageProps, ImageSource } from "expo-image"
-import { saveToLibraryAsync, usePermissions } from "expo-media-library"
+import { Asset, usePermissions } from "expo-media-library"
 import * as Sharing from "expo-sharing"
 import { useCallback } from "react"
 import { Image } from "react-native"
@@ -145,7 +145,7 @@ export const saveImageToMediaLibrary = async ({ uri }: { uri: string }) => {
   const croppedImage = await getImageData(uri)
   const filename = `${extractFilenameFromUrl(uri)}.png`
   const { filePath, cleanup } = await createTempFile(croppedImage.base64, filename)
-  await saveToLibraryAsync(filePath)
+  await Asset.create(filePath)
   cleanup()
 }
 
@@ -161,7 +161,7 @@ export const saveImageToMediaLibrary = async ({ uri }: { uri: string }) => {
  */
 export function useSaveImageToMediaLibrary() {
   const [permissionResponse, requestPermission, getPermission] = usePermissions({
-    granularPermissions: ["photo"],
+    writeOnly: true,
   })
   return useCallback(
     async (uri: string) => {

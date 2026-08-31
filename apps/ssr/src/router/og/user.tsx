@@ -1,17 +1,12 @@
-import { isBizId } from "@follow/utils/utils"
 import type { FollowClient } from "@follow-app/client-sdk"
 import * as React from "react"
 
 import { renderToImage } from "../../lib/og/render-to-image"
+import { getUserProfile } from "../../lib/user-profile-params"
 import { getImageBase64, OGAvatar, OGCanvas } from "./__base"
 
-export const renderUserOG = async (apiClient: FollowClient, id: string) => {
-  const handle = isBizId(id || "") ? id : `${id}`.startsWith("@") ? `${id}`.slice(1) : id
-
-  const user = await apiClient.api.profiles.getProfile({
-    id,
-    handle,
-  })
+export const renderUserOG = async (apiClient: FollowClient, handleOrId: string) => {
+  const user = await getUserProfile(apiClient, handleOrId)
 
   if (!user) {
     throw 404

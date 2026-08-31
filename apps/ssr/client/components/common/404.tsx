@@ -7,7 +7,7 @@ import { m, useAnimationControls } from "motion/react"
 import { Fragment, useEffect, useState } from "react"
 import * as React from "react"
 
-const NotFoundContent = () => {
+export const NotFoundContent = () => {
   const [glitchText, setGlitchText] = useState("404")
   const [isGlitching, setIsGlitching] = useState(false)
 

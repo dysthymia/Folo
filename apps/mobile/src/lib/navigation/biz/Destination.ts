@@ -22,6 +22,10 @@ class Destination {
   }
 
   Login() {
+    if (this.navigation.hasControllerView(LoginScreen)) {
+      return
+    }
+
     this.presentControllerView(LoginScreen, void 0, this.isIpad ? "formSheet" : "modal")
   }
 }

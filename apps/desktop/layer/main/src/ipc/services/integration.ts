@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs"
 import fsp from "node:fs/promises"
 
-import { shell } from "electron"
-import type { IpcContext } from "electron-ipc-decorator"
+import { dialog, shell } from "electron"
 import { IpcMethod, IpcService } from "electron-ipc-decorator"
 import path from "pathe"
 
+import { t } from "~/lib/i18n"
 import { store } from "~/lib/store"
 import { logger } from "~/logger"
 
@@ -82,24 +82,68 @@ export async function saveMediaToEagle(input: SaveToEagleInput): Promise<any> {
   }
 }
 
+const BUILT_IN_URL_SCHEME_PROTOCOLS = new Set<string>([
+  "http",
+  "https",
+  "mailto",
+  "obsidian",
+  "bear",
+  "drafts",
+  "things",
+  "notion",
+  "x-devonthink",
+])
+
+// Protocols that must never be handed to `shell.openExternal`, even after user
+// confirmation. Matches are exact so custom protocols such as `file-helper`
+// remain usable.
+const DISALLOWED_URL_SCHEME_PROTOCOLS = new Set<string>([
+  "data",
+  "file",
+  "jar",
+  "javascript",
+  "ms-msdt",
+  "res",
+  "search-ms",
+  "smb",
+  "vbscript",
+])
+
+function isDisallowedURLSchemeProtocol(protocol: string): boolean {
+  return DISALLOWED_URL_SCHEME_PROTOCOLS.has(protocol)
+}
+
+async function confirmUserDefinedURLScheme(protocol: string): Promise<boolean> {
+  const result = await dialog.showMessageBox({
+    type: "warning",
+    title: t("dialog.openExternalApp.title"),
+    message: t("dialog.openExternalApp.message", {
+      url: `${protocol}://`,
+      interpolation: { escapeValue: false },
+    }),
+    buttons: [t("dialog.open"), t("dialog.cancel")],
+    defaultId: 1,
+    cancelId: 1,
+  })
+
+  return result.response === 0
+}
+
 export class IntegrationService extends IpcService {
   static override readonly groupName = "integration"
 
   @IpcMethod()
-  async saveToObsidian(
-    context: IpcContext,
-    input: {
-      url: string
-      title: string
-      content: string
-      author: string
-      publishedAt: string
-      vaultPath: string
-      description?: string
-      feedTitle?: string
-      feedUrl?: string
-    },
-  ) {
+  async saveToObsidian(input: {
+    url: string
+    title: string
+    content: string
+    author: string
+    publishedAt: string
+    vaultPath: string
+    description?: string
+    feedTitle?: string
+    feedUrl?: string
+  }) {
     try {
       const {
         url,
@@ -151,22 +195,22 @@ ${content}
   }
 
   @IpcMethod()
-  async saveToEagle(context: IpcContext, input: SaveToEagleInput): Promise<any> {
+  async saveToEagle(input: SaveToEagleInput): Promise<any> {
     return saveMediaToEagle(input)
   }
 
   @IpcMethod()
-  setEagleContextMenuEnabled(context: IpcContext, input: SetEagleContextMenuEnabledInput): void {
+  setEagleContextMenuEnabled(input: SetEagleContextMenuEnabledInput): void {
     store.set("eagleContextMenuEnabled", input.enabled)
   }
 
   @IpcMethod()
-  async loginToQBittorrent(context: IpcContext, input: LoginToQBittorrentInput) {
+  async loginToQBittorrent(input: LoginToQBittorrentInput) {
     const { host, username, password } = input
 
     const existingSID = store.get("qbittorrentSID")
     if (existingSID) {
-      const errorMessage = await this.checkQBittorrentAuth(context, { host })
+      const errorMessage = await this.checkQBittorrentAuth({ host })
       if (!errorMessage) {
         return
       }
@@ -194,7 +238,7 @@ ${content}
     return
   }
 
-  async checkQBittorrentAuth(context: IpcContext, input: CheckQBittorrentAuthInput) {
+  async checkQBittorrentAuth(input: CheckQBittorrentAuthInput) {
     const { host } = input
     const sid = store.get("qbittorrentSID")
     if (!sid) {
@@ -214,7 +258,7 @@ ${content}
   }
 
   @IpcMethod()
-  async addMagnet(context: IpcContext, input: AddMagnetInput) {
+  async addMagnet(input: AddMagnetInput) {
     const { host, urls } = input
     const sid = store.get("qbittorrentSID")
     if (!sid) {
@@ -235,12 +279,11 @@ ${content}
       return `Failed to add magnet links: ${text}`
     }
 
-    // eslint-disable-next-line no-console
     console.log(`Added magnet links to qBittorrent: ${urls.join(", ")}`)
   }
 
   @IpcMethod()
-  async customFetch(context: IpcContext, input: CustomFetchInput) {
+  async customFetch(input: CustomFetchInput) {
     const requestId = Math.random().toString(36).slice(2, 8)
     const { url, method, headers, body, timeout = 10_000 } = input
 
@@ -383,13 +426,34 @@ ${content}
   }
 
   @IpcMethod()
-  async openURLScheme(context: IpcContext, scheme: string) {
+  async openURLScheme(scheme: string) {
     const requestId = Math.random().toString(36).slice(2, 8)
 
     try {
-      // Validate URL scheme format
-      if (!scheme.includes("://")) {
+      // Parse and validate the protocol up-front. `shell.openExternal` will
+      // happily dispatch any scheme the OS has registered a handler for. Keep
+      // known dangerous protocols blocked while allowing user-configured app
+      // schemes such as `logseq://` or `ulysses://`.
+      let protocol: string
+      try {
+        protocol = new URL(scheme).protocol.replace(/:$/, "").toLowerCase()
+      } catch {
         throw new Error("Invalid URL scheme format. Must include protocol (e.g., 'app://')")
+      }
+
+      if (!protocol) {
+        throw new Error("Invalid URL scheme format. Must include protocol (e.g., 'app://')")
+      }
+
+      if (isDisallowedURLSchemeProtocol(protocol)) {
+        throw new Error(`URL scheme "${protocol}://" is not allowed.`)
+      }
+
+      if (
+        !BUILT_IN_URL_SCHEME_PROTOCOLS.has(protocol) &&
+        !(await confirmUserDefinedURLScheme(protocol))
+      ) {
+        throw new Error(`URL scheme "${protocol}://" was not opened.`)
       }
 
       // Log URL scheme execution (mask sensitive data)
@@ -404,7 +468,7 @@ ${content}
 
       logger.info(`[URLScheme:${requestId}] Opening URL scheme`, {
         scheme: safeScheme,
-        protocol: scheme.split("://")[0],
+        protocol,
       })
 
       // Use Electron's shell.openExternal to open URL scheme

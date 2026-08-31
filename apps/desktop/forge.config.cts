@@ -36,7 +36,43 @@ const ymlMapsMap = {
   win32: "latest.yml",
 }
 
-const keepModules = new Set(["font-list", "vscode-languagedetection"])
+// Keep external runtime modules and their production dependency trees in app.asar.
+// Scoped packages are copied as a whole because cleanSources operates on top-level entries.
+const keepModules = new Set([
+  "@asamuzakjp",
+  "@bramus",
+  "@csstools",
+  "@exodus",
+  "bidi-js",
+  "css-tree",
+  "data-urls",
+  "decimal.js",
+  "entities",
+  "font-list",
+  "html-encoding-sniffer",
+  "is-potential-custom-element-name",
+  "jsdom",
+  "lru-cache",
+  "mdn-data",
+  "parse5",
+  "punycode",
+  "require-from-string",
+  "saxes",
+  "source-map-js",
+  "symbol-tree",
+  "tldts",
+  "tldts-core",
+  "tough-cookie",
+  "tr46",
+  "undici",
+  "vscode-languagedetection",
+  "w3c-xmlserializer",
+  "webidl-conversions",
+  "whatwg-mimetype",
+  "whatwg-url",
+  "xml-name-validator",
+  "xmlchars",
+])
 const keepLanguages = new Set(["en", "en_GB", "en-US", "en_US"])
 
 // remove folders & files not to be included in the app
@@ -93,7 +129,10 @@ async function cleanSources(buildPath, _electronVersion, platform, _arch, callba
 
 const noopAfterCopy = (_buildPath, _electronVersion, _platform, _arch, callback) => callback()
 
-const ignorePattern = new RegExp(`^/node_modules/(?!${[...keepModules].join("|")})`)
+const keepModulePattern = [...keepModules]
+  .map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .join("|")
+const ignorePattern = new RegExp(`^/node_modules/(?!(?:${keepModulePattern})(?:/|$))`)
 
 const config: ForgeConfig = {
   packagerConfig: {

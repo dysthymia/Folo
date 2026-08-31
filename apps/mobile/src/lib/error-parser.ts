@@ -5,6 +5,7 @@ import { FetchError } from "ofetch"
 import { getIsPaymentEnabled } from "@/src/atoms/server-configs"
 import { showUpgradeRequiredDialog } from "@/src/modules/dialogs/UpgradeRequiredDialog"
 
+import { sanitizeErrorMessage } from "./error-message"
 import { toast } from "./toast"
 
 export const getFetchErrorInfo = (
@@ -21,11 +22,11 @@ export const getFetchErrorInfo = (
       const i18nKey = `errors:${code}` as any
       const i18nMessage = t(i18nKey) === i18nKey ? message : t(i18nKey)
       return {
-        message: `${i18nMessage}${reason ? `: ${reason}` : ""}`,
+        message: sanitizeErrorMessage(`${i18nMessage}${reason ? `: ${reason}` : ""}`),
         code,
       }
     } catch {
-      return { message: error.message }
+      return { message: sanitizeErrorMessage(error.message) }
     }
   }
 
@@ -35,15 +36,15 @@ export const getFetchErrorInfo = (
       const i18nKey = `errors:${code}` as any
       const i18nMessage = t(i18nKey) === i18nKey ? error.message : t(i18nKey)
       return {
-        message: i18nMessage,
+        message: sanitizeErrorMessage(i18nMessage),
         code,
       }
     } catch {
-      return { message: error.message }
+      return { message: sanitizeErrorMessage(error.message) }
     }
   }
 
-  return { message: error.message }
+  return { message: sanitizeErrorMessage(error.message) }
 }
 
 export const getFetchErrorMessage = (error: Error) => {
@@ -58,7 +59,7 @@ export const createErrorToaster = (title?: string) => (err: Error) =>
   toastFetchError(err, { title })
 
 export const toastFetchError = (error: Error, { title: _title }: { title?: string } = {}) => {
-  const { message: fallbackMessage } = error
+  const fallbackMessage = sanitizeErrorMessage(error.message)
   let message = fallbackMessage
   let _reason = ""
   let code: number | undefined
@@ -112,6 +113,8 @@ export const toastFetchError = (error: Error, { title: _title }: { title?: strin
       message = fallbackMessage
     }
   }
+
+  message = sanitizeErrorMessage(message)
 
   // 2fa errors are handled by the form
   if (code === 4007 || code === 4008) {

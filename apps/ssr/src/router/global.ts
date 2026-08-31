@@ -9,6 +9,7 @@ import { FetchError } from "ofetch"
 import path, { dirname, resolve } from "pathe"
 import xss from "xss"
 
+import { injectHydrationScript } from "../lib/hydration-script"
 import { NotFoundError } from "../lib/not-found"
 import { buildSeoMetaTags } from "../lib/seo"
 import { injectMetaHandler, MetaError } from "../meta-handler"
@@ -151,13 +152,7 @@ async function injectMetaToTemplate(document: Document, req: FastifyRequest, res
         break
       }
       case "hydrate": {
-        // Insert hydrate script
-        const script = document.createElement("script")
-        script.innerHTML = `
-          window.__HYDRATE__ = window.__HYDRATE__ || {}
-          window.__HYDRATE__[${JSON.stringify(meta.key)}] = JSON.parse(${JSON.stringify(JSON.stringify(meta.data))})
-        `
-        document.head.append(script)
+        injectHydrationScript(document, meta.key, meta.data)
         break
       }
     }

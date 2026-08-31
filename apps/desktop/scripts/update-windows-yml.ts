@@ -2,7 +2,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import { fileURLToPath, resolve } from "node:url"
 
-import yaml from "js-yaml"
+import * as yaml from "js-yaml"
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const basePath = resolve(__dirname, "../out/make/squirrel.windows/x64/")

@@ -2,6 +2,7 @@ import { usePrefetchActions } from "@follow/store/action/hooks"
 import { usePrefetchSessionUser } from "@follow/store/user/hooks"
 import { StatusBar } from "expo-status-bar"
 import type { FC, PropsWithChildren } from "react"
+import { useEffect, useRef } from "react"
 import { View } from "react-native"
 import Animated, { interpolate, useAnimatedStyle } from "react-native-reanimated"
 import { RootSiblingParent } from "react-native-root-siblings"
@@ -13,13 +14,14 @@ import { useMessaging, useUpdateMessagingToken } from "./hooks/useMessaging"
 import { useOnboarding } from "./hooks/useOnboarding"
 import { useUnreadCountBadge } from "./hooks/useUnreadCountBadge"
 import { useAuthSessionCookieRefresh } from "./lib/auth"
+import { destination } from "./lib/navigation/biz/Destination"
 import { DebugButton, EnvProfileIndicator } from "./modules/debug"
 import { ReviewPromptProvider } from "./modules/review-prompt/provider"
 
 export function App({ children }: { children: React.ReactNode }) {
   return (
     <>
-      <StatusBar translucent animated style="auto" />
+      <StatusBar animated style="auto" />
       <View className="flex-1 bg-system-background">
         <SideEffect />
 
@@ -55,7 +57,18 @@ const ScaleableWrapper: FC<PropsWithChildren> = ({ children }) => {
 
 const SideEffect = () => {
   useAuthSessionCookieRefresh()
-  usePrefetchSessionUser()
+  const sessionQuery = usePrefetchSessionUser()
+  const hasHandledInitialSessionRef = useRef(false)
+  useEffect(() => {
+    if (hasHandledInitialSessionRef.current || !sessionQuery.isSuccess) {
+      return
+    }
+
+    hasHandledInitialSessionRef.current = true
+    if (!sessionQuery.data?.user) {
+      destination.Login()
+    }
+  }, [sessionQuery.data?.user, sessionQuery.isSuccess])
   useUnreadCountBadge()
   useBackHandler()
   useIntentHandler()

@@ -1,5 +1,4 @@
 import { app } from "electron"
-import type { IpcContext } from "electron-ipc-decorator"
 import { IpcMethod, IpcService } from "electron-ipc-decorator"
 import { join } from "pathe"
 
@@ -21,8 +20,8 @@ export class SemanticDedupeService extends IpcService {
   static override readonly groupName = "semanticDedupe"
 
   @IpcMethod()
+  // electron-ipc-decorator 1.x 会自行管理 IPC 上下文，方法只暴露业务参数。
   evaluateCandidates(
-    _context: IpcContext,
     input: EvaluateSemanticDuplicatesInput,
   ): Promise<EvaluateSemanticDuplicatesOutput> {
     return evaluateSemanticDuplicateCandidates({

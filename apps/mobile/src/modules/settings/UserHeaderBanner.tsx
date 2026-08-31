@@ -1,7 +1,7 @@
 import { UserRole, UserRoleName } from "@follow/constants"
 import { useImageColors } from "@follow/store/image/hooks"
 import { useUserById, useUserRole } from "@follow/store/user/hooks"
-import { cn, getLuminance } from "@follow/utils"
+import { cn } from "@follow/utils"
 import { LinearGradient } from "expo-linear-gradient"
 import type { FC } from "react"
 import { useMemo } from "react"
@@ -28,6 +28,8 @@ import { useNavigation, useScreenIsInSheetModal } from "@/src/lib/navigation/hoo
 import { LoginScreen } from "@/src/screens/(modal)/LoginScreen"
 import { usePrefetchImageColors } from "@/src/store/image/hooks"
 import { accentColor } from "@/src/theme/colors"
+
+import { isUserHeaderGradientLight, USER_HEADER_BANNER_TOP_SPACING } from "./layout"
 
 const defaultGradientColors = ["#000", "#100", "#200"]
 const PlatformInfoMap: Record<
@@ -126,14 +128,7 @@ export const UserHeaderBanner = ({
         link: link!,
       }))
   }, [user?.socialLinks])
-  const gradientLight = useMemo(() => {
-    if (!imageColors) return false
-    if (imageColors.platform === "web") return false
-    const dominantLuminance = getLuminance(
-      imageColors.platform === "android" ? imageColors.dominant : imageColors.primary,
-    )
-    return dominantLuminance > 0.5
-  }, [imageColors])
+  const gradientLight = isUserHeaderGradientLight(imageColors)
   const styles = useAnimatedStyle(() => {
     const scaleValue = interpolate(scrollY.value, [-MAX_PULL, 0], [SCALE_FACTOR, 1], {
       extrapolateLeft: "extend",
@@ -177,8 +172,8 @@ export const UserHeaderBanner = ({
   const sheetModal = useScreenIsInSheetModal()
   const bannerContainerStyle = useMemo(
     () => ({
-      marginTop: sheetModal ? 0 : -insets.top - 22,
-      paddingTop: sheetModal ? 48 : 22,
+      marginTop: sheetModal ? 0 : -insets.top - USER_HEADER_BANNER_TOP_SPACING,
+      paddingTop: sheetModal ? 48 : USER_HEADER_BANNER_TOP_SPACING,
     }),
     [insets.top, sheetModal],
   )
@@ -201,14 +196,10 @@ export const UserHeaderBanner = ({
             x: 1,
             y: 1,
           }}
-          style={StyleSheet.absoluteFillObject}
+          style={StyleSheet.absoluteFill}
         />
         {gradientColors && (
-          <ReAnimated.View
-            style={StyleSheet.absoluteFillObject}
-            entering={FadeIn}
-            exiting={FadeOut}
-          >
+          <ReAnimated.View style={StyleSheet.absoluteFill} entering={FadeIn} exiting={FadeOut}>
             <LinearGradient
               colors={gradientColors as [string, string, ...string[]]}
               start={{
@@ -219,7 +210,7 @@ export const UserHeaderBanner = ({
                 x: 1,
                 y: 1,
               }}
-              style={StyleSheet.absoluteFillObject}
+              style={StyleSheet.absoluteFill}
             />
           </ReAnimated.View>
         )}

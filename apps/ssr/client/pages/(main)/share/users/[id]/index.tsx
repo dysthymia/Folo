@@ -1,3 +1,4 @@
+import { NotFoundContent } from "@client/components/common/404"
 import { FeedIcon } from "@client/components/ui/feed-icon"
 import { openInFollowApp } from "@client/lib/helper"
 import { UrlBuilder } from "@client/lib/url-builder"
@@ -10,6 +11,7 @@ import { LoadingCircle } from "@follow/components/ui/loading/index.jsx"
 import { useTitle } from "@follow/hooks"
 import { cn } from "@follow/utils/utils"
 import type { SubscriptionWithFeed, UserProfile } from "@follow-app/client-sdk"
+import { FollowAPIError } from "@follow-app/client-sdk"
 import * as React from "react"
 import { Fragment, memo, useState } from "react"
 import { useParams } from "react-router"
@@ -89,21 +91,42 @@ export const Component = () => {
 
   useTitle(user.data?.name)
 
+  if (user.isLoading) {
+    return <LoadingCircle size="large" className="center fixed inset-0" />
+  }
+
+  if (!user.data) {
+    if (user.error instanceof FollowAPIError && user.error.status === 404) {
+      return <NotFoundContent />
+    }
+
+    return <ProfileLoadError onRetry={() => void user.refetch()} />
+  }
+
   return (
-    <>
-      {user.isLoading ? (
-        <LoadingCircle size="large" className="center fixed inset-0" />
-      ) : (
-        <Fragment>
-          <UserHero user={user.data!} />
-          <Lists userId={user.data?.id} />
-          {/* Subscriptions Section */}
-          <Subscriptions userId={user.data?.id} />
-        </Fragment>
-      )}
-    </>
+    <Fragment>
+      <UserHero user={user.data} />
+      <Lists userId={user.data.id} />
+      {/* Subscriptions Section */}
+      <Subscriptions userId={user.data.id} />
+    </Fragment>
   )
 }
+
+const ProfileLoadError = ({ onRetry }: { onRetry: () => void }) => (
+  <div className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center px-6 text-center">
+    <i className="i-mgc-warning-fill mb-6 size-12 text-orange-500" />
+    <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
+      Unable to load this profile
+    </h1>
+    <p className="mt-3 text-zinc-500 dark:text-zinc-400">
+      This may be a temporary problem. Please try again.
+    </p>
+    <Button buttonClassName="mt-8" onClick={onRetry}>
+      Try again
+    </Button>
+  </div>
+)
 
 const UserHero = ({ user }: { user: UserProfile }) => {
   const subscriptions = useUserSubscriptionsQuery(user.id)
@@ -119,7 +142,7 @@ const UserHero = ({ user }: { user: UserProfile }) => {
       <div className="mb-6">
         <Avatar className="mx-auto size-20 border border-border">
           <AvatarImage className="duration-300 animate-in fade-in-0" src={user.image!} />
-          <AvatarFallback className="bg-zinc-100 text-xl font-medium text-zinc-600 dark:bg-neutral-800 dark:text-neutral-400">
+          <AvatarFallback className="dark:bg-neutral-800 dark:text-neutral-400 bg-zinc-100 text-xl font-medium text-zinc-600">
             {user.name?.slice(0, 2)}
           </AvatarFallback>
         </Avatar>
@@ -278,7 +301,7 @@ const Subscriptions = ({ userId }: { userId: string }) => {
                     {category}
                   </h2>
                   <div className="flex items-center space-x-3">
-                    <span className="rounded-full bg-zinc-100 px-3 py-1 text-sm font-medium text-zinc-600 dark:bg-neutral-800 dark:text-neutral-400">
+                    <span className="dark:bg-neutral-800 dark:text-neutral-400 rounded-full bg-zinc-100 px-3 py-1 text-sm font-medium text-zinc-600">
                       {subscriptions.data?.[category]?.length || 0}
                     </span>
                     <i

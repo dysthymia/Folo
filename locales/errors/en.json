@@ -19,6 +19,7 @@
   "2004": "Feed failed to parse",
   "2010": "Ownership challenge failed",
   "2011": "Subscription limit exceeded",
+  "2012": "RSSHub feed subscription limit exceeded",
   "3000": "Entry not found",
   "4000": "Already claimed",
   "4001": "User wallet error",

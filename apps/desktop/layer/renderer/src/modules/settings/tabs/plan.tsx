@@ -10,6 +10,7 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 import type { TFunction } from "i18next"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import type { PaymentFeature, PaymentPlan } from "~/atoms/server-configs"
 import { useIsPaymentEnabled, useServerConfigs } from "~/atoms/server-configs"
@@ -17,6 +18,15 @@ import { followClient } from "~/lib/api-client"
 import { subscription } from "~/lib/auth"
 
 const APPLE_SUBSCRIPTION_MANAGEMENT_URL = "https://apps.apple.com/account/subscriptions"
+const ACTIVE_STRIPE_SUBSCRIPTION_EXISTS_ERROR_CODE = "ACTIVE_STRIPE_SUBSCRIPTION_EXISTS"
+
+type BillingPortalResponse = {
+  code: number
+  data?: {
+    url: string
+  }
+  message?: string
+}
 
 type ActiveSubscription = {
   source: "stripe" | "apple" | null
@@ -83,6 +93,29 @@ const formatFeatureValue = (
   return value
 }
 
+const openStripeBillingPortal = async () => {
+  const returnUrl = IN_ELECTRON ? env.VITE_WEB_URL : window.location.href
+  const res = await fetch(`${env.VITE_API_URL}/billing/portal`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    credentials: "include",
+    body: JSON.stringify({ returnUrl }),
+  })
+  const data = (await res.json()) as BillingPortalResponse
+  if (!res.ok || data.code !== 0 || !data.data?.url) {
+    throw new Error(data.message || "Failed to open billing portal")
+  }
+
+  if (IN_ELECTRON) {
+    window.open(data.data.url, "_blank")
+    return
+  }
+
+  window.location.assign(data.data.url)
+}
+
 const useUpgradePlan = ({ plan, annual }: { plan: string | undefined; annual: boolean }) => {
   return useMutation({
     mutationFn: async () => {
@@ -97,9 +130,19 @@ const useUpgradePlan = ({ plan, annual }: { plan: string | undefined; annual: bo
         cancelUrl: env.VITE_WEB_URL,
         disableRedirect: IN_ELECTRON,
       })
+      if (res.error?.code === ACTIVE_STRIPE_SUBSCRIPTION_EXISTS_ERROR_CODE) {
+        await openStripeBillingPortal()
+        return
+      }
+      if (res.error) {
+        throw new Error(res.error.message)
+      }
       if (IN_ELECTRON && res.data?.url) {
         window.open(res.data.url, "_blank")
       }
+    },
+    onError: (error) => {
+      toast.error(error.message)
     },
   })
 }
@@ -120,20 +163,9 @@ const useActiveSubscription = () => {
 
 const useBillingPortal = () => {
   return useMutation({
-    mutationFn: async () => {
-      const returnUrl = IN_ELECTRON ? env.VITE_WEB_URL : window.location.href
-      const res = await fetch(`${env.VITE_API_URL}/billing/portal`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({ returnUrl }),
-      })
-      const data = await res.json()
-      if (data.code === 0 && data.data?.url) {
-        window.open(data.data.url, "_blank")
-      }
+    mutationFn: openStripeBillingPortal,
+    onError: (error) => {
+      toast.error(error.message)
     },
   })
 }
@@ -220,13 +252,7 @@ interface PlanCardProps {
 const PlanCard = ({ plan, billingPeriod, isCurrentPlan, currentTier }: PlanCardProps) => {
   const { t } = useTranslation("settings")
   const getPlanActionType = ():
-    | "current"
-    | "upgrade"
-    | "coming-soon"
-    | "in-trial"
-    | "switch"
-    | "new"
-    | null => {
+    "current" | "upgrade" | "coming-soon" | "in-trial" | "switch" | "new" | null => {
     if (plan.isComingSoon) return "coming-soon"
     switch (true) {
       case isCurrentPlan: {

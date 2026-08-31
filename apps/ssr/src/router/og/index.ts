@@ -62,7 +62,8 @@ export const ogRoute = (app: FastifyInstance) => {
 
 const createErrorFallback = (reply: FastifyReply) => (code: number | Error) => {
   if (typeof code !== "number" && code instanceof Error) {
-    reply.code(500).send(code.message)
+    console.error("OG render error:", code)
+    reply.code(500).send("Internal server error")
     return null
   }
   let message = "Internal server error"

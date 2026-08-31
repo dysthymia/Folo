@@ -1,8 +1,8 @@
 import { whoamiQueryKey } from "@follow/store/user/hooks"
 import { userSyncService } from "@follow/store/user/store"
 import { requireNativeModule } from "expo"
-import type { ProductPurchase, SubscriptionProduct } from "expo-iap"
-import { getTransactionJws, useIAP } from "expo-iap"
+import type { ProductSubscription, Purchase } from "expo-iap"
+import { ErrorCode, getTransactionJwsIOS, useIAP } from "expo-iap"
 import type { PropsWithChildren } from "react"
 import { createContext, use, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -13,6 +13,12 @@ import { followClient } from "@/src/lib/api-client"
 import { proxyEnv } from "@/src/lib/proxy-env"
 import { queryClient } from "@/src/lib/query-client"
 import { toast } from "@/src/lib/toast"
+
+import {
+  buildAppleVerificationRequest,
+  isKnownAppleSubscriptionPurchase,
+  selectSignedTransactionInfo,
+} from "./apple-iap-purchase"
 
 const billingSubscriptionQueryKey = ["billingSubscription"]
 
@@ -26,9 +32,14 @@ type BillingSubscriptionResponse = {
   canManage: boolean
 }
 
+type IAPPurchaseError = {
+  code?: ErrorCode | string
+  message?: string
+}
+
 type AppleIAPContextValue = {
   connected: boolean
-  subscriptions: SubscriptionProduct[]
+  subscriptions: ProductSubscription[]
   isPurchasing: boolean
   isProcessingPurchase: boolean
   isRestoring: boolean
@@ -66,11 +77,13 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
     return ids
   }, [serverConfigs?.PAYMENT_PLAN_LIST])
 
-  const availablePurchasesRef = useRef<ProductPurchase[]>([])
+  const availablePurchasesRef = useRef<Purchase[]>([])
   const processedTransactionsRef = useRef(new Set<string>())
   const [isPurchasing, setIsPurchasing] = useState(false)
   const [isProcessingPurchase, setIsProcessingPurchase] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
+  const [currentPurchase, setCurrentPurchase] = useState<Purchase | null>(null)
+  const [currentPurchaseError, setCurrentPurchaseError] = useState<IAPPurchaseError | null>(null)
 
   const storeKitTestHelper = useMemo(() => {
     if (Platform.OS !== "ios" || !proxyEnv.API_URL.startsWith("http://localhost")) {
@@ -95,15 +108,19 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
     connected,
     subscriptions,
     availablePurchases,
-    currentPurchase,
-    currentPurchaseError,
+    fetchProducts,
     finishTransaction,
-    getSubscriptions,
     requestPurchase,
     restorePurchases,
     validateReceipt,
   } = useIAP({
-    shouldAutoSyncPurchases: false,
+    onPurchaseError: (error) => {
+      setCurrentPurchaseError({
+        code: error.code,
+        message: error.message,
+      })
+    },
+    onPurchaseSuccess: setCurrentPurchase,
   })
 
   useEffect(() => {
@@ -111,19 +128,24 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
   }, [availablePurchases])
 
   const verifyPurchase = useCallback(
-    async (purchase: ProductPurchase) => {
-      const productId = purchase.id
-      const signedTransactionInfoFromPurchase =
-        "jwsRepresentationIos" in purchase ? purchase.jwsRepresentationIos : undefined
-      const jwsRepresentation =
-        signedTransactionInfoFromPurchase ||
-        (await getTransactionJws(productId).catch(() => null)) ||
-        (await validateReceipt(productId)
-          .then((result) => result?.jwsRepresentation as string | undefined)
-          .catch(() => {}))
+    async (purchase: Purchase) => {
+      const productId = purchase.productId
+      let signedTransactionInfo = selectSignedTransactionInfo(purchase.purchaseToken)
 
-      if (!jwsRepresentation) {
-        throw new Error(t("subscription.actions.upgrade_error"))
+      if (!signedTransactionInfo) {
+        signedTransactionInfo = selectSignedTransactionInfo(
+          await getTransactionJwsIOS(productId).catch(() => null),
+        )
+      }
+
+      if (!signedTransactionInfo) {
+        signedTransactionInfo = selectSignedTransactionInfo(
+          await validateReceipt({ apple: { sku: productId } })
+            .then((result) =>
+              "jwsRepresentation" in result ? result.jwsRepresentation : undefined,
+            )
+            .catch(() => undefined),
+        )
       }
 
       const response = await followClient.request<{
@@ -131,31 +153,29 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
         data: BillingSubscriptionResponse
       }>("/billing/apple/verify", {
         method: "POST",
-        body: {
-          signedTransactionInfo: jwsRepresentation,
-        },
+        body: buildAppleVerificationRequest(purchase, signedTransactionInfo),
       })
 
       if (response.code !== 0) {
         throw new Error("Failed to verify Apple subscription")
       }
     },
-    [t, validateReceipt],
+    [validateReceipt],
   )
 
   useEffect(() => {
     if (
       Platform.OS !== "ios" ||
       !currentPurchase ||
-      !knownSubscriptionIds.has(currentPurchase.id)
+      !isKnownAppleSubscriptionPurchase(currentPurchase, knownSubscriptionIds)
     ) {
       return
     }
 
     const transactionKey =
       currentPurchase.transactionId ||
-      ("originalTransactionIdentifierIos" in currentPurchase
-        ? currentPurchase.originalTransactionIdentifierIos
+      ("originalTransactionIdentifierIOS" in currentPurchase
+        ? currentPurchase.originalTransactionIdentifierIOS
         : undefined) ||
       `${currentPurchase.id}:${currentPurchase.transactionDate}`
 
@@ -191,7 +211,7 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
     setIsPurchasing(false)
     setIsProcessingPurchase(false)
 
-    if (currentPurchaseError.code === "E_USER_CANCELLED") {
+    if (currentPurchaseError.code === ErrorCode.UserCancelled) {
       return
     }
 
@@ -204,9 +224,9 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
         return
       }
 
-      await getSubscriptions(skus)
+      await fetchProducts({ skus, type: "subs" })
     },
-    [getSubscriptions],
+    [fetchProducts],
   )
 
   const requestSubscriptionPurchase = useCallback(
@@ -245,9 +265,11 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
         await requestPurchase({
           type: "subs",
           request: {
-            sku,
-            appAccountToken: appAccountToken ?? undefined,
-            andDangerouslyFinishTransactionAutomaticallyIOS: false,
+            apple: {
+              sku,
+              appAccountToken: appAccountToken ?? undefined,
+              andDangerouslyFinishTransactionAutomatically: false,
+            },
           },
         })
       } catch (error) {
@@ -269,7 +291,7 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
       await new Promise((resolve) => setTimeout(resolve, 300))
 
       const restoredPurchases = availablePurchasesRef.current.filter((purchase) =>
-        knownSubscriptionIds.has(purchase.id),
+        isKnownAppleSubscriptionPurchase(purchase, knownSubscriptionIds),
       )
 
       if (restoredPurchases.length === 0) {
@@ -278,11 +300,11 @@ export const AppleIAPProvider = ({ children }: PropsWithChildren) => {
 
       const sortedPurchases = [...restoredPurchases].sort((left, right) => {
         const leftExpires =
-          ("expirationDateIos" in left ? left.expirationDateIos : undefined) ??
+          ("expirationDateIOS" in left ? left.expirationDateIOS : undefined) ??
           left.transactionDate ??
           0
         const rightExpires =
-          ("expirationDateIos" in right ? right.expirationDateIos : undefined) ??
+          ("expirationDateIOS" in right ? right.expirationDateIOS : undefined) ??
           right.transactionDate ??
           0
         return rightExpires - leftExpires

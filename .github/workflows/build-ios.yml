@@ -5,6 +5,8 @@ on:
     branches:
       - "**"
     paths:
+      - ".github/actions/setup-xcode/**"
+      - ".github/workflows/build-ios.yml"
       - "apps/mobile/**"
       - "pnpm-lock.yaml"
   workflow_dispatch:
@@ -45,7 +47,7 @@ jobs:
           if [ -n "$available" ]; then
             echo "runner-label=self-hosted" >> $GITHUB_OUTPUT
           else
-            echo "runner-label=macos-latest" >> $GITHUB_OUTPUT
+            echo "runner-label=macos-26" >> $GITHUB_OUTPUT
           fi
 
   build-ipa-self-hosted:
@@ -100,9 +102,9 @@ jobs:
 
   build-ipa-github:
     name: Build iOS IPA (GitHub)
-    if: needs.check-runner.outputs.runner-label == 'macos-latest'
+    if: needs.check-runner.outputs.runner-label == 'macos-26'
     needs: check-runner
-    runs-on: macos-latest
+    runs-on: macos-26
 
     steps:
       - name: 📦 Checkout code
@@ -115,7 +117,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: 🏗 Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: "pnpm"

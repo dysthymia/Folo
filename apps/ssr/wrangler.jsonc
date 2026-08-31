@@ -3,7 +3,11 @@
   "name": "folo-ssr",
   "main": "dist/worker/worker-entry.mjs",
   "compatibility_date": "2026-02-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    // The SSR Worker fetches api.folo.is, another Worker Route in the same zone.
+    "global_fetch_strictly_public",
+  ],
   "observability": {
     "logs": {
       "enabled": true,

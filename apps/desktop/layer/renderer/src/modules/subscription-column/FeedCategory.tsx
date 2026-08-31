@@ -323,7 +323,7 @@ function FeedCategoryImpl({
               onClick={handleCollapseButtonClick}
               data-state={open ? "open" : "close"}
               className={cn(
-                "flex h-8 items-center [&_.i-mgc-right-cute-fi]:data-[state=open]:rotate-90",
+                "flex h-8 items-center data-[state=open]:[&_.i-mgc-right-cute-fi]:rotate-90",
               )}
               tabIndex={-1}
             >

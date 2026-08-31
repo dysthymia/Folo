@@ -15,7 +15,8 @@
   --background: 0 0% 100%;
   --color-background: 255 255 255;
 
-  --border: 20 5.9% 90%;
+  --fo-border: 20 5.9% 90%;
+  --border: var(--fo-border);
   --radius: 0.5rem;
 
   --fo-selection-active: theme(colors.accent/90);
@@ -39,7 +40,8 @@
 
     --background: 0 0% 7.1%;
     --color-background: 18 18 18;
-    --border: 0 0% 22.1%;
+    --fo-border: 0 0% 22.1%;
+    --border: var(--fo-border);
   }
 }
 

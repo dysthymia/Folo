@@ -6,11 +6,10 @@ import { nativeApplicationVersion } from "expo-application"
 import { Platform } from "react-native"
 import DeviceInfo from "react-native-device-info"
 
-import { LoginScreen } from "../screens/(modal)/LoginScreen"
 import { getAuthStateRevision, getCookie, getLastAuthStateChangeAt } from "./auth"
 import { getClientId, getSessionId } from "./client-session"
 import { getUserAgent } from "./native/user-agent"
-import { Navigation } from "./navigation/Navigation"
+import { destination } from "./navigation/biz/Destination"
 import { proxyEnv } from "./proxy-env"
 
 export const followClient = new FollowClient({
@@ -107,7 +106,7 @@ followClient.addResponseInterceptor(async (ctx) => {
     }
 
     userActions.removeCurrentUser()
-    Navigation.rootNavigation.presentControllerView(LoginScreen)
+    destination.Login()
   } else if (response.status >= 400) {
     // try {
     //   const isJSON = response.headers.get("content-type")?.includes("application/json")

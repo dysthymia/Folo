@@ -156,7 +156,6 @@ export class Navigation {
     jotaiStore.set(this.ctxValue.routesAtom, routes.slice(0, lastModalIndex))
   }
 
-  // eslint-disable-next-line unicorn/prefer-event-target
   private bus = new EventEmitter<{
     willAppear: (payload: LifecycleEventPayload) => void
     didAppear: (payload: LifecycleEventPayload) => void
@@ -187,6 +186,11 @@ export class Navigation {
   canGoBack() {
     const routes = jotaiStore.get(this.ctxValue.routesAtom)
     return routes.length > 0
+  }
+
+  hasControllerView<T>(view: NavigationControllerView<T>) {
+    const routes = jotaiStore.get(this.ctxValue.routesAtom)
+    return routes.some((route) => route.Component === view)
   }
 
   popToRoot() {

@@ -12,6 +12,7 @@ import xss from "xss"
 import resvgWasm from "./resvg.wasm"
 // OG image rendering
 import { createFollowClient } from "./src/lib/api-client"
+import { injectHydrationScript } from "./src/lib/hydration-script"
 import { NotFoundError } from "./src/lib/not-found"
 import { setFontsBucket } from "./src/lib/og/fonts.worker"
 import { setWasmModule } from "./src/lib/og/resvg-wasm-shim"
@@ -127,7 +128,7 @@ app.get("/og/:type/:id", async (c) => {
       return c.text(e === 404 ? "Not found" : "Internal server error", e)
     }
     console.error("OG render error:", e)
-    return c.text(e?.message || "Internal server error", 500)
+    return c.text("Internal server error", 500)
   }
 
   if (!imageRes) {
@@ -298,12 +299,7 @@ async function injectMetaToTemplate(document: Document, c: any) {
         break
       }
       case "hydrate": {
-        const script = document.createElement("script")
-        script.innerHTML = `
-          window.__HYDRATE__ = window.__HYDRATE__ || {}
-          window.__HYDRATE__[${JSON.stringify(meta.key)}] = JSON.parse(${JSON.stringify(JSON.stringify(meta.data))})
-        `
-        document.head.append(script)
+        injectHydrationScript(document, meta.key, meta.data)
         break
       }
     }

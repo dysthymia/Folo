@@ -9,7 +9,7 @@ import { createAtomHooks, jotaiStore } from "~/lib/jotai"
 export interface PopoverProps extends Omit<PopoverContentProps, "children"> {
   /** Custom z-index for popover */
   zIndex?: number
-  /** Whether the popover should close when clicked outside */
+  /** Whether the popover should use modal focus and pointer behavior */
   modal?: boolean
 }
 
@@ -33,6 +33,11 @@ export const showPopover = (
   element: ReactNode,
   props?: PopoverProps,
 ) => {
+  const currentPopover = jotaiStore.get(popoverAtom)
+  if (currentPopover.open) {
+    currentPopover.abortController.abort()
+  }
+
   jotaiStore.set(popoverAtom, {
     open: true,
     position: mouseXY,
@@ -40,4 +45,12 @@ export const showPopover = (
     props,
     abortController: new AbortController(),
   })
+}
+
+export const dismissPopover = () => {
+  const currentPopover = jotaiStore.get(popoverAtom)
+  if (!currentPopover.open) return
+
+  currentPopover.abortController.abort()
+  jotaiStore.set(popoverAtom, { open: false })
 }

@@ -1,20 +1,26 @@
+import { useImageColors } from "@follow/store/image/hooks"
 import { useWhoami } from "@follow/store/user/hooks"
-import { use } from "react"
+import { cn } from "@follow/utils"
+import { use, useMemo } from "react"
 import { useTranslation } from "react-i18next"
 import type { ScrollView } from "react-native"
 import { Pressable, View } from "react-native"
 import type { SharedValue } from "react-native-reanimated"
 import Animated, { useAnimatedStyle } from "react-native-reanimated"
-import { useSafeAreaFrame, useSafeAreaInsets } from "react-native-safe-area-context"
+import { useSafeAreaInsets } from "react-native-safe-area-context"
 
 import { BlurEffect } from "@/src/components/common/BlurEffect"
 import { useRegisterNavigationScrollView } from "@/src/components/layouts/tabbar/hooks"
-import { getDefaultHeaderHeight } from "@/src/components/layouts/utils"
 import { SafeNavigationScrollView } from "@/src/components/layouts/views/SafeNavigationScrollView"
 import { Text } from "@/src/components/ui/typography/Text"
+import { useDefaultHeaderHeight } from "@/src/hooks/useDefaultHeaderHeight"
 import type { TabScreenComponent } from "@/src/lib/navigation/bottom-tab/types"
 import { useNavigation } from "@/src/lib/navigation/hooks"
 import { ScreenItemContext } from "@/src/lib/navigation/ScreenItemContext"
+import {
+  getSettingsContentMarginTop,
+  isUserHeaderGradientLight,
+} from "@/src/modules/settings/layout"
 import { EditProfileScreen } from "@/src/modules/settings/routes/EditProfile"
 import { SettingsList } from "@/src/modules/settings/SettingsList"
 import { UserHeaderBanner } from "@/src/modules/settings/UserHeaderBanner"
@@ -23,7 +29,14 @@ export function Settings() {
   const insets = useSafeAreaInsets()
   const screenContext = use(ScreenItemContext)
   const whoami = useWhoami()
+  const imageColors = useImageColors(whoami?.image)
+  const gradientLight = isUserHeaderGradientLight(imageColors)
   const scrollViewRef = useRegisterNavigationScrollView<ScrollView>()
+  const headerHeight = useDefaultHeaderHeight()
+  const contentViewStyle = useMemo(
+    () => ({ marginTop: getSettingsContentMarginTop(headerHeight) }),
+    [headerHeight],
+  )
   return (
     <>
       <SafeNavigationScrollView
@@ -32,7 +45,8 @@ export function Settings() {
           paddingTop: insets.top,
         }}
         className="flex-1 bg-system-grouped-background"
-        contentViewClassName="-mt-24 pb-8"
+        contentViewClassName="pb-8"
+        contentViewStyle={contentViewStyle}
       >
         <UserHeaderBanner
           scrollY={screenContext.reAnimatedScrollY}
@@ -42,19 +56,25 @@ export function Settings() {
 
         <SettingsList />
       </SafeNavigationScrollView>
-      <SettingHeader scrollY={screenContext.reAnimatedScrollY} />
+      <SettingHeader
+        gradientLight={gradientLight}
+        headerHeight={headerHeight}
+        scrollY={screenContext.reAnimatedScrollY}
+      />
     </>
   )
 }
-const SettingHeader = ({ scrollY }: { scrollY: SharedValue<number> }) => {
+const SettingHeader = ({
+  gradientLight,
+  headerHeight,
+  scrollY,
+}: {
+  gradientLight: boolean
+  headerHeight: number
+  scrollY: SharedValue<number>
+}) => {
   const { t } = useTranslation()
-  const frame = useSafeAreaFrame()
   const insets = useSafeAreaInsets()
-  const headerHeight = getDefaultHeaderHeight({
-    landscape: frame.width > frame.height,
-    modalPresentation: false,
-    topInset: insets.top,
-  })
   const styles = useAnimatedStyle(() => {
     return {
       opacity: scrollY.value / 100,
@@ -80,11 +100,11 @@ const SettingHeader = ({ scrollY }: { scrollY: SharedValue<number> }) => {
           {t("tabs.settings")}
         </Text>
       </Animated.View>
-      {!!whoami?.id && <EditProfileButton />}
+      {!!whoami?.id && <EditProfileButton gradientLight={gradientLight} />}
     </View>
   )
 }
-const EditProfileButton = () => {
+const EditProfileButton = ({ gradientLight }: { gradientLight: boolean }) => {
   const { t } = useTranslation("common")
   const navigation = useNavigation()
   return (
@@ -93,7 +113,11 @@ const EditProfileButton = () => {
       onPress={() => navigation.pushControllerView(EditProfileScreen)}
     >
       <BlurEffect />
-      <Text className="text-xs font-medium text-label">{t("words.edit")}</Text>
+      <Text
+        className={cn("text-xs font-medium", gradientLight ? "text-black/95" : "text-white/95")}
+      >
+        {t("words.edit")}
+      </Text>
     </Pressable>
   )
 }

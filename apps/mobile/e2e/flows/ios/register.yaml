@@ -1,3 +1,9 @@
 appId: is.follow
 ---
+- extendedWaitUntil:
+    visible:
+      id: login-screen
+    timeout: 30000
+- assertVisible:
+    id: login-screen
 - runFlow: ../shared/register.yaml

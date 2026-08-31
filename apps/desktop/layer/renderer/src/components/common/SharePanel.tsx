@@ -5,6 +5,7 @@ import { useCallback } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { dismissPopover } from "~/atoms/popover"
 import { ipcServices } from "~/lib/client"
 import { copyToClipboard } from "~/lib/clipboard"
 
@@ -140,11 +141,13 @@ export const SharePanel = ({ entryId }: SharePanelProps) => {
         await copyToClipboard(shareContent.url)
         toast.success(t("share.link_copied"))
       }
+      dismissPopover()
     } catch {
       // If sharing fails, copy link as fallback
       try {
         await copyToClipboard(shareContent.url)
         toast.success(t("share.link_copied"))
+        dismissPopover()
       } catch {
         toast.error(t("share.copy_failed"))
       }
@@ -156,6 +159,7 @@ export const SharePanel = ({ entryId }: SharePanelProps) => {
     try {
       await copyToClipboard(shareUrl)
       toast.success(t("share.link_copied"))
+      dismissPopover()
     } catch {
       toast.error(t("share.copy_failed"))
     }
@@ -178,6 +182,7 @@ export const SharePanel = ({ entryId }: SharePanelProps) => {
         .replace("{text}", shareText)
 
       window.open(finalUrl, "_blank", "width=600,height=400")
+      dismissPopover()
     },
     [entryId, generateShareContent],
   )

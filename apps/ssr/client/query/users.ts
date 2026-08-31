@@ -2,7 +2,7 @@ import { followClient } from "@client/lib/api-fetch"
 import { getProviders } from "@client/lib/auth"
 import { getHydrateData } from "@client/lib/helper"
 import type { LoginHydrateData } from "@client/pages/(login)/login/metadata"
-import { isBizId, sortByAlphabet } from "@follow/utils/utils"
+import { sortByAlphabet } from "@follow/utils/utils"
 import type {
   InboxSubscriptionResponse,
   ListSubscriptionResponse,
@@ -10,10 +10,10 @@ import type {
 } from "@follow-app/client-sdk"
 import { useQuery } from "@tanstack/react-query"
 
+import { getUserProfile } from "../../src/lib/user-profile-params"
+
 type GetUserSubscriptionsResponse = (
-  | SubscriptionWithFeed
-  | ListSubscriptionResponse
-  | InboxSubscriptionResponse
+  SubscriptionWithFeed | ListSubscriptionResponse | InboxSubscriptionResponse
 )[]
 
 const UN_CATEGORIZED = "Uncategorized"
@@ -71,13 +71,7 @@ export const useUserSubscriptionsQuery = (userId: string | undefined) => {
 }
 
 export const fetchUser = async (handleOrId: string | undefined) => {
-  const handle = isBizId(handleOrId || "")
-    ? handleOrId
-    : `${handleOrId}`.startsWith("@")
-      ? `${handleOrId}`.slice(1)
-      : handleOrId
-
-  const res = await followClient.api.profiles.getProfile({ id: handleOrId, handle })
+  const res = await getUserProfile(followClient, handleOrId)
   return res.data
 }
 
