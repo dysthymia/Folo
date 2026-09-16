@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>is.folo.local.proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/yangtao/Library/Application Support/FoloLocal/ensure-proxy.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yangtao/Library/Application Support/FoloLocal</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/folo-local-proxy.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/folo-local-proxy.error.log</string>
+</dict>
+</plist>

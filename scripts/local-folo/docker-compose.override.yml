@@ -1,0 +1,6 @@
+services:
+  web:
+    volumes:
+      - /Volumes/SSD/Dev/Code/Folo/output/local-folo.conf:/etc/httpd/conf.d/local-folo.conf:ro
+      - /Volumes/SSD/Dev/Code/Folo/output/local-folo-cert/local.folo.is.crt:/etc/pki/tls/certs/local.folo.is.crt:ro
+      - /Volumes/SSD/Dev/Code/Folo/output/local-folo-cert/local.folo.is.key:/etc/pki/tls/private/local.folo.is.key:ro
