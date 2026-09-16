@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 
 import { followApi } from "~/lib/api-client"
 
-export const useAIConfiguration = () => {
+export const useAIConfiguration = (enabled = true) => {
   return useQuery({
     queryKey: ["aiConfiguration"],
     queryFn: async () => {
@@ -10,5 +10,6 @@ export const useAIConfiguration = () => {
     },
     staleTime: 5 * 60 * 1000,
     retry: false,
+    enabled,
   })
 }

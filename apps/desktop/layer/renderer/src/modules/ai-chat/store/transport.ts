@@ -3,6 +3,7 @@ import type { HttpChatTransportInitOptions, UIMessageChunk } from "ai"
 import { HttpChatTransport, parseJsonEventStream, uiMessageChunkSchema } from "ai"
 
 import { getAIModelState } from "../atoms/session"
+import { getOneTimeToken, isLocalFoloHost } from "../local-provider"
 import { AIPersistService } from "../services"
 import type { BizUIMessage } from "./types"
 
@@ -45,14 +46,21 @@ export function createChatTitleHandler(
  * This is used by the AbstractChat instance to communicate with AI providers
  */
 export function createChatTransport({ onValue, titleHandler }: CreateChatTransportOptions = {}) {
+  const useLocalProvider = isLocalFoloHost()
+
   return new ExtendChatTransport({
     onValue,
     titleHandler,
-    // Custom fetch configuration
-    api: `${env.VITE_API_URL}/ai/chat`,
-    credentials: "include",
-    // Add selected model to request body
+    localProvider: useLocalProvider,
+    api: useLocalProvider ? "/information/api/chat" : `${env.VITE_API_URL}/ai/chat`,
+    credentials: useLocalProvider ? "same-origin" : "include",
+    headers: useLocalProvider
+      ? async () => ({ "X-Folo-One-Time-Token": await getOneTimeToken() })
+      : undefined,
+    // 本地模型由后台设置决定，不能把官方持久化的模型选择覆盖过去。
     body: () => {
+      if (useLocalProvider) return {}
+
       const modelState = getAIModelState()
       const { selectedModel } = modelState
 
@@ -88,11 +96,26 @@ const coerceFinishChunk = (chunk: UIMessageChunkParseResult): UIMessageChunk | n
   } as UIMessageChunk
 }
 
+export const normalizeLocalMessageMetadata = (metadata: unknown) => {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return metadata
+  }
+
+  // 本地后台仅返回 model 时，转换为既有消息展示组件使用的 modelUsed 字段。
+  const value = metadata as { model?: unknown; modelUsed?: unknown }
+  if (typeof value.model === "string" && typeof value.modelUsed !== "string") {
+    return { ...value, modelUsed: value.model }
+  }
+
+  return metadata
+}
+
 class ExtendChatTransport extends HttpChatTransport<BizUIMessage> {
   constructor(
     private options: HttpChatTransportInitOptions<BizUIMessage> & {
       onValue?: (value: UIMessageChunk) => void
       titleHandler?: TitleHandlerOptions
+      localProvider?: boolean
     },
   ) {
     super(options)
@@ -101,7 +124,7 @@ class ExtendChatTransport extends HttpChatTransport<BizUIMessage> {
   protected processResponseStream(
     stream: ReadableStream<Uint8Array<ArrayBufferLike>>,
   ): ReadableStream<UIMessageChunk> {
-    const { onValue } = this.options || {}
+    const { onValue, localProvider } = this.options || {}
     const handleGeneratedTitle = this.handleGeneratedTitle.bind(this)
     return parseJsonEventStream({
       stream,
@@ -109,9 +132,16 @@ class ExtendChatTransport extends HttpChatTransport<BizUIMessage> {
     }).pipeThrough(
       new TransformStream<UIMessageChunkParseResult, UIMessageChunk>({
         async transform(chunk, controller) {
-          const parsedChunk = chunk.success ? chunk.value : coerceFinishChunk(chunk)
+          let parsedChunk = chunk.success ? chunk.value : coerceFinishChunk(chunk)
           if (!parsedChunk) {
             throw chunk.error
+          }
+
+          if (localProvider && parsedChunk.type === "finish") {
+            parsedChunk = {
+              ...parsedChunk,
+              messageMetadata: normalizeLocalMessageMetadata(parsedChunk.messageMetadata),
+            }
           }
 
           await handleGeneratedTitle(parsedChunk)

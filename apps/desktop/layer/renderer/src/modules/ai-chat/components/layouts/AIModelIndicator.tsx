@@ -79,7 +79,13 @@ const parseModelString = (modelString: string) => {
 
 export const AIModelIndicator = memo(({ className, onModelChange }: AIModelIndicatorProps) => {
   const { data, changeModel } = useAIModel()
-  const { defaultModel, availableModels = [], currentModel, availableModelsMenu = [] } = data || {}
+  const {
+    defaultModel,
+    availableModels = [],
+    currentModel,
+    availableModelsMenu = [],
+    isLocalProvider,
+  } = data || {}
   const role = useUserRole()
   const settingModalPresent = useSettingModal()
 
@@ -117,6 +123,14 @@ export const AIModelIndicator = memo(({ className, onModelChange }: AIModelIndic
       {hasMultipleModels && <i className="i-mingcute-down-line size-3 opacity-60" />}
     </div>
   )
+
+  if (isLocalProvider) {
+    return (
+      <a href="/information#model-settings" className="inline-flex" title="Open model settings">
+        {modelContent}
+      </a>
+    )
+  }
 
   if (!hasMultipleModels) {
     return modelContent

@@ -1,15 +1,48 @@
+import { useQuery } from "@tanstack/react-query"
 import { useEffect, useMemo } from "react"
 
 import { setAIModelState, useAIModelState } from "../atoms/session"
+import { isLocalFoloHost, loadLocalAISettings } from "../local-provider"
 import { useAIConfiguration } from "./useAIConfiguration"
 
+const useLocalAISettings = () => {
+  return useQuery({
+    queryKey: ["localAISettings"],
+    queryFn: loadLocalAISettings,
+    enabled: isLocalFoloHost(),
+    staleTime: 60 * 1000,
+    retry: false,
+  })
+}
+
 export const useAIModel = () => {
-  const { data: configuration, isLoading } = useAIConfiguration()
+  const useLocalProvider = isLocalFoloHost()
+  const localSettings = useLocalAISettings()
+  const officialConfiguration = useAIConfiguration(!useLocalProvider)
+  const configuration = useMemo(() => {
+    if (useLocalProvider) {
+      if (!localSettings.data) return undefined
+      return {
+        defaultModel: localSettings.data.model,
+        availableModels: [localSettings.data.model],
+        availableModelsMenu: [
+          {
+            label: localSettings.data.model,
+            value: localSettings.data.model,
+            paidLevel: undefined,
+          },
+        ],
+      }
+    }
+
+    return officialConfiguration.data
+  }, [localSettings.data, officialConfiguration.data, useLocalProvider])
+  const isLoading = useLocalProvider ? localSettings.isLoading : officialConfiguration.isLoading
   const modelState = useAIModelState()
 
   // Validate and sync persistent model with available models
   useEffect(() => {
-    if (!configuration || isLoading) return
+    if (useLocalProvider || !configuration || isLoading) return
 
     const { selectedModel } = modelState
     const { defaultModel, availableModels = [] } = configuration
@@ -20,7 +53,7 @@ export const useAIModel = () => {
         selectedModel: defaultModel || null,
       })
     }
-  }, [configuration, isLoading, modelState])
+  }, [configuration, isLoading, modelState, useLocalProvider])
 
   // Get current effective model
   const currentModel = useMemo(() => {
@@ -38,6 +71,9 @@ export const useAIModel = () => {
   }, [configuration, modelState])
 
   const changeModel = (model: string) => {
+    // 本地模型配置属于信息工作台，聊天窗口不写入官方模型选择。
+    if (useLocalProvider) return
+
     if (!configuration?.availableModels?.includes(model)) {
       console.warn(`Model ${model} is not available in current configuration`)
       return
@@ -54,6 +90,7 @@ export const useAIModel = () => {
       availableModels: configuration?.availableModels,
       availableModelsMenu: configuration?.availableModelsMenu,
       currentModel,
+      isLocalProvider: useLocalProvider,
     },
     isLoading,
     changeModel,

@@ -40,6 +40,7 @@ import {
 import { LexicalAIEditorNodes } from "../../editor"
 import { useAIConfiguration } from "../../hooks/useAIConfiguration"
 import { useAttachScrollBeyond } from "../../hooks/useAttachScrollBeyond"
+import { isLocalFoloHost } from "../../local-provider"
 import { AIPanelRefsContext } from "../../store/AIChatContext"
 import type { AIChatContextBlock, BizUIMessage, SendingUIMessage } from "../../store/types"
 import { computeIsRateLimited, computeRateLimitMessage } from "../../utils/rate-limit"
@@ -256,8 +257,11 @@ const ChatInterfaceContent = ({ centerInputOnEmpty, visualOffsetY }: ChatInterfa
 
   const { handleScroll } = useAttachScrollBeyond()
 
-  const { data: configuration } = useAIConfiguration()
-  const shouldHideResetDetails = userRole ? isFreeRole(userRole) : false
+  const useLocalProvider = isLocalFoloHost()
+  const { data: officialConfiguration } = useAIConfiguration(!useLocalProvider)
+  // 禁用查询仍可能返回旧缓存，本地模式还须隔离已缓存的官方套餐配额。
+  const configuration = useLocalProvider ? undefined : officialConfiguration
+  const shouldHideResetDetails = !useLocalProvider && userRole ? isFreeRole(userRole) : false
 
   const { isRateLimited, rateLimitMessage } = useRateLimitInfo(
     error,
