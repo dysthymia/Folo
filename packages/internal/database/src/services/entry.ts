@@ -16,6 +16,16 @@ interface InsertedBeforeTimeRangeFilter {
   insertedBefore: number
 }
 
+// 保守低于各 SQLite 运行时常见的变量上限，避免大库清理生成超长 IN 参数列表。
+const ENTRY_DELETE_BATCH_SIZE = 500
+
+async function deleteEntryIdsInBatches(entryIds: string[]) {
+  for (let offset = 0; offset < entryIds.length; offset += ENTRY_DELETE_BATCH_SIZE) {
+    const batch = entryIds.slice(offset, offset + ENTRY_DELETE_BATCH_SIZE)
+    await db.delete(entriesTable).where(inArray(entriesTable.id, batch)).execute()
+  }
+}
+
 class EntryServiceStatic implements Resetable {
   async reset() {
     await db.delete(entriesTable).execute()
@@ -111,17 +121,14 @@ class EntryServiceStatic implements Resetable {
       }
     }
 
-    await db
-      .delete(entriesTable)
-      .where(inArray(entriesTable.id, Array.from(idsToClear)))
-      .execute()
+    await deleteEntryIdsInBatches(Array.from(idsToClear))
 
     return result
   }
 
   async deleteMany(entryIds: string[]) {
     if (entryIds.length === 0) return
-    await db.delete(entriesTable).where(inArray(entriesTable.id, entryIds))
+    await deleteEntryIdsInBatches(entryIds)
   }
 }
 
