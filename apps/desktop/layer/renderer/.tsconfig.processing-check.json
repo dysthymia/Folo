@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/modules/action/processing-*.ts",
+    "src/modules/action/processing-*.tsx",
+    "src/modules/action/action-setting.tsx",
+    "src/modules/action/use-unsaved-blocker.ts",
+    "global.d.ts",
+    "src/**/*.d.ts",
+    "src/modules/information/*.ts",
+    "src/modules/information/*.tsx"
+  ],
+  "references": []
+}
