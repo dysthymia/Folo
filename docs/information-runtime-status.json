@@ -1,0 +1,284 @@
+{
+  "at": "2026-09-12T10:14:57.126130+00:00",
+  "origin": "http://local.folo.is",
+  "runtimeSHA256": "fd0a068aa9243b0e70b7e9c15012deffe8430983ebc4adea4a247d48a10152bb",
+  "counts": {
+    "sources": 96,
+    "entries": 2729,
+    "processing_inputs": 3168,
+    "rule_set_releases": 2,
+    "stories": 0,
+    "research_records": 0,
+    "processing_feedback": 4,
+    "x_saved_queries": 0
+  },
+  "browserAcceptance": "passed_existing_login_P00_save_preview_persisted_release2_schedule22_since20260912_five_times_native_qwen_bridge_chat; refreshed_run_button_enabled_verified; browser_SQLite_corruption_observed; refreshed149_three_pages_four_review_warnings_original_titles_same_origin_links_and_collapsed_ai_summary_verified",
+  "globalCodexModel": "gpt-6-astra",
+  "globalCodexHasFoloProfile": false,
+  "globalCodexHashChangedDuringWork": true,
+  "backup": "~/.local/share/folo-information-p0/backups/before-blockchain-trial-20260912.sqlite",
+  "serviceTests": 239,
+  "codexTests": 15,
+  "rendererTests": 85,
+  "syntheticQwenPipelineVerified": true,
+  "coreTests": 23,
+  "additionalEvaluationTests": 6,
+  "databaseTests": 2,
+  "nativeChatVerification": {
+    "model": "qwen3.8-flash",
+    "provider": "qianwen",
+    "harness": "codex_cli",
+    "transport": "isolated_local_responses_to_qwen_chat_completions",
+    "purpose": "chat",
+    "status": "succeeded",
+    "startedAt": "2026-09-12T08:38:59.417Z",
+    "finishedAt": "2026-09-12T08:39:48.739Z",
+    "inputTokens": 1959,
+    "outputTokens": 9,
+    "durationMs": 49322,
+    "browserReplyVerified": true
+  },
+  "blockchainTrial": {
+    "sourceCount": 22,
+    "sourceKind": "feed",
+    "category": "Blockchain",
+    "historySince": "2026-09-11T16:00:00.000Z",
+    "timeZone": "Asia/Shanghai",
+    "times": ["08:00", "12:00", "15:00", "20:00", "23:00"],
+    "enabled": true,
+    "draftRevision": 2,
+    "releaseVersion": 2,
+    "scheduleRevision": 1,
+    "preset": "P00 v1",
+    "firstTriggerStatus": "retry_wait",
+    "firstFailure": "nested SQLite BEGIN; fixed and deployed",
+    "resumeTriggerId": "259b8b6b-273b-42fd-835c-bfaaf34f0b32",
+    "resumeCutoffAt": "2026-09-12T07:44:58.393Z",
+    "resumeStatus": "retry_wait",
+    "knownInputsInResumeWindow": 135,
+    "windowMaterialComplete": 135,
+    "sourceCoverageComplete": true,
+    "remainingSourcesNeedContinuation": 0,
+    "additionalSourceSyncTests": 18,
+    "scheduleUITests": 11,
+    "semanticAcceptance": "not user-confirmed",
+    "resumeFinishedAt": "2026-09-12T08:30:11.000Z",
+    "resumeSucceeded": 92,
+    "resumeFailed": 43,
+    "resumeFailures": {
+      "codex_invalid_output": 30,
+      "codex_tool_call": 7,
+      "invalid_model_reference": 6
+    },
+    "continuationTriggerId": "d6322a11-d4e7-4149-aa08-9e938c35de9c",
+    "continuationCutoffAt": "2026-09-12T08:33:28.916Z",
+    "continuationStatus": "retry_wait",
+    "boundedRetriedInputs": 43,
+    "sourceFirstPageCoverage": 22,
+    "continuationSucceeded": 123,
+    "continuationFailed": 14,
+    "continuationWindowInputs": 137,
+    "continuationLateInputs": 2,
+    "citationProbeTriggerId": "76f2861e-fa25-46e4-8474-8960ce3289e9",
+    "citationProbeStatus": "cancelled",
+    "citationProbeCause": "list content=null overwrote hydrated content; fixed, 135 exact unchanged versions reconciled",
+    "citationProbeTargetWasProcessed": true,
+    "postRecoveryTriggerId": "3f3a12b3-2ca4-4bf2-91af-d027c6af981a",
+    "postRecoveryCutoffAt": "2026-09-12T09:30:30.892Z",
+    "postRecoveryInitialPending": 6,
+    "postRecoveryStatus": "retry_wait",
+    "postRecoveryFinishedAt": "2026-09-12T09:34:40.433Z",
+    "postRecoveryCounts": {
+      "succeeded": 132,
+      "failed": 17,
+      "pending": 0,
+      "running": 0,
+      "total": 149
+    },
+    "mediaPreviewRegression": {
+      "affectedOldItems": 4,
+      "repeatedOldSuccesses": 3,
+      "repeatedOldTimeouts": 1,
+      "cause": "list contains one preview media item; detail contains two; missing-body list now preserves detail media metadata",
+      "fixedAndDeployed": true
+    },
+    "citationProbeTargetVerification": {
+      "inputSeq": 1867,
+      "status": "succeeded",
+      "facts": 6,
+      "continuousQuotes": 6,
+      "semanticReview": "agent-only, not user confirmed"
+    },
+    "evidenceRetryTriggerId": "4d61a0b6-9a98-41bf-8d7b-1c0fcd17a437",
+    "evidenceRetryCutoffAt": "2026-09-12T09:53:16.068Z",
+    "evidenceRetriedInputs": 17,
+    "evidenceRetryStatus": "deferred_budget",
+    "evidenceRetryFinishedAt": "2026-09-12T10:00:12.241Z",
+    "evidenceRetryCounts": {
+      "succeeded": 149,
+      "failed": 0,
+      "pending": 0,
+      "running": 0,
+      "retriedSucceeded": 17,
+      "preservedPriorSucceeded": 132
+    },
+    "evidenceRetryUsage": {
+      "calls": 17,
+      "inputTokens": 84669,
+      "outputTokens": 21046,
+      "cachedInputTokens": 0
+    },
+    "finalSourceCoverage": {
+      "sources": 22,
+      "pages": 23,
+      "end": 3,
+      "history_boundary": 19,
+      "failed": 0,
+      "unchangedCompleteInputs": 149,
+      "modelCallsAdded": 0
+    }
+  },
+  "serviceTestFiles": 36,
+  "serviceDatabaseQuickCheck": "ok",
+  "structuredOutputBridge": {
+    "deployed": true,
+    "unitTests": 21,
+    "syntheticSchemaAndIdentityVerified": true,
+    "syntheticQuoteVerified": false,
+    "realBatchValidation": "JSON and tool failures eliminated in completed bridge batches; quotation semantic failures remain"
+  },
+  "readiness": "initial Blockchain processing and source coverage complete; full v3.1 semantic/user and external-scope acceptance remains",
+  "contentVersionRecovery": {
+    "restored": 135,
+    "succeeded": 121,
+    "failed": 13,
+    "pending": 1,
+    "historicalBodiesUnchanged": true,
+    "otherTablesUnchanged": true,
+    "restoreOverrides": 2,
+    "feedback": 2,
+    "backup": "~/.local/share/folo-information-p0/backups/before-content-reconcile-apply-20260912.sqlite",
+    "manifestSHA256": "1f8892b503c4170aab2dc1b0325bbaca90501bd27bc3e1b6a7510b200d224149",
+    "sourceReplay": {
+      "completeInputs": 145,
+      "unchanged": 145,
+      "modelCallsAdded": 0
+    },
+    "fullSourceReplay": {
+      "sources": 22,
+      "visitedSources": 22,
+      "pages": 23,
+      "completeInputs": 149,
+      "unchanged": 149,
+      "modelCallsAdded": 0,
+      "failedSources": 0,
+      "coverage": {
+        "history_boundary": 19,
+        "end": 3
+      }
+    }
+  },
+  "evidenceReferences": {
+    "entryPromptVersion": 7,
+    "storyPromptVersion": 5,
+    "modelReturns": "evidenceId",
+    "serverResolvesExactQuote": true,
+    "unknownIdRejected": true,
+    "semanticAcceptance": "not user confirmed",
+    "deployed": true,
+    "realBatchEntryPromptVersion": 6,
+    "prompt7SemanticValidation": "guidance deployed for future inputs; existing successes not reprocessed"
+  },
+  "semanticReview": {
+    "userConfirmedSamples": 0,
+    "candidateSamples": 149,
+    "flaggedCurrentEntries": [1830, 1831, 1847, 1862],
+    "evidenceIdReviewEntries": [1847, 1856, 1862],
+    "reviewKind": "agent-only",
+    "candidateDataset": "~/.local/share/folo-information-p0/evaluation/blockchain-20260912-review-candidates.json",
+    "reviewWarningDeployed": true,
+    "reviewWarningBehavior": "current decision unsupported_citation shows original title and warning; previous AI summary in details",
+    "reviewWarningBrowserVerified": true,
+    "reviewSnapshotCreatedAt": "2026-09-12T10:14:12.801Z"
+  },
+  "finalReaderClientTests": 15,
+  "capacityObservation": {
+    "artifact": "~/.local/share/folo-information-p0/evaluation/blockchain-20260912-capacity.json",
+    "scope": {
+      "stage": "Blockchain real processing trigger phase",
+      "triggerWindow": {
+        "from": "2026-09-12T07:37:00.000Z",
+        "to": "2026-09-12T10:00:13.000Z"
+      },
+      "triggerCount": 6,
+      "finalTriggerScope": {
+        "sourceCount": 22,
+        "historySince": "2026-09-11T16:00:00.000Z",
+        "cutoffAt": "2026-09-12T09:53:16.068Z"
+      },
+      "triggerIds": [
+        "16e3c4f7-1ad0-4a32-93ca-fd9e38ca2299",
+        "259b8b6b-273b-42fd-835c-bfaaf34f0b32",
+        "d6322a11-d4e7-4149-aa08-9e938c35de9c",
+        "76f2861e-fa25-46e4-8474-8960ce3289e9",
+        "3f3a12b3-2ca4-4bf2-91af-d027c6af981a",
+        "4d61a0b6-9a98-41bf-8d7b-1c0fcd17a437"
+      ],
+      "excludedPurpose": "chat",
+      "ledgerAssociation": "A ledger row is included only when its whole interval falls inside one completed phase trigger; ledger rows carry no triggerId."
+    },
+    "modelCalls": {
+      "calls": 226,
+      "byPurpose": {
+        "entry": 226
+      },
+      "byStatus": {
+        "ABORTED": 1,
+        "INVALID_OUTPUT": 30,
+        "succeeded": 187,
+        "TIMEOUT": 1,
+        "TOOL_CALL": 7
+      },
+      "failedCalls": 39,
+      "knownUsageCalls": 218,
+      "unknownUsageCalls": 8,
+      "knownUsage": {
+        "inputTokens": 784204,
+        "outputTokens": 190978,
+        "cachedInputTokens": 140032
+      },
+      "entryAttemptDuration": {
+        "count": 226,
+        "p50Ms": 16837,
+        "p95Ms": 46929,
+        "maxMs": 120864
+      },
+      "entrySuccessfulDuration": {
+        "count": 187,
+        "p50Ms": 16849,
+        "p95Ms": 42640,
+        "maxMs": 108477
+      },
+      "observedMaxConcurrentEntryCalls": 1
+    },
+    "finalSuccessful17Batch": {
+      "triggerId": "4d61a0b6-9a98-41bf-8d7b-1c0fcd17a437",
+      "calls": 17,
+      "allSucceeded": true,
+      "triggerWall": {
+        "elapsedMs": 415874,
+        "entriesPerHour": 147.16
+      },
+      "entryStream": {
+        "elapsedMs": 389351,
+        "entriesPerHour": 157.18
+      }
+    },
+    "limitations": [
+      "报告中的 completed 是处理结果计数；模型调用数只以 JSONL 账本为准，二者不能互相替代。",
+      "失败调用可能已有计费但 usage 为 null；unknownUsageCalls 未按零计入 token 总数。",
+      "账本不保存 triggerId，按已完成 trigger 的时间区间关联；不包含原生 chat 或区间外调用。",
+      "吞吐只描述最后 17 次串行 entry 调用的观测窗口，不代表稳态容量或全天恢复能力。"
+    ]
+  }
+}
