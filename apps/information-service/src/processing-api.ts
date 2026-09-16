@@ -1,0 +1,336 @@
+import { z } from "zod"
+
+import { AutomationError } from "./automation-store"
+import type { SourceEntry } from "./folo"
+import type { ProcessingDecision } from "./processing-decision"
+import { processingFeedbackApi } from "./processing-feedback-api"
+import type { ReadingSnapshot, ReadingSnapshotPage, ResearchPack } from "./processing-reading-store"
+import type { ProcessingScheduleInput } from "./processing-schedule"
+import { researchApi } from "./research-api"
+import type { Store } from "./store"
+import { StoryCorrectionService } from "./story-corrections"
+import type { Story, StoryLink } from "./story-store"
+
+const revision = z.number().int().nonnegative()
+const positiveInteger = z.number().int().positive()
+const scheduleConfig = z
+  .object({
+    sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10000),
+    historySince: z.iso.datetime({ offset: true }),
+    timeZone: z.string().min(1).max(100),
+    enabled: z.boolean(),
+    times: z
+      .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u))
+      .min(1)
+      .max(10)
+      .optional(),
+    pollIntervalMinutes: z.number().int().min(5).max(1440).nullable().optional(),
+    readyBy: z
+      .object({ leadMinutes: z.number().int().min(1).max(720) })
+      .strict()
+      .nullable()
+      .optional(),
+  })
+  .strict()
+
+export type ProcessingEntryDecisionView = Pick<
+  ProcessingDecision,
+  "status" | "title" | "summary" | "reason" | "labels" | "policy"
+> & { id: string }
+export type ProcessingEntryMetadataView = {
+  sourceSyncedAt: string | null
+  listMembershipVersion: number
+}
+export type ProcessingEntryOverrideView = {
+  inputSeq: number
+  mode: "restore" | "hide" | "automatic"
+  revision: number
+}
+export type ProcessingEntryListItem = {
+  seq: number
+  sourceKey: string
+  itemId: string
+  title: string
+  url: string | null
+  read: boolean | null
+  receivedAt: string
+  status: string
+  decision: ProcessingEntryDecisionView | null
+  reviewNeeded: boolean
+  issueCount: number
+  override: ProcessingEntryOverrideView
+  metadata: ProcessingEntryMetadataView
+}
+export type ProcessingEntryListResponse = { entries: ProcessingEntryListItem[] }
+export type ProcessingEntryDetailResponse = {
+  // 详情页可读取原文和完整决策，供证据追溯；列表只能读取摘要级决策字段。
+  entry: Omit<ProcessingEntryListItem, "decision"> & {
+    input: SourceEntry
+    decision: ProcessingDecision | null
+  }
+}
+export type StoriesListResponse = {
+  stories: Array<{
+    story: Story
+    title: string | null
+    readStatus: { readSubstantiveRevision: number; unread: boolean }
+  }>
+}
+export type StoryLinkResponse = StoryLink
+export type ReadingSnapshotResponse = { snapshot: ReadingSnapshot }
+export type ReadingSnapshotPageResponse = ReadingSnapshotPage
+export type ResearchPackResponse = ResearchPack
+
+function owner(store: Store): string {
+  if (!store.ownerId) throw new AutomationError("owner_required")
+  return store.ownerId
+}
+
+function entryView(store: Store): ProcessingEntryListItem[] {
+  const decisions = new Map(
+    store.processingState
+      .published()
+      .map(({ input, decisionId, decision }) => [input.seq, { decisionId, decision }]),
+  )
+  const overrides = new Map(
+    store.processingState.overrides().map((override) => [override.inputSeq, override]),
+  )
+  const unsupportedCitationCounts = new Map<string, number>()
+  for (const feedback of store.feedback.list()) {
+    if (
+      feedback.kind !== "unsupported_citation" ||
+      feedback.target.kind !== "entry" ||
+      !feedback.target.decisionId
+    )
+      continue
+    unsupportedCitationCounts.set(
+      feedback.target.decisionId,
+      (unsupportedCitationCounts.get(feedback.target.decisionId) ?? 0) + 1,
+    )
+  }
+  // 完整 current input 集合交给 UI 筛选，服务端不按处理状态或数量截断。
+  return store.automation.inputs().map((input) => {
+    const result = decisions.get(input.seq)
+    const issueCount = result ? (unsupportedCitationCounts.get(result.decisionId) ?? 0) : 0
+    return {
+      seq: input.seq,
+      sourceKey: input.sourceKey,
+      itemId: input.itemId,
+      title: input.body.title,
+      url: input.body.url,
+      read: input.body.read,
+      receivedAt: input.receivedAt,
+      status: input.status,
+      decision: result
+        ? {
+            id: result.decisionId,
+            status: result.decision.status,
+            title: result.decision.title,
+            summary: result.decision.summary,
+            reason: result.decision.reason,
+            labels: result.decision.labels,
+            policy: result.decision.policy,
+          }
+        : null,
+      reviewNeeded: issueCount > 0,
+      issueCount,
+      override: overrides.get(input.seq) ?? { inputSeq: input.seq, mode: "automatic", revision: 0 },
+      metadata: store.sourceSync.contextFor(input.sourceKey, input.body).metadata,
+    } satisfies ProcessingEntryListItem
+  })
+}
+
+export function processingApi(
+  store: Store,
+  method: string,
+  path: string,
+  body: unknown,
+): object | undefined {
+  const feedback = processingFeedbackApi(store, method, path, body)
+  if (feedback !== undefined) return feedback
+  const research = researchApi(store, method, path, body)
+  if (research !== undefined) return research
+  if (path === "/schedule") {
+    if (method === "GET") return store.schedule.snapshot()
+    if (method === "PUT") {
+      const input = z
+        .object({ expectedRevision: revision, config: scheduleConfig })
+        .strict()
+        .parse(body)
+      const knownSources = new Set(store.sources().map((source) => source.key))
+      if (input.config.sourceKeys.some((sourceKey) => !knownSources.has(sourceKey)))
+        throw new AutomationError("invalid_target")
+      return store.schedule.save(input.config as ProcessingScheduleInput, input.expectedRevision)
+    }
+  }
+  if (path === "/runs") {
+    if (method === "GET")
+      return { runs: store.schedule.triggers(), reports: store.processingState.reports() }
+    if (method === "POST") {
+      const input = z.object({ requestId: z.uuid() }).strict().parse(body)
+      if (!store.automation.releases().length) throw new AutomationError("invalid_target")
+      return store.schedule.manual(input.requestId, new Date())
+    }
+  }
+  if (path === "/reading-snapshot") {
+    if (method === "GET")
+      return { snapshot: store.reading.snapshot() } satisfies ReadingSnapshotResponse
+    if (method === "POST") {
+      const input = z
+        .object({
+          snapshotId: z.uuid().optional(),
+          offset: z.number().int().min(0).optional(),
+          limit: z.number().int().min(1).max(50).optional(),
+          view: z.enum(["standalone", "all", "hidden", "stories"]).optional(),
+        })
+        .strict()
+        .parse(body)
+      return store.reading.page(input) satisfies ReadingSnapshotPageResponse
+    }
+  }
+  if (path === "/reading-snapshot/refresh" && method === "POST") {
+    z.object({}).strict().parse(body)
+    return { snapshot: store.reading.refresh() } satisfies ReadingSnapshotResponse
+  }
+  const researchPackPath = /^\/research-pack\/([^/]+)$/.exec(path)
+  if (researchPackPath && method === "GET")
+    return store.reading.researchPack(researchPackPath[1]!) satisfies ResearchPackResponse
+  if (path === "/processing/entries" && method === "GET")
+    return { entries: entryView(store) } satisfies ProcessingEntryListResponse
+
+  const entryDetailPath = /^\/processing\/entries\/(\d+)$/.exec(path)
+  if (entryDetailPath && method === "GET") {
+    const seq = positiveInteger.parse(Number(entryDetailPath[1]))
+    const item = entryView(store).find((entry) => entry.seq === seq)
+    const input = store.automation.inputs().find((candidate) => candidate.seq === seq)
+    const published = store.processingState
+      .published()
+      .find((candidate) => candidate.input.seq === seq)
+    if (!item || !input) throw new AutomationError("invalid_target")
+    return {
+      entry: { ...item, input: input.body, decision: published?.decision ?? null },
+    } satisfies ProcessingEntryDetailResponse
+  }
+
+  const entryPath = /^\/processing\/entries\/(\d+)\/(override|undo|retry)$/.exec(path)
+  if (entryPath) {
+    const seq = positiveInteger.parse(Number(entryPath[1]))
+    const action = entryPath[2]
+    if (action === "override" && method === "POST") {
+      const input = z
+        .object({ mode: z.enum(["restore", "hide", "automatic"]), expectedRevision: revision })
+        .strict()
+        .parse(body)
+      let result: ReturnType<typeof store.processingState.setOverride> | undefined
+      store.transaction(() => {
+        result = store.processingState.setOverride(seq, input.mode, input.expectedRevision)
+        store.stories.invalidateInputs([seq])
+      })
+      return result!
+    }
+    if (action === "undo" && method === "POST") {
+      const input = z.object({ expectedRevision: revision }).strict().parse(body)
+      let result: ReturnType<typeof store.processingState.undoOverride> | undefined
+      store.transaction(() => {
+        result = store.processingState.undoOverride(seq, input.expectedRevision)
+        store.stories.invalidateInputs([seq])
+      })
+      return result!
+    }
+    if (action === "retry" && method === "POST") {
+      z.object({}).strict().parse(body)
+      if (!store.processingState.retry(seq)) throw new AutomationError("invalid_target")
+      return { inputSeq: seq, status: "pending" }
+    }
+  }
+  if (path === "/stories" && method === "GET") {
+    const readerId = owner(store)
+    return {
+      stories: store.stories
+        .list()
+        .map((listedStory) => {
+          // 活跃 Story 只展示仍可作为当前快照读取的标题；修复中的条目保留旧版本标题便于定位。
+          const link = store.stories.resolveLink(listedStory.id)
+          if (link.kind === "missing") return null
+          const story = link.story
+          const title =
+            link.kind === "current"
+              ? link.revision.title
+              : (store.stories.revision(story.id, story.currentRevision)?.title ?? null)
+          return { story, title, readStatus: store.stories.readStatus(story.id, readerId) }
+        })
+        .filter((story): story is StoriesListResponse["stories"][number] => story !== null),
+    } satisfies StoriesListResponse
+  }
+  const revisionPath = /^\/stories\/([^/]+)\/revisions\/(\d+)$/.exec(path)
+  if (revisionPath && method === "GET")
+    return {
+      revision: store.stories.revision(
+        revisionPath[1]!,
+        positiveInteger.parse(Number(revisionPath[2])),
+      ),
+    }
+  if (path === "/stories/merge" && method === "POST") {
+    const input = z
+      .object({
+        keepStoryId: z.uuid(),
+        mergeStoryId: z.uuid(),
+        expectedKeepRevision: positiveInteger,
+        expectedMergedRevision: positiveInteger,
+      })
+      .strict()
+      .parse(body)
+    owner(store)
+    return new StoryCorrectionService(store.stories).merge(input)
+  }
+  const splitPath = /^\/stories\/([^/]+)\/split$/.exec(path)
+  if (splitPath && method === "POST") {
+    const input = z
+      .object({
+        expectedRevision: positiveInteger,
+        groups: z.array(z.array(positiveInteger).min(1).max(10000)).min(2).max(1000),
+      })
+      .strict()
+      .parse(body)
+    owner(store)
+    return new StoryCorrectionService(store.stories).split({
+      storyId: z.uuid().parse(splitPath[1]),
+      ...input,
+    })
+  }
+  const storyPath = /^\/stories\/([^/]+)$/.exec(path)
+  if (storyPath) {
+    const storyId = storyPath[1]!
+    if (method === "GET") return store.stories.resolveLink(storyId) satisfies StoryLinkResponse
+    if (method === "POST") {
+      const input = z.object({ revision: positiveInteger.optional() }).strict().parse(body)
+      store.stories.markRead(storyId, owner(store), input.revision)
+      return { storyId, readStatus: store.stories.readStatus(storyId, owner(store)) }
+    }
+  }
+  const removeMemberPath = /^\/stories\/([^/]+)\/remove-member$/.exec(path)
+  if (removeMemberPath && method === "POST") {
+    const input = z
+      .object({ expectedRevision: positiveInteger, inputSeq: positiveInteger })
+      .strict()
+      .parse(body)
+    return store.stories.removeMember(removeMemberPath[1]!, input.expectedRevision, input.inputSeq)
+  }
+  const materialPath = /^\/materials\/(\d+)\/withdraw$/.exec(path)
+  if (materialPath && method === "POST") {
+    const input = z
+      .object({ reason: z.string().trim().min(1).max(2000) })
+      .strict()
+      .parse(body)
+    return store.stories.withdrawMaterial(
+      positiveInteger.parse(Number(materialPath[1])),
+      input.reason,
+    )
+  }
+  const correctionPath = /^\/corrections\/([^/]+)\/undo$/.exec(path)
+  if (correctionPath && method === "POST") {
+    z.object({}).strict().parse(body)
+    return store.stories.undoCorrection(correctionPath[1]!)
+  }
+  return undefined
+}

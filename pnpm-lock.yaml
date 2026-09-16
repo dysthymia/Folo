@@ -833,6 +833,43 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  apps/information-service:
+    dependencies:
+      '@follow-app/client-sdk':
+        specifier: 0.3.95
+        version: 0.3.95(5c7a0dd36e51a6e792550847b87c73ab)
+      '@follow/information-core':
+        specifier: workspace:*
+        version: link:../../packages/internal/information-core
+      linkedom:
+        specifier: 0.18.13
+        version: 0.18.13
+      pathe:
+        specifier: 2.0.3
+        version: 2.0.3
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@follow/configs':
+        specifier: workspace:*
+        version: link:../../packages/configs
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      tsup:
+        specifier: 8.5.1
+        version: 8.5.1(@swc/core@1.15.43(@swc/helpers@0.5.18))(jiti@2.7.0)(postcss@8.5.16)(tsx@4.23.0)(typescript@6.0.3)(yaml@2.9.0)
+      tsx:
+        specifier: 4.23.0
+        version: 4.23.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(happy-dom@20.10.6(bufferutil@4.1.0))(jsdom@29.1.1(@noble/hashes@2.0.1))(vite@7.3.1(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.49.0)(tsx@4.23.0)(yaml@2.9.0))
+
   apps/landing:
     dependencies:
       '@base-ui/react':

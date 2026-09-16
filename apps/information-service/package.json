@@ -1,0 +1,35 @@
+{
+  "name": "@follow/information-service",
+  "type": "module",
+  "private": true,
+  "description": "Folo background information processing service",
+  "engines": {
+    "node": ">=24.5.0"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --target node24 --out-dir dist --clean",
+    "dev": "node --use-env-proxy --import tsx src/index.ts",
+    "start": "node --use-env-proxy dist/index.js",
+    "test": "vitest run && pnpm run test:codex",
+    "test:codex": "node --import tsx --test src/codex.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format:check": "prettier --check src *.ts *.json",
+    "build:web": "pnpm --filter Folo exec cross-env WEB_BUILD=1 vite build --config vite.information.config.ts --base /information-static/ --outDir ../../out/information-web"
+  },
+  "dependencies": {
+    "@follow/information-core": "workspace:*",
+    "@follow-app/client-sdk": "catalog:",
+    "linkedom": "0.18.13",
+    "pathe": "2.0.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@follow/configs": "workspace:*",
+    "@types/node": "26.1.1",
+    "tsup": "8.5.1",
+    "tsx": "4.23.0",
+    "typescript": "catalog:",
+    "vitest": "4.1.10"
+  }
+}
