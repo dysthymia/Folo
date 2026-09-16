@@ -1,0 +1,11 @@
+@import "./main.css";
+
+/* 独立页面保持固定视口与内部滚动，不依赖阅读器的布局初始化。 */
+html[data-information-page] {
+  --fo-font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html[data-information-page] body,
+html[data-information-page] #root {
+  height: 100dvh;
+}

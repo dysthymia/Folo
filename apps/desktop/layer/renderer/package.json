@@ -19,6 +19,7 @@
     "@follow-app/client-sdk": "catalog:",
     "@follow/database": "workspace:*",
     "@follow/electron-main": "workspace:*",
+    "@follow/information-core": "workspace:*",
     "@follow/shared": "workspace:*",
     "@follow/store": "workspace:*",
     "@follow/tracker": "workspace:*",

@@ -501,6 +501,9 @@ importers:
       '@follow/electron-main':
         specifier: workspace:*
         version: link:../main
+      '@follow/information-core':
+        specifier: workspace:*
+        version: link:../../../../packages/internal/information-core
       '@follow/shared':
         specifier: workspace:*
         version: link:../../../../packages/internal/shared
