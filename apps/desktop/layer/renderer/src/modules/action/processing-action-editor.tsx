@@ -1,7 +1,8 @@
-import type { AutomationRule } from "@follow/information-core"
+import type { AutomationRule, ConditionSet } from "@follow/information-core"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { applyPresetToAction } from "./processing-action-preset"
+import { applyPresetToAction, createSameEventAggregateAction } from "./processing-action-preset"
 import type { ProcessingEditor } from "./processing-client"
 import {
   processingButtonClass,
@@ -11,6 +12,9 @@ import {
 import { ProcessingPresetPicker } from "./processing-preset-picker"
 
 type Action = AutomationRule["actions"][number]
+
+/** `{ all: true }` 表示不额外限制范围，等价于「沿用本条规则命中的材料」。 */
+const isInheritedScope = (scope: ConditionSet) => "all" in scope
 
 export function ProcessingActionEditor({
   actions,
@@ -28,8 +32,11 @@ export function ProcessingActionEditor({
   sourceInventoryKnown?: boolean
 }) {
   const { t } = useTranslation("app")
+  const [expandedScopes, setExpandedScopes] = useState<Record<number, boolean>>({})
   const update = (index: number, action: Action) =>
     onChange(actions.map((item, i) => (i === index ? action : item)))
+  const setScopeExpanded = (index: number, expanded: boolean) =>
+    setExpandedScopes((current) => ({ ...current, [index]: expanded }))
   return (
     <div className="space-y-3">
       {actions.map((action, index) => (
@@ -153,15 +160,45 @@ export function ProcessingActionEditor({
                   <option value="topic">{t("processing.topic")}</option>
                 </select>
               </label>
-              <p className="text-sm font-medium">{t("processing.aggregate_scope")}</p>
-              <ProcessingConditionEditor
-                value={action.scope}
-                sources={sources}
-                tags={tags}
-                listMemberships={listMemberships}
-                sourceInventoryKnown={sourceInventoryKnown}
-                onChange={(scope) => update(index, { ...action, scope })}
-              />
+              {isInheritedScope(action.scope) && !expandedScopes[index] ? (
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">{t("processing.aggregate_scope")}</p>
+                  <p className="text-sm text-text-secondary">
+                    {t("processing.aggregate_scope_inherited")}
+                  </p>
+                  <button
+                    type="button"
+                    className={processingButtonClass}
+                    onClick={() => setScopeExpanded(index, true)}
+                  >
+                    {t("processing.aggregate_scope_customize")}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{t("processing.aggregate_scope")}</p>
+                    <button
+                      type="button"
+                      className={processingButtonClass}
+                      onClick={() => {
+                        update(index, { ...action, scope: { all: true } })
+                        setScopeExpanded(index, false)
+                      }}
+                    >
+                      {t("processing.aggregate_scope_inherit")}
+                    </button>
+                  </div>
+                  <ProcessingConditionEditor
+                    value={action.scope}
+                    sources={sources}
+                    tags={tags}
+                    listMemberships={listMemberships}
+                    sourceInventoryKnown={sourceInventoryKnown}
+                    onChange={(scope) => update(index, { ...action, scope })}
+                  />
+                </div>
+              )}
               <label className="block space-y-1 text-sm">
                 {t("processing.create_prompt")}
                 <textarea
@@ -223,20 +260,9 @@ export function ProcessingActionEditor({
           type="button"
           className={processingButtonClass}
           disabled={actions.some((action) => action.type === "ai_aggregate")}
-          onClick={() =>
-            onChange([
-              ...actions,
-              {
-                type: "ai_aggregate",
-                mode: "same_event",
-                scope: { all: true },
-                createPrompt: "",
-                updatePrompt: "",
-              },
-            ])
-          }
+          onClick={() => onChange([...actions, createSameEventAggregateAction()])}
         >
-          {t("processing.add_aggregate")}
+          {t("processing.add_same_event")}
         </button>
       </div>
     </div>

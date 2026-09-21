@@ -1,4 +1,5 @@
 import type { AutomationRule, PresetApplication } from "@follow/information-core"
+import { applyPreset } from "@follow/information-core"
 
 type Action = AutomationRule["actions"][number]
 
@@ -90,4 +91,24 @@ export const applyPresetToAction = (
     )
 
   return actions
+}
+
+/**
+ * "同事件综述" 的默认动作。
+ *
+ * 用户不该为了建立一次跨文章整合先去理解单篇处理与跨篇聚合的区别，也不该被迫
+ * 手写两段 Prompt：这里直接带上 P06/P07 预设，并让参与范围继承本条规则范围
+ * （`{ all: true }` 在服务端表示不额外限制范围，见 story-engine 的 candidatesForAction）。
+ */
+export const createSameEventAggregateAction = (): Action => {
+  const base: Action = {
+    createPrompt: "",
+    mode: "same_event",
+    scope: { all: true },
+    type: "ai_aggregate",
+    updatePrompt: "",
+  }
+  const withCreate = applyPresetToAction([base], 0, applyPreset("P06"))[0]!
+
+  return applyPresetToAction([withCreate], 0, applyPreset("P07"))[0]!
 }
