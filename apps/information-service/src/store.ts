@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { chmodSync, mkdirSync } from "node:fs"
 import { DatabaseSync } from "node:sqlite"
 
+import type { ConditionSet, RuleSet } from "@follow/information-core"
 import { dirname } from "pathe"
 
 import { AutomationStore } from "./automation-store"
@@ -48,6 +49,24 @@ export type Result = {
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null
 }
 
+function categoryReferences(conditionSet: ConditionSet): Array<{ view: number; name: string }> {
+  if ("all" in conditionSet) return []
+  return conditionSet.anyOf.flatMap((group) =>
+    group.allOf.flatMap((condition) =>
+      condition.field === "category_ref" ? [condition.value] : [],
+    ),
+  )
+}
+
+function ruleSetCategoryReferences(config: RuleSet) {
+  return config.rules.flatMap((rule) => [
+    ...categoryReferences(rule.when),
+    ...rule.actions.flatMap((action) =>
+      action.type === "ai_aggregate" ? categoryReferences(action.scope) : [],
+    ),
+  ])
+}
+
 // 数据库只保存白名单业务字段；Folo 凭据由独立受限文件按次读取，不放进业务快照。
 export class Store {
   private readonly db: DatabaseSync
@@ -76,7 +95,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS results (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS access_tokens (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, expires INTEGER NOT NULL);
     `)
-    this.automation = new AutomationStore(this.db, () => this.ownerId)
+    this.automation = new AutomationStore(
+      this.db,
+      () => this.ownerId,
+      (config) => this.categoryReferencesValid(config),
+    )
     this.subscriptionTags = new SubscriptionTagStore(this.db, () => this.ownerId)
     // 同一账号的队列、原文版本与派生 Story 共用事务数据库。
     this.processingState = new ProcessingStateStore(this.db, this.automation)
@@ -137,6 +160,9 @@ export class Store {
       this.db.exec("UPDATE sources SET active=0")
       const insert = this.db.prepare("INSERT OR REPLACE INTO sources VALUES (?, ?, 1)")
       for (const source of sources) insert.run(source.key, JSON.stringify(source))
+      this.db
+        .prepare("INSERT OR REPLACE INTO metadata VALUES ('source_inventory_known', '1')")
+        .run()
       // 增量同步传入时间时，来源条件快照与主来源表必须同一事务提交。
       if (syncedAt) this.sourceSync.replaceSources(sources, syncedAt)
     })
@@ -149,6 +175,24 @@ export class Store {
       .map((row) => JSON.parse(String(row.body)) as Source)
     // 搜索来源来自保存查询，主站订阅同步不会误删这组私人绑定。
     return [...foloSources, ...(this.ownerId ? this.xQueries.sources() : [])]
+  }
+
+  sourceInventoryKnown(): boolean {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM metadata WHERE key='source_inventory_known'").get(),
+    )
+  }
+
+  private categoryReferencesValid(config: RuleSet): boolean {
+    if (!this.sourceInventoryKnown()) return true
+    const categories = new Set(
+      this.sources().flatMap((source) =>
+        source.category === null ? [] : [`${source.view}\u0000${source.category}`],
+      ),
+    )
+    return ruleSetCategoryReferences(config).every(({ view, name }) =>
+      categories.has(`${view}\u0000${name}`),
+    )
   }
 
   entry(sourceKey: string, id: string): SourceEntry | null {

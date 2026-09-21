@@ -24,6 +24,8 @@ import {
   ProcessingConditionEditor,
   processingInputClass,
 } from "./processing-condition-editor"
+import { ProcessingExportControls } from "./processing-export-controls"
+import type { ProcessingMigrationImport } from "./processing-migration-preview"
 import { ProcessingMigrationPreview } from "./processing-migration-preview"
 import type { PendingLocalMigrationSwitch } from "./processing-migration-switch"
 import {
@@ -372,27 +374,6 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
       if (!controller.signal.aborted) setRunBusy(false)
     }
   }
-  const copyDraft = async () => {
-    if (!draft) return
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(draft, null, 2))
-      setTransferStatus("processing.transfer_copied")
-    } catch (cause) {
-      if (cause) setTransferStatus("processing.transfer_failed")
-    }
-  }
-  const exportDraft = () => {
-    if (!draft) return
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(draft, null, 2)], { type: "application/json" }),
-    )
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = "folo-processing-draft.json"
-    anchor.click()
-    URL.revokeObjectURL(url)
-    setTransferStatus("processing.transfer_exported")
-  }
   const importDraft = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.currentTarget.value = ""
@@ -632,17 +613,7 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className={processingButtonClass}
-                  onClick={() => void copyDraft()}
-                >
-                  {/* 成功文案只在复制完成后显示，按钮使用操作名称。 */}
-                  {t("words.copy", { ns: "common" })}
-                </button>
-                <button type="button" className={processingButtonClass} onClick={exportDraft}>
-                  {t("processing.transfer_export")}
-                </button>
+                <ProcessingExportControls config={draft} />
                 <label className={processingButtonClass}>
                   {t("processing.transfer_import")}
                   <input

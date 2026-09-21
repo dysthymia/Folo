@@ -430,6 +430,178 @@ describe("事故输入指针恢复", () => {
 })
 
 describe("规则编辑接口", () => {
+  it("分类改名后保留草稿但阻止发布，并递归检查聚合范围", () => {
+    const categoryConfig: RuleSet = {
+      ...config,
+      rules: [
+        {
+          id: "category-rule",
+          ownerId: "owner",
+          name: "旧分类规则",
+          enabled: true,
+          order: 0,
+          when: {
+            anyOf: [
+              {
+                allOf: [
+                  {
+                    field: "category_ref",
+                    operator: "eq",
+                    value: { view: 0, name: "旧分类" },
+                  },
+                ],
+              },
+            ],
+          },
+          actions: [
+            {
+              type: "ai_aggregate",
+              createPrompt: "整合同一事件",
+              updatePrompt: "更新同一事件",
+              mode: "same_event",
+              scope: {
+                anyOf: [
+                  {
+                    allOf: [
+                      {
+                        field: "category_ref",
+                        operator: "eq",
+                        value: { view: 0, name: "旧分类" },
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+          version: 1,
+          executionLocation: "processing_service",
+        },
+      ],
+    }
+    const store = new Store(":memory:")
+    close.push(() => store.close())
+    store.bindOwner("owner")
+    store.replaceSources([
+      { key: "feed/1", kind: "feed", id: "1", title: "来源", view: 0, category: "旧分类" },
+    ])
+    store.automation.saveDraft(categoryConfig, 0)
+    store.replaceSources([
+      { key: "feed/1", kind: "feed", id: "1", title: "来源", view: 0, category: "新分类" },
+    ])
+    // 分类身份失效后仍允许保存旧值，避免草稿被静默删成 ALL。
+    store.automation.saveDraft(
+      { ...categoryConfig, global: { version: 1, markdown: "仍保留旧分类引用" } },
+      1,
+    )
+    expect(() =>
+      automationApi(store, "POST", "/rule-set-releases", {
+        expectedRevision: 2,
+        scope: { mode: "future" },
+        requestId: randomUUID(),
+      }),
+    ).toThrow("invalid_rule_set")
+    const scopeOnlyConfig: RuleSet = {
+      ...categoryConfig,
+      global: { version: 1, markdown: "只保留聚合范围引用" },
+      rules: [{ ...categoryConfig.rules[0]!, when: { all: true } }],
+    }
+    store.automation.saveDraft(scopeOnlyConfig, 2)
+    expect(() =>
+      automationApi(store, "POST", "/rule-set-releases", {
+        expectedRevision: 3,
+        scope: { mode: "future" },
+        requestId: randomUUID(),
+      }),
+    ).toThrow("invalid_rule_set")
+    const whenOnlyConfig: RuleSet = {
+      ...categoryConfig,
+      global: { version: 1, markdown: "只保留规则条件引用" },
+      rules: [
+        {
+          ...categoryConfig.rules[0]!,
+          actions: categoryConfig.rules[0]!.actions.map((action) =>
+            action.type === "ai_aggregate" ? { ...action, scope: { all: true } } : action,
+          ),
+        },
+      ],
+    }
+    store.automation.saveDraft(whenOnlyConfig, 3)
+    expect(() =>
+      automationApi(store, "POST", "/rule-set-releases", {
+        expectedRevision: 4,
+        scope: { mode: "future" },
+        requestId: randomUUID(),
+      }),
+    ).toThrow("invalid_rule_set")
+    expect(automationApi(store, "GET", "/configuration", undefined)).toMatchObject({
+      sourceInventoryKnown: true,
+      config: { rules: [{ when: whenOnlyConfig.rules[0]!.when }] },
+    })
+
+    const unknownStore = new Store(":memory:")
+    close.push(() => unknownStore.close())
+    unknownStore.bindOwner("owner")
+    unknownStore.automation.saveDraft(categoryConfig, 0)
+    expect(automationApi(unknownStore, "GET", "/configuration", undefined)).toMatchObject({
+      sourceInventoryKnown: false,
+    })
+    expect(
+      automationApi(unknownStore, "POST", "/rule-set-releases", {
+        expectedRevision: 1,
+        scope: { mode: "future" },
+        requestId: randomUUID(),
+      }),
+    ).toMatchObject({ version: 1 })
+  })
+
+  it("配置只读返回 List 同步事实，标签批量操作只接受完整成员", () => {
+    const store = new Store(":memory:")
+    close.push(() => store.close())
+    store.bindOwner("owner")
+    store.replaceSources([
+      { key: "list/l1", kind: "list", id: "l1", title: "List", view: 0, category: null },
+    ])
+    store.sourceSync.saveListMembership(
+      "list/l1",
+      { feedIds: ["member"], complete: true },
+      "2026-09-19T00:00:00.000Z",
+    )
+
+    expect(automationApi(store, "GET", "/configuration", undefined)).toMatchObject({
+      listMemberships: [
+        {
+          listKey: "list/l1",
+          ownerId: null,
+          feedIds: ["member"],
+          complete: true,
+          status: "complete",
+          revision: 1,
+          syncedAt: "2026-09-19T00:00:00.000Z",
+        },
+      ],
+    })
+    const tag = store.subscriptionTags.create("List tag", 0).tags[0]!
+    expect(
+      automationApi(store, "PUT", "/source-tags", {
+        expectedRevision: 1,
+        sourceKeys: ["feed/member"],
+        tagIds: [tag.id],
+        operation: "add",
+      }),
+    ).toMatchObject({ changedBindings: 1 })
+
+    store.sourceSync.unknownListMembership("list/l1", "2026-09-19T01:00:00.000Z", "failed")
+    expect(() =>
+      automationApi(store, "PUT", "/source-tags", {
+        expectedRevision: 2,
+        sourceKeys: ["feed/member"],
+        tagIds: [tag.id],
+        operation: "add",
+      }),
+    ).toThrow("invalid_target")
+  })
+
   it("创建、完整重排与删除使用同一草稿并强制 revision", () => {
     const store = new Store(":memory:")
     close.push(() => store.close())

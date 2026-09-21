@@ -82,6 +82,7 @@ export class AutomationStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly owner: () => string | null,
+    private readonly validatePublication?: (config: RuleSet) => boolean,
   ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS automation_draft (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, body TEXT NOT NULL);
@@ -301,16 +302,11 @@ export class AutomationStore {
       }
       const draft = this.draft()
       if (draft.revision !== expectedRevision) throw new AutomationError("revision_conflict")
-      const inputs = this.inputs()
-      const selected = scope.mode === "selected" ? new Set(scope.inputIds) : null
-      if (selected && [...selected].some((id) => !inputs.some((input) => input.seq === id)))
-        throw new AutomationError("invalid_target")
-      const targets = inputs.filter(
-        (input) =>
-          input.releaseVersion === null ||
-          (scope.mode === "selected" && selected!.has(input.seq)) ||
-          (scope.mode === "recent" && Date.parse(input.receivedAt) >= Date.parse(scope.since)),
-      )
+      // 草稿可保留待修复身份；只有发布不可变版本时才要求当前已知身份全部有效。
+      if (this.validatePublication && !this.validatePublication(draft.config))
+        throw new AutomationError("invalid_rule_set")
+      const plan = this.publicationPlan(scope)
+      const targets = new Set(plan.targetInputIds)
       const activationSeq = Number(
         this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM processing_inputs").get()!.seq,
       )
