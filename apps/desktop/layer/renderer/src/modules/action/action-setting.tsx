@@ -90,12 +90,20 @@ const EmptyActionPlaceholder = ({ onCreateRule }: { onCreateRule: () => void }) 
 }
 
 type EditorScope = ActionScope | "processing_service"
+const parseRequestedScope = (): EditorScope | null => {
+  const requested = new URLSearchParams(window.location.search).get("scope")
+
+  if (requested === "cloud" || requested === "local") return requested
+  // 处理服务只在本机部署可用，不接受跨域直接进入。
+  if (requested === "processing_service" && isLocalFoloHost()) return "processing_service"
+
+  return null
+}
+
 export const ActionSetting = () => {
-  const [scope, setScope] = useState<EditorScope>(() =>
-    isLocalFoloHost() &&
-    new URLSearchParams(window.location.search).get("scope") === "processing_service"
-      ? "processing_service"
-      : "cloud",
+  // 以规则为中心：本机部署默认进入处理服务；旧位置仍可用 ?scope=cloud|local 直接访问。
+  const [scope, setScope] = useState<EditorScope>(
+    () => parseRequestedScope() ?? (isLocalFoloHost() ? "processing_service" : "cloud"),
   )
   const [serviceDirty, setServiceDirty] = useState(false)
   const { ask } = useDialog()
@@ -145,14 +153,23 @@ const ActionScopeSelector = ({
   onScopeChange: (scope: EditorScope) => void
 }) => {
   const { t } = useTranslation(["settings", "app"])
+
   return (
-    <SegmentGroup value={scope} onValueChanged={(value) => onScopeChange(value as EditorScope)}>
-      <SegmentItem value="cloud" label={t("actions.scope.cloud")} />
-      <SegmentItem value="local" label={t("actions.scope.local")} />
+    <div className="space-y-1">
+      <SegmentGroup value={scope} onValueChanged={(value) => onScopeChange(value as EditorScope)}>
+        <SegmentItem value="cloud" label={t("actions.scope.cloud")} />
+        <SegmentItem value="local" label={t("actions.scope.local")} />
+        {isLocalFoloHost() && (
+          <SegmentItem value="processing_service" label={t("processing.scope", { ns: "app" })} />
+        )}
+      </SegmentGroup>
+      {/* 执行位置是旧规则的划分方式，不再是新建规则的起点。 */}
       {isLocalFoloHost() && (
-        <SegmentItem value="processing_service" label={t("processing.scope", { ns: "app" })} />
+        <p className="max-w-xl text-xs leading-5 text-text-secondary">
+          {t("processing.scope_hint", { ns: "app" })}
+        </p>
       )}
-    </SegmentGroup>
+    </div>
   )
 }
 
