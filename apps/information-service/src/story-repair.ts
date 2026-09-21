@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 
 import type { RuleSet } from "@follow/information-core"
-import { matchConditions } from "@follow/information-core"
+import { compileInstructions, matchConditions } from "@follow/information-core"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
@@ -59,7 +59,7 @@ export type StoryRepairResult = {
   }>
   pending: Array<{
     storyId: string
-    reason: "rule_unavailable" | "scope_unknown" | "excluded" | "mixed_release" | "aborted"
+    reason: "rule_unavailable" | "scope_unknown" | "excluded" | "aborted"
   }>
   failures: Array<{ storyId: string; reason: "model_failed" | "invalid_model_output" }>
   usage: CodexUsage
@@ -96,20 +96,23 @@ export async function runStoryRepair(options: StoryRepairOptions): Promise<Story
         .map((candidate) => candidate.input.releaseVersion)
         .filter((version): version is number => version != null),
     )
-    if (options.releasedRuleSets && currentReleaseVersions.size > 1) {
-      result.pending.push({ storyId: target.story.id, reason: "mixed_release" })
-      continue
-    }
-    const releaseVersion =
-      currentReleaseVersions.size === 1
-        ? [...currentReleaseVersions][0]!
-        : target.revision.appliedRuleSetVersion
+    // 目标版本不能因高版本成员被撤回而倒退；旧成员统一按 Story 与当前成员中的最高 release 重校验。
+    const releaseVersion = Math.max(
+      target.revision.appliedRuleSetVersion,
+      ...currentReleaseVersions,
+    )
     const action = findAction(target, options.ruleSets, options.releasedRuleSets, releaseVersion)
     if (!action) {
       result.pending.push({ storyId: target.story.id, reason: "rule_unavailable" })
       continue
     }
-    const selected = selectCurrentCandidates(mapped, action.rule, action.action)
+    const selected = selectCurrentCandidates(
+      mapped,
+      action.ruleSet,
+      action.rule,
+      action.action,
+      releaseVersion,
+    )
     if (selected.unknown) {
       result.pending.push({ storyId: target.story.id, reason: "scope_unknown" })
       continue
@@ -163,6 +166,7 @@ export async function runStoryRepair(options: StoryRepairOptions): Promise<Story
         selected.candidates,
         action.rule.id,
         action.action,
+        releaseVersion,
       )
       const revision = options.stories.repair(target.story.id, target.story.currentRevision, draft)
       result.repaired.push({ storyId: target.story.id, revision: revision.revision })
@@ -218,8 +222,10 @@ function currentOriginCandidates(target: RepairingStory, decisions: PublishedDec
 
 function selectCurrentCandidates(
   candidates: PublishedDecision[],
+  ruleSet: RuleSet,
   rule: RuleSet["rules"][number],
   action: AggregateAction,
+  targetReleaseVersion: number,
 ) {
   let unknown = false
   const applicable = candidates.flatMap((candidate) => {
@@ -232,7 +238,22 @@ function selectCurrentCandidates(
       return []
     }
     if (states.includes("no_match")) return []
-    return [candidate]
+    const policy = policyAtTarget(candidate, ruleSet, targetReleaseVersion)
+    if (policy === "unknown") {
+      unknown = true
+      return []
+    }
+    if (policy.aggregation !== "allow") return []
+    return [
+      {
+        ...candidate,
+        decision: {
+          ...candidate.decision,
+          // 修复草稿必须采用目标版本重新判定的资格，不能继续信任旧 release 的 allow。
+          policy: { ...candidate.decision.policy, ...policy },
+        },
+      },
+    ]
   })
   return {
     candidates: [...new Map(applicable.map((item) => [item.input.seq, item])).values()],
@@ -240,12 +261,37 @@ function selectCurrentCandidates(
   }
 }
 
+function policyAtTarget(
+  candidate: PublishedDecision,
+  ruleSet: RuleSet,
+  targetReleaseVersion: number,
+): Pick<PublishedDecision["decision"]["policy"], "aggregation" | "rewrite"> | "unknown" {
+  if (candidate.input.releaseVersion === targetReleaseVersion)
+    return {
+      aggregation: candidate.decision.policy.aggregation,
+      rewrite: candidate.decision.policy.rewrite,
+    }
+  const instructions = compileInstructions(ruleSet, candidate.decision.context)
+  if (instructions.blocksFinalPresentation) return "unknown"
+  const semantic = candidate.decision.semantic
+  const aggregation =
+    instructions.policy.aggregation ??
+    (semantic && semantic.disposition !== "hide" && semantic.aggregation ? "allow" : "deny")
+  const semanticRewrite =
+    semantic && semantic.disposition !== "hide" && semantic.rewrite ? "allow" : "deny"
+  // 旧决定曾因长文或其他安全边界禁止改写时保持 quote-only；目标规则不能凭修复流程扩大权限。
+  const rewrite =
+    candidate.decision.policy.rewrite === "deny" && semanticRewrite === "allow"
+      ? "deny"
+      : (instructions.policy.rewrite ?? semanticRewrite)
+  return { aggregation, rewrite }
+}
+
 function eligible(value: PublishedDecision) {
   return (
     value.input.current &&
     value.input.status === "succeeded" &&
-    value.decision.status !== "needs_context" &&
-    value.decision.policy.aggregation === "allow"
+    value.decision.status !== "needs_context"
   )
 }
 
@@ -266,6 +312,7 @@ function draftFromRepair(
   candidates: PublishedDecision[],
   ruleId: string,
   action: AggregateAction,
+  appliedRuleSetVersion: number,
 ): StoryRevisionDraft {
   const candidateBySeq = new Map(candidates.map((candidate) => [candidate.input.seq, candidate]))
   const sentenceRefs = output.sentences.map((sentence) =>
@@ -325,8 +372,13 @@ function draftFromRepair(
       throw new Error("invalid_fact_reference")
     if (fact.kind === "inference" && !fact.dependsOnFactIndexes.length)
       throw new Error("invalid_inference")
+    const usesQuoteOnly = fact.sentenceIndexes.some((sentence) =>
+      sentenceRefs[sentence]!.some(
+        (reference) => reference.candidate.decision.policy.rewrite !== "allow",
+      ),
+    )
     if (
-      memberSeqs.some((seq) => candidateBySeq.get(seq)!.decision.policy.rewrite !== "allow") &&
+      usesQuoteOnly &&
       (fact.kind === "inference" ||
         !fact.sentenceIndexes.some(
           (sentence) => normalize(fact.text) === normalize(sentences[sentence]!.text),
@@ -348,9 +400,7 @@ function draftFromRepair(
     body: sentences.map((sentence) => sentence.text).join("\n\n"),
     aggregationRuleId: target.story.aggregationRuleId,
     aggregationScopeVersion: target.story.aggregationScopeVersion,
-    appliedRuleSetVersion: Math.max(
-      ...candidates.map((candidate) => candidate.input.releaseVersion ?? 0),
-    ),
+    appliedRuleSetVersion,
     instructionFingerprint: fingerprint({
       create: action.createPrompt,
       update: action.updatePrompt,

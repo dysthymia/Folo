@@ -292,6 +292,7 @@ describe("稳定阅读快照 client", () => {
       mutationSchemas.split.safeParse({
         correction: { ...correction, kind: "split", storyIds: ["story-1"] },
         childIds: ["11111111-1111-4111-8111-111111111112"],
+        independentInputSeqs: [3],
       }).success,
     ).toBe(true)
     expect(
@@ -352,6 +353,14 @@ describe("稳定阅读快照 client", () => {
     expect(readingStorySchema.safeParse({ kind: "current", story, revision }).success).toBe(true)
     expect(
       readingStorySchema.safeParse({ kind: "independent", story, reason: "不足两条材料" }).success,
+    ).toBe(true)
+    expect(
+      readingStorySchema.safeParse({
+        kind: "split",
+        story: { ...story, status: "split" },
+        splitInto: ["child"],
+        independentInputSeqs: [3],
+      }).success,
     ).toBe(true)
   })
 

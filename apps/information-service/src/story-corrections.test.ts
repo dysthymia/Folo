@@ -147,6 +147,58 @@ describe("人工 Story 纠正编排", () => {
     expect(stories.canAggregate("rule", "scope", [1, 3])).toBe(false)
   })
 
+  it("三篇可拆为双来源 Story 加独立条目，并可撤销恢复父 Story", () => {
+    const { stories } = fixture()
+    const parentId = "00000000-0000-4000-8000-000000000105"
+    stories.create(draft([1, 2, 3]), parentId)
+    stories.markRead(parentId, "reader")
+
+    const result = processingApi(apiStore(stories), "POST", `/stories/${parentId}/split`, {
+      expectedRevision: 1,
+      groups: [[1, 2]],
+      independentInputSeqs: [3],
+    }) as ReturnType<StoryCorrectionService["split"]>
+
+    expect(result.childIds).toHaveLength(1)
+    expect(result.independentInputSeqs).toEqual([3])
+    expect(stories.resolveLink(parentId)).toMatchObject({
+      kind: "split",
+      splitInto: result.childIds,
+      independentInputSeqs: [3],
+    })
+    expect(stories.canAggregate("rule", "scope", [1, 3])).toBe(false)
+    expect(stories.canAggregate("rule", "scope", [2, 3])).toBe(false)
+
+    stories.undoCorrection(result.correction.id)
+    expect(stories.resolveLink(parentId)).toMatchObject({ kind: "current" })
+    expect(stories.resolveLink(result.childIds[0]!)).toMatchObject({
+      kind: "merged",
+      mergedInto: parentId,
+    })
+    expect(stories.readStatus(parentId, "reader").unread).toBe(false)
+  })
+
+  it("双成员 Story 可全部拆回独立项，旧链接保留去向并支持撤销", () => {
+    const { stories } = fixture()
+    const parentId = "00000000-0000-4000-8000-000000000106"
+    stories.create(draft([1, 2]), parentId)
+    const result = processingApi(apiStore(stories), "POST", `/stories/${parentId}/split`, {
+      expectedRevision: 1,
+      groups: [],
+      independentInputSeqs: [1, 2],
+    }) as ReturnType<StoryCorrectionService["split"]>
+    expect(result.childIds).toEqual([])
+    expect(stories.resolveLink(parentId)).toMatchObject({
+      kind: "split",
+      splitInto: [],
+      independentInputSeqs: [1, 2],
+    })
+    expect(stories.canAggregate("rule", "scope", [1, 2])).toBe(false)
+    stories.undoCorrection(result.correction.id)
+    expect(stories.resolveLink(parentId)).toMatchObject({ kind: "current" })
+    expect(stories.canAggregate("rule", "scope", [1, 2])).toBe(true)
+  })
+
   it("拒绝单篇、重叠或不完整分组，不伪造单源综合 Story", () => {
     const { stories, corrections } = fixture()
     const parentId = "00000000-0000-4000-8000-000000000104"

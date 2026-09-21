@@ -174,9 +174,15 @@ export class StoryCorrectionService {
     })
   }
 
-  split(input: { storyId: string; expectedRevision: number; groups: number[][] }) {
+  split(input: {
+    storyId: string
+    expectedRevision: number
+    groups: number[][]
+    independentInputSeqs?: number[]
+  }) {
     const parent = current(this.stories, input.storyId, input.expectedRevision)
-    if (input.groups.length < 2) invalidReference()
+    const independentInputSeqs = input.independentInputSeqs ?? []
+    if (input.groups.length + independentInputSeqs.length < 2) invalidReference()
     const parentMembers = new Set(parent.revision.members.map((member) => member.inputSeq))
     const assigned = new Set<number>()
     const children = input.groups.map((group) => {
@@ -194,11 +200,16 @@ export class StoryCorrectionService {
       }
       return { revision: buildDraft([parent.revision], selected) }
     })
+    for (const inputSeq of independentInputSeqs) {
+      if (!parentMembers.has(inputSeq) || assigned.has(inputSeq)) invalidReference()
+      assigned.add(inputSeq)
+    }
     if (assigned.size !== parentMembers.size) invalidReference()
     return this.stories.split({
       storyId: input.storyId,
       expectedCurrentRevision: input.expectedRevision,
       children,
+      independentInputSeqs,
     })
   }
 }

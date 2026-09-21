@@ -72,7 +72,7 @@ export type Story = {
 export type StoryLink =
   | { kind: "current"; story: Story; revision: StoryRevision }
   | { kind: "merged"; story: Story; mergedInto: string }
-  | { kind: "split"; story: Story; splitInto: string[] }
+  | { kind: "split"; story: Story; splitInto: string[]; independentInputSeqs: number[] }
   | { kind: "repairing"; story: Story }
   | { kind: "independent"; story: Story; reason: string }
   | { kind: "missing" }
@@ -432,7 +432,13 @@ export class StoryStore {
       return { kind: "repairing", story: current }
     }
     if (story.status === "merged") return { kind: "merged", story, mergedInto: story.mergedInto! }
-    if (story.status === "split") return { kind: "split", story, splitInto: story.splitInto }
+    if (story.status === "split")
+      return {
+        kind: "split",
+        story,
+        splitInto: story.splitInto,
+        independentInputSeqs: this.splitPayload(storyId)?.independentInputSeqs ?? [],
+      }
     if (story.status === "repairing") {
       const outcome = this.db
         .prepare("SELECT reason FROM story_repair_outcomes WHERE story_id=?")
@@ -564,10 +570,14 @@ export class StoryStore {
     storyId: string
     expectedCurrentRevision: number
     children: Array<{ storyId?: string; revision: StoryRevisionDraft }>
+    independentInputSeqs?: number[]
   }) {
     return this.transaction(() => {
       const parent = this.requireCurrent(input.storyId, input.expectedCurrentRevision)
-      if (input.children.length < 2) throw new StoryStoreError("invalid_story")
+      const independentInputSeqs = uniqueIds(input.independentInputSeqs ?? [])
+      // 允许全部成员恢复独立阅读；无需制造至少一个子 Story。
+      if (input.children.length + independentInputSeqs.length < 2)
+        throw new StoryStoreError("invalid_story")
       const parentMembers = new Set(
         this.requireRevision(parent.id, parent.currentRevision).members.map(
           (member) => member.inputSeq,
@@ -591,13 +601,18 @@ export class StoryStore {
         childMemberSets.push(memberIds)
       }
       const flattened = childMemberSets.flat()
-      if (new Set(flattened).size !== flattened.length || flattened.length !== parentMembers.size)
+      const assigned = [...flattened, ...independentInputSeqs]
+      if (
+        new Set(assigned).size !== assigned.length ||
+        assigned.length !== parentMembers.size ||
+        assigned.some((inputSeq) => !parentMembers.has(inputSeq))
+      )
         throw new StoryStoreError("invalid_story")
       const correction = this.insertCorrection(
         "split",
         [parent.id, ...childIds],
         { [parent.id]: parent.currentRevision },
-        { childIds },
+        { childIds, independentInputSeqs },
       )
       const now = new Date().toISOString()
       for (let index = 0; index < input.children.length; index++) {
@@ -619,10 +634,12 @@ export class StoryStore {
         this.insertRevision(revision)
         this.replaceCurrentMemberIndex(revision.storyId, revision.members)
       }
-      for (let left = 0; left < childMemberSets.length; left++)
-        for (let right = left + 1; right < childMemberSets.length; right++)
-          for (const inputSeqA of childMemberSets[left]!)
-            for (const inputSeqB of childMemberSets[right]!) {
+      // 独立条目也是拆分分区，保存跨分区约束，避免下一轮又被自动拼回。
+      const partitions = [...childMemberSets, ...independentInputSeqs.map((inputSeq) => [inputSeq])]
+      for (let left = 0; left < partitions.length; left++)
+        for (let right = left + 1; right < partitions.length; right++)
+          for (const inputSeqA of partitions[left]!)
+            for (const inputSeqB of partitions[right]!) {
               const inputSeqAOrdered = Math.min(inputSeqA, inputSeqB)
               const inputSeqBOrdered = Math.max(inputSeqA, inputSeqB)
               this.db
@@ -639,7 +656,7 @@ export class StoryStore {
         .prepare("UPDATE stories SET status='split',updated_at=? WHERE id=? AND current_revision=?")
         .run(now, parent.id, parent.currentRevision)
       this.clearCurrentMemberIndex(parent.id)
-      return { correction, childIds }
+      return { correction, childIds, independentInputSeqs }
     })
   }
 
@@ -661,6 +678,13 @@ export class StoryStore {
     return true
   }
 
+  isMaterialWithdrawn(inputSeq: number) {
+    if (!positiveInteger(inputSeq)) return false
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM story_material_withdrawals WHERE input_seq=?").get(inputSeq),
+    )
+  }
+
   // 标签、规则或输入版本变化由 worker 调用；这里只原子失效快照，不触发模型或建立永久排除。
   invalidateInputs(inputSeqs: number[]) {
     const invalidated = new Set(inputSeqs.filter(positiveInteger))
@@ -678,11 +702,20 @@ export class StoryStore {
       const original = this.correction(correctionId)
       if (!original) throw new StoryStoreError("correction_not_found")
       if (original.undoneBy) throw new StoryStoreError("correction_already_undone")
+      const topology =
+        original.kind === "merged"
+          ? this.undoMergeTopology(original)
+          : original.kind === "split"
+            ? this.undoSplitTopology(original)
+            : null
       const undo = this.insertCorrection(
         "undo",
         original.storyIds,
-        original.baseRevisions,
-        { undoOf: original.id },
+        topology?.baseRevisions ?? original.baseRevisions,
+        {
+          undoOf: original.id,
+          ...(topology ? { restoredRevisions: topology.restoredRevisions } : {}),
+        },
         original.id,
       )
       this.db
@@ -698,7 +731,8 @@ export class StoryStore {
       this.db
         .prepare("UPDATE story_aggregation_exclusions SET active=0 WHERE correction_id=?")
         .run(original.id)
-      this.markRepairing(original.storyIds)
+      // 合并／拆分的逆向操作已经生成新的不可变 revision；其他纠正仍交给修复队列重算。
+      if (!topology) this.markRepairing(original.storyIds)
       return undo
     })
   }
@@ -707,6 +741,130 @@ export class StoryStore {
     const row = this.db.prepare("SELECT * FROM story_corrections WHERE id=?").get(correctionId)
     if (!row) return null
     return this.correctionFromRow(row as StoryRow)
+  }
+
+  private undoMergeTopology(original: StoryCorrection) {
+    const keptRevision = original.payload.keptRevision
+    const topology = original.storyIds.map((id) => this.requireStory(id))
+    const merged = topology.find((story) => story.status === "merged")
+    const kept = merged ? topology.find((story) => story.id === merged.mergedInto) : undefined
+    const keepStoryId = kept?.id
+    const mergedStoryId = merged?.id
+    const keepBaseRevision = keepStoryId ? original.baseRevisions[keepStoryId] : undefined
+    const mergedBaseRevision = mergedStoryId ? original.baseRevisions[mergedStoryId] : undefined
+    if (
+      !keepStoryId ||
+      !mergedStoryId ||
+      !kept ||
+      !merged ||
+      !positiveInteger(keptRevision) ||
+      !positiveInteger(keepBaseRevision) ||
+      !positiveInteger(mergedBaseRevision)
+    )
+      throw new StoryStoreError("invalid_story")
+
+    // 纠正后的拓扑或 revision 已变化时拒绝撤销，避免覆盖后续人工操作或后台更新。
+    if (
+      kept.status !== "active" ||
+      kept.currentRevision !== keptRevision ||
+      merged.status !== "merged" ||
+      merged.currentRevision !== mergedBaseRevision ||
+      merged.mergedInto !== keepStoryId
+    )
+      throw new StoryStoreError("revision_conflict")
+
+    const keepRestored = this.restoreRevision(keepStoryId, keptRevision, keepBaseRevision, "active")
+    const mergedRestored = this.restoreRevision(
+      mergedStoryId,
+      mergedBaseRevision,
+      mergedBaseRevision,
+      "merged",
+    )
+    return {
+      baseRevisions: { [keepStoryId]: keptRevision, [mergedStoryId]: mergedBaseRevision },
+      restoredRevisions: {
+        [keepStoryId]: keepRestored.revision,
+        [mergedStoryId]: mergedRestored.revision,
+      },
+    }
+  }
+
+  private undoSplitTopology(original: StoryCorrection) {
+    const childIds = Array.isArray(original.payload.childIds)
+      ? original.payload.childIds.filter((id): id is string => typeof id === "string" && isUuid(id))
+      : []
+    const childIdSet = new Set(childIds)
+    const parentIds = original.storyIds.filter((id) => !childIdSet.has(id))
+    const parentStoryId = parentIds.length === 1 ? parentIds[0] : undefined
+    const parentBaseRevision = parentStoryId ? original.baseRevisions[parentStoryId] : undefined
+    const independentInputSeqs = Array.isArray(original.payload.independentInputSeqs)
+      ? original.payload.independentInputSeqs.filter(positiveInteger)
+      : []
+    if (
+      !parentStoryId ||
+      !positiveInteger(parentBaseRevision) ||
+      childIds.length + independentInputSeqs.length < 2 ||
+      childIds.length !== original.storyIds.length - 1 ||
+      childIds.some((id) => !original.storyIds.includes(id))
+    )
+      throw new StoryStoreError("invalid_story")
+
+    const parent = this.requireStory(parentStoryId)
+    const children = childIds.map((id) => this.requireStory(id))
+    if (
+      parent.status !== "split" ||
+      parent.currentRevision !== parentBaseRevision ||
+      parent.splitInto.some((id, index) => id !== childIds[index]) ||
+      parent.splitInto.length !== childIds.length ||
+      children.some((child) => child.status !== "active" || child.currentRevision !== 1)
+    )
+      throw new StoryStoreError("revision_conflict")
+
+    // 先在同一事务内解除本次拆分的跨组约束，随后才能按原成员重建父 Story。
+    this.db
+      .prepare("UPDATE story_aggregation_exclusions SET active=0 WHERE correction_id=?")
+      .run(original.id)
+    const parentRestored = this.restoreRevision(
+      parentStoryId,
+      parentBaseRevision,
+      parentBaseRevision,
+      "split",
+    )
+    const now = parentRestored.createdAt
+    for (const child of children) {
+      const result = this.db
+        .prepare(
+          "UPDATE stories SET status='merged',merged_into=?,updated_at=? WHERE id=? AND status='active' AND current_revision=1",
+        )
+        .run(parentStoryId, now, child.id)
+      if (result.changes !== 1) throw new StoryStoreError("revision_conflict")
+      this.clearCurrentMemberIndex(child.id)
+    }
+    return {
+      baseRevisions: Object.fromEntries([
+        [parentStoryId, parentBaseRevision],
+        ...children.map((child) => [child.id, child.currentRevision] as const),
+      ]),
+      restoredRevisions: { [parentStoryId]: parentRestored.revision },
+    }
+  }
+
+  private restoreRevision(
+    storyId: string,
+    expectedCurrentRevision: number,
+    sourceRevision: number,
+    expectedStatus: StoryStatus,
+  ) {
+    const draft = revisionDraft(this.requireRevision(storyId, sourceRevision))
+    // 旧 revision 只作为恢复意图；当前材料、决策、撤回和排除资格仍走完整校验。
+    this.validateDraft(draft)
+    const result = this.db
+      .prepare(
+        "UPDATE stories SET status='active',merged_into=NULL,updated_at=? WHERE id=? AND status=? AND current_revision=?",
+      )
+      .run(new Date().toISOString(), storyId, expectedStatus, expectedCurrentRevision)
+    if (result.changes !== 1) throw new StoryStoreError("revision_conflict")
+    return this.appendRevision(storyId, expectedCurrentRevision, draft)
   }
 
   private validateDraft(input: StoryRevisionDraft) {
@@ -1036,16 +1194,7 @@ export class StoryStore {
   }
 
   private storyFromRow(row: StoryRow): Story {
-    const splitRows = this.db
-      .prepare("SELECT id FROM stories WHERE status='split' AND id=?")
-      .all(String(row.id))
-    const splitInto = splitRows.length
-      ? (this.db
-          .prepare(
-            "SELECT payload FROM story_corrections WHERE kind='split' AND story_ids LIKE ? ORDER BY created_at DESC LIMIT 1",
-          )
-          .get(`%${String(row.id)}%`) as StoryRow | undefined)
-      : undefined
+    const split = row.status === "split" ? this.splitPayload(String(row.id)) : null
     return {
       id: String(row.id),
       aggregationRuleId: String(row.aggregation_rule_id),
@@ -1054,11 +1203,30 @@ export class StoryStore {
       currentRevision: Number(row.current_revision),
       currentSubstantiveRevision: Number(row.current_substantive_revision),
       mergedInto: row.merged_into === null ? null : String(row.merged_into),
-      splitInto: splitInto
-        ? (JSON.parse(String(splitInto.payload)) as { childIds: string[] }).childIds
-        : [],
+      splitInto: split?.childIds ?? [],
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+    }
+  }
+
+  private splitPayload(storyId: string) {
+    const row = this.db
+      .prepare(
+        "SELECT payload FROM story_corrections WHERE kind='split' AND story_ids LIKE ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(`%${storyId}%`) as StoryRow | undefined
+    if (!row) return null
+    const payload = JSON.parse(String(row.payload)) as {
+      childIds?: unknown
+      independentInputSeqs?: unknown
+    }
+    return {
+      childIds: Array.isArray(payload.childIds)
+        ? payload.childIds.filter((id): id is string => typeof id === "string")
+        : [],
+      independentInputSeqs: Array.isArray(payload.independentInputSeqs)
+        ? payload.independentInputSeqs.filter(positiveInteger)
+        : [],
     }
   }
 
@@ -1085,6 +1253,18 @@ function fingerprint(value: unknown) {
 }
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+function revisionDraft(revision: StoryRevision): StoryRevisionDraft {
+  const {
+    storyId: _storyId,
+    revision: _revision,
+    substantiveRevision: _substantiveRevision,
+    substantiveContentFingerprint: _substantiveContentFingerprint,
+    displayFingerprint: _displayFingerprint,
+    createdAt: _createdAt,
+    ...draft
+  } = revision
+  return clone(draft)
 }
 function normalized(value: string) {
   return value.replace(/\s+/g, " ").trim()
@@ -1138,8 +1318,8 @@ function uniqueIds<T>(ids: T[]): T[] {
 function everyUniqueKnown(ids: string[], known: Set<string>) {
   return ids.length > 0 && uniqueIds(ids).length === ids.length && ids.every((id) => known.has(id))
 }
-function positiveInteger(value: number) {
-  return Number.isInteger(value) && value > 0
+function positiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
 }
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)

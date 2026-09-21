@@ -39,6 +39,7 @@ function add(
   version = "v1",
   current = true,
   content = `证据 ${seq}`,
+  releaseVersion = 1,
 ) {
   const sourceKey = `feed/${seq}`
   const itemId = `entry-${seq}`
@@ -50,7 +51,7 @@ function add(
     version,
     JSON.stringify({ id: itemId, sourceKey, content: `<p>${content}</p>` }),
     "2026-09-12T00:00:00.000Z",
-    1,
+    releaseVersion,
     1,
     "succeeded",
     Number(current),
@@ -60,7 +61,7 @@ function add(
     decisionId,
     seq,
     1,
-    1,
+    releaseVersion,
     "{}",
     "2026-09-12T00:00:00.000Z",
   )
@@ -70,7 +71,7 @@ function add(
     itemId,
     contentVersion: version,
     receivedAt: "2026-09-12T00:00:00.000Z",
-    releaseVersion: 1,
+    releaseVersion,
     generation: 1,
     status: "succeeded",
     current,
@@ -203,6 +204,42 @@ function evidenceId(inputSeq: number, factIndex = 0) {
   return `evidence-${inputSeq}-${factIndex}`
 }
 
+function addSemantic(decision: PublishedDecision) {
+  decision.decision = {
+    ...decision.decision,
+    semantic: {
+      entryId: decision.input.itemId,
+      title: decision.decision.title,
+      summary: decision.decision.summary,
+      disposition: "keep",
+      reason: "ok",
+      aggregation: true,
+      rewrite: true,
+      labels: [],
+      facts: decision.decision.facts,
+    },
+  }
+}
+
+function rulesWithDeniedSource(sourceId: string): RuleSet {
+  const config = rules()
+  config.rules[0]!.order = 1
+  config.rules.unshift({
+    id: "target-policy",
+    ownerId: "owner",
+    name: "目标版本资格",
+    enabled: true,
+    order: 0,
+    when: {
+      anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: [sourceId] }] }],
+    },
+    actions: [{ type: "presentation", policy: { aggregation: "deny", rewrite: "deny" } }],
+    version: 1,
+    executionLocation: "processing_service",
+  })
+  return config
+}
+
 function output(seqs: number[], quotes: string[]) {
   return {
     title: "修复 Story",
@@ -316,6 +353,67 @@ describe("Story repair", () => {
     })
     expect(result.pending).toEqual([{ storyId: original.storyId, reason: "rule_unavailable" }])
     expect(stories.resolveLink(original.storyId)).toMatchObject({ kind: "repairing" })
+  })
+
+  it("混合 release 按成员最高目标版本重校验后完成修复", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const old = add(db, 1, "v1", true, "旧版本证据", 1)
+    addSemantic(old)
+    const current = add(db, 2, "v1", true, "新版本证据", 2)
+    const removed = add(db, 3, "v1", true, "待移除证据", 2)
+    const original = stories.create(draft([old, current, removed]))
+    stories.removeMember(original.storyId, 1, 3)
+
+    const result = await runStoryRepair({
+      decisions: [old, current, removed],
+      ruleSets: [rules(), rules()],
+      releasedRuleSets: [
+        { version: 1, config: rules() },
+        { version: 2, config: rules() },
+      ],
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: execute(output([1, 2], ["旧版本证据", "新版本证据"])),
+    })
+
+    expect(result.pending).toEqual([])
+    expect(result.repaired).toEqual([{ storyId: original.storyId, revision: 2 }])
+    expect(stories.currentSnapshot(original.storyId)?.appliedRuleSetVersion).toBe(2)
+  })
+
+  it("混合 release 不沿用旧 allow，按目标版本将失去资格的成员移出修复", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const old = add(db, 1, "v1", true, "旧版本证据", 1)
+    addSemantic(old)
+    const current = add(db, 2, "v1", true, "新版本证据", 2)
+    const removed = add(db, 3, "v1", true, "待移除证据", 2)
+    const original = stories.create(draft([old, current, removed]))
+    stories.removeMember(original.storyId, 1, 3)
+    const targetRules = rulesWithDeniedSource("feed/1")
+
+    const result = await runStoryRepair({
+      decisions: [old, current, removed],
+      ruleSets: [rules(), targetRules],
+      releasedRuleSets: [
+        { version: 1, config: rules() },
+        { version: 2, config: targetRules },
+      ],
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: async () => {
+        throw new Error("目标版本排除后不足两份，不应调用模型")
+      },
+    })
+
+    expect(result.pending).toEqual([])
+    expect(result.independent).toEqual([
+      { storyId: original.storyId, inputSeqs: [2], reason: "insufficient_sources" },
+    ])
+    expect(stories.resolveLink(original.storyId)).toMatchObject({ kind: "independent" })
   })
 
   it("撤回材料后旧事实和推断不进入新 revision；不足两份进入独立入口", async () => {

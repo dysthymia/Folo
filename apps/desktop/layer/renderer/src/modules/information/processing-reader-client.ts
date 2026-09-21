@@ -261,7 +261,12 @@ const revisionSchema = z
 const storyLinkSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("current"), story: storySchema, revision: revisionSchema }),
   z.object({ kind: z.literal("merged"), story: storySchema, mergedInto: z.string() }),
-  z.object({ kind: z.literal("split"), story: storySchema, splitInto: z.array(z.string()) }),
+  z.object({
+    kind: z.literal("split"),
+    story: storySchema,
+    splitInto: z.array(z.string()),
+    independentInputSeqs: z.array(z.number().int().positive()),
+  }),
   z.object({ kind: z.literal("repairing"), story: storySchema }),
   z.object({ kind: z.literal("independent"), story: storySchema, reason: z.string() }),
   z.object({ kind: z.literal("missing") }),
@@ -332,7 +337,13 @@ const mergeResultSchema = z
   .object({ correction: correctionSchema, revision: revisionSchema })
   .strict()
 const splitResultSchema = z.union([
-  z.object({ correction: correctionSchema, childIds: z.array(z.uuid()) }).strict(),
+  z
+    .object({
+      correction: correctionSchema,
+      childIds: z.array(z.uuid()),
+      independentInputSeqs: z.array(z.number().int().positive()),
+    })
+    .strict(),
   z.object({ correction: correctionSchema, revisions: z.array(revisionSchema) }).strict(),
 ])
 const withdrawalResultSchema = correctionSchema

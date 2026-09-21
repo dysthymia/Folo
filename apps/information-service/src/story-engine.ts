@@ -29,6 +29,8 @@ const storyModelOutputSchema = z
             existingStoryId: z.string().uuid().nullable(),
             title: z.string().min(1).max(500),
             body: z.string().min(1).max(12000),
+            retainedSentenceIds: z.array(z.string().min(1).max(120)).max(100),
+            retainedFactIds: z.array(z.string().min(1).max(120)).max(100),
             sentences: z
               .array(
                 z
@@ -48,6 +50,7 @@ const storyModelOutputSchema = z
                     kind: z.enum(["fact", "source_claim", "inference"]),
                     sentenceIndexes: z.array(z.number().int().nonnegative()).min(1).max(20),
                     dependsOnFactIndexes: z.array(z.number().int().nonnegative()).max(30),
+                    dependsOnRetainedFactIds: z.array(z.string().min(1).max(120)).max(30),
                   })
                   .strict(),
               )
@@ -186,7 +189,7 @@ export async function runStoryAggregation(
       const cacheKey = fingerprint({
         provider: config.provider,
         model: config.model,
-        promptVersion: 5,
+        promptVersion: 6,
         runtimeDir: options.runtimeDir,
         ruleId: rule.id,
         ruleVersion: rule.version,
@@ -457,14 +460,49 @@ function draftFromGroup(
   if (!input.stories.canAggregate(input.ruleId, input.scopeVersion, memberSeqs))
     throw new Error("excluded_aggregation")
   const prefix = existing ? `revision-${existing.story.currentRevision + 1}` : "base"
+  if (!existing && (group.retainedSentenceIds.length > 0 || group.retainedFactIds.length > 0))
+    throw new Error("retained_content_without_story")
+  if (
+    new Set(group.retainedSentenceIds).size !== group.retainedSentenceIds.length ||
+    new Set(group.retainedFactIds).size !== group.retainedFactIds.length
+  )
+    throw new Error("duplicate_retained_content")
+  const currentSentenceById = new Map(
+    existing?.revision.sentences.map((sentence) => [sentence.id, sentence]) ?? [],
+  )
+  const retainedSentences = group.retainedSentenceIds.map((id) => {
+    const sentence = currentSentenceById.get(id)
+    if (!sentence) throw new Error("unknown_retained_sentence")
+    return sentence
+  })
+  const retainedSentenceIds = new Set(group.retainedSentenceIds)
+  const retainedCitationIds = new Set(retainedSentences.flatMap((sentence) => sentence.citationIds))
+  const currentFactById = new Map(existing?.revision.facts.map((fact) => [fact.id, fact]) ?? [])
+  const retainedFacts = group.retainedFactIds.map((id) => {
+    const fact = currentFactById.get(id)
+    if (!fact) throw new Error("unknown_retained_fact")
+    return fact
+  })
+  const retainedFactIds = new Set(group.retainedFactIds)
+  if (
+    retainedFacts.some(
+      (fact) =>
+        !fact.citationIds.every((id) => retainedCitationIds.has(id)) ||
+        !fact.dependsOnFactIds.every((id) => retainedFactIds.has(id)),
+    )
+  )
+    throw new Error("incomplete_retained_fact")
   const spans = new Map<string, StoryRevisionDraft["sourceSpans"][number]>(
     (existing?.revision.sourceSpans ?? []).map((span) => [
       `${span.inputSeq}\u0000${span.quote}`,
       span,
     ]),
   )
-  const citations: StoryRevisionDraft["citations"] = [...(existing?.revision.citations ?? [])]
-  const sentences: StoryRevisionDraft["sentences"] = [...(existing?.revision.sentences ?? [])]
+  // 更新输出描述完整的 current revision；只复制模型明确保留且依赖闭合的旧句段与事实。
+  const citations: StoryRevisionDraft["citations"] = (existing?.revision.citations ?? []).filter(
+    (citation) => retainedSentenceIds.has(citation.sentenceId),
+  )
+  const sentences: StoryRevisionDraft["sentences"] = [...retainedSentences]
   const newSentences = group.sentences.map((sentence, sentenceIndex) => {
     const id = `sentence-${prefix}-${sentenceIndex}`
     const citationIds = sentenceRefs[sentenceIndex]!.map(({ candidate, quote }, citationIndex) => {
@@ -498,8 +536,10 @@ function draftFromGroup(
       fact.dependsOnFactIndexes.some((index) => index >= group.facts.length || index === factIndex)
     )
       throw new Error("invalid_fact_dependency")
+    if (fact.dependsOnRetainedFactIds.some((id) => !retainedFactIds.has(id)))
+      throw new Error("invalid_retained_fact_dependency")
     if (fact.kind === "inference" && fact.dependsOnFactIndexes.length === 0)
-      throw new Error("unsupported_inference")
+      if (fact.dependsOnRetainedFactIds.length === 0) throw new Error("unsupported_inference")
     return {
       id: `fact-${prefix}-${factIndex}`,
       kind: fact.kind as StoryFactKind,
@@ -507,30 +547,34 @@ function draftFromGroup(
       citationIds: [
         ...new Set(fact.sentenceIndexes.flatMap((index) => newSentences[index]!.citationIds)),
       ],
-      dependsOnFactIds: fact.dependsOnFactIndexes.map((index) => `fact-${prefix}-${index}`),
+      dependsOnFactIds: [
+        ...fact.dependsOnRetainedFactIds,
+        ...fact.dependsOnFactIndexes.map((index) => `fact-${prefix}-${index}`),
+      ],
     }
   })
   if (facts.some((fact) => fact.citationIds.length === 0)) throw new Error("fact_without_citation")
-  if (memberSeqs.some((inputSeq) => quoteOnlyInputs.has(inputSeq))) {
+  for (const fact of group.facts) {
+    const usesQuoteOnly = fact.sentenceIndexes.some((index) =>
+      sentenceRefs[index]!.some((reference) => quoteOnlyInputs.has(reference.candidate.input.seq)),
+    )
     if (
-      group.facts.some(
-        (fact) =>
-          fact.kind === "inference" ||
-          !fact.sentenceIndexes.some(
-            (index) => normalize(fact.text) === normalize(group.sentences[index]!.text),
-          ),
-      )
+      usesQuoteOnly &&
+      (fact.kind === "inference" ||
+        !fact.sentenceIndexes.some(
+          (index) => normalize(fact.text) === normalize(group.sentences[index]!.text),
+        ))
     )
       throw new Error("quote_only_fact_rewritten")
   }
-  const allFacts = [...(existing?.revision.facts ?? []), ...facts]
+  const allFacts = [...retainedFacts, ...facts]
   const appliedRuleSetVersion = Math.max(
     existing?.revision.appliedRuleSetVersion ?? 0,
     ...newMemberSeqs.map((inputSeq) => candidateBySeq.get(inputSeq)!.input.releaseVersion ?? 0),
   )
   return {
     title: group.title,
-    // 既有句段与事实一律保留；模型自由 body 不得绕过句段引用或静默删除历史材料。
+    // body 只由本 revision 选中的可追溯句段构造，模型自由正文不能绕过引用目录。
     body: sentences.map((sentence) => sentence.text).join("\n\n"),
     aggregationRuleId: input.ruleId,
     aggregationScopeVersion: input.scopeVersion,
@@ -638,7 +682,8 @@ function modelPrompt(input: {
 聚合规则 ID：${input.ruleId}；模式：${input.mode}。
 ${input.mode === "same_event" ? "只把确实同一事件的多来源材料分组；同主题不同事件必须分开。" : "按明确主题与时间窗口组织多个事件；不要声称它们是同一事件。"}
 新建 Story 指令：\n${input.action.createPrompt}\n更新既有 Story 指令：\n${input.action.updatePrompt || input.action.createPrompt}
-新建 group 至少引用两个不同候选 inputSeq。更新既有 Story 时，既有成员、引用与事实会由服务端自动保留，因此 group 可以只引用一条新增候选材料；sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId，绝不能输出 quote、citationId、fragmentId 或 sourceSpanId。服务端会从该 inputSeq 的 evidenceId 精确还原原文并验证它们。facts 的 sentenceIndexes 指向本组新增 sentences，下标从 0 开始；inference 必须给出 dependsOnFactIndexes。
+新建 group 至少引用两个不同候选 inputSeq，且 retainedSentenceIds、retainedFactIds 必须为空。更新既有 Story 时，group 描述目标 current revision：retainedSentenceIds 和 retainedFactIds 只列仍然有效、需要逐字保留的既有对象；被反驳、修正或不再成立的旧对象不要列入。保留 fact 时必须同时保留其引用句段和全部依赖 fact。新增 fact 的 dependsOnFactIndexes 指向本组新增 facts，dependsOnRetainedFactIds 指向本组明确保留的既有 facts；inference 至少依赖其中一种 fact。既有成员和原文证据目录仍由服务端保留，因此 group 可以只引用一条新增候选材料。
+sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId，绝不能输出 quote、citationId、fragmentId 或 sourceSpanId。服务端会从该 inputSeq 的 evidenceId 精确还原原文并验证它们。facts 的 sentenceIndexes 指向本组新增 sentences，下标从 0 开始。
 候选的 quoteOnly=true 表示该材料禁止改写：引用它的 sentence.text 必须逐字等于该 sentence 的每个 evidenceId 对应原文；对应 fact.text 也必须逐字等于引用 sentence，且不得使用 inference。无法满足时不要输出该 group。
 候选材料：\n${JSON.stringify(
     input.candidates.map((candidate) => ({
@@ -664,6 +709,7 @@ ${input.mode === "same_event" ? "只把确实同一事件的多来源材料分�
       body: item.revision.body,
       members: item.revision.members,
       sourceSpans: item.revision.sourceSpans.map((span) => ({
+        id: span.id,
         inputSeq: span.inputSeq,
         quote: span.quote,
         sourceRole: span.sourceRole,

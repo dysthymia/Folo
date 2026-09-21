@@ -244,15 +244,22 @@ export function ProcessingReader() {
 
   const splitSelectedStory = () => {
     if (selected?.kind !== "current") return
-    const groups = [1, 2].map((group) =>
-      selected.revision.members
-        .map((member) => member.inputSeq)
-        .filter((inputSeq) => splitAssignments[inputSeq] === group),
-    )
-    if (groups.some((group) => group.length < 2)) return
+    const groups = [1, 2]
+      .map((group) =>
+        selected.revision.members
+          .map((member) => member.inputSeq)
+          .filter((inputSeq) => splitAssignments[inputSeq] === group),
+      )
+      .filter((group) => group.length > 0)
+    const independentInputSeqs = selected.revision.members
+      .map((member) => member.inputSeq)
+      .filter((inputSeq) => (splitAssignments[inputSeq] ?? 0) === 0)
+    if (groups.some((group) => group.length < 2) || groups.length + independentInputSeqs.length < 2)
+      return
     void mutate(`stories/${selected.story.id}/split`, mutationSchemas.split, {
       expectedRevision: selected.revision.revision,
       groups,
+      independentInputSeqs,
     })
   }
 
@@ -301,7 +308,15 @@ export function ProcessingReader() {
       ? selected.revision.members.filter((member) => splitAssignments[member.inputSeq] === group)
       : [],
   )
-  const canSplit = splitGroups.every((group) => group.length >= 2)
+  const populatedSplitGroups = splitGroups.filter((group) => group.length > 0)
+  const independentSplitCount =
+    selected?.kind === "current"
+      ? selected.revision.members.filter((member) => (splitAssignments[member.inputSeq] ?? 0) === 0)
+          .length
+      : 0
+  const canSplit =
+    populatedSplitGroups.every((group) => group.length >= 2) &&
+    populatedSplitGroups.length + independentSplitCount >= 2
   const changeView = (nextView: ReadingView) => void load("page", nextView, 0)
   const renderEntry = (
     item:

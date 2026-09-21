@@ -172,6 +172,8 @@ function modelOutput(existingStoryId: string | null = null) {
         existingStoryId,
         title: "同一事件",
         body: "两份来源都确认了该事件。",
+        retainedSentenceIds: [],
+        retainedFactIds: [],
         sentences: [
           {
             text: "两份来源都提供了可核查事实。",
@@ -187,6 +189,7 @@ function modelOutput(existingStoryId: string | null = null) {
             kind: "fact",
             sentenceIndexes: [0],
             dependsOnFactIndexes: [],
+            dependsOnRetainedFactIds: [],
           },
         ],
       },
@@ -207,6 +210,8 @@ function pairsOutput(sequences: number[]) {
         existingStoryId: null,
         title: `事件 ${first}-${second}`,
         body: `来源 ${first} 与 ${second} 的事实。`,
+        retainedSentenceIds: [],
+        retainedFactIds: [],
         sentences: [
           {
             text: `来源 ${first} 与 ${second} 的可核查事实。`,
@@ -222,6 +227,7 @@ function pairsOutput(sequences: number[]) {
             kind: "fact",
             sentenceIndexes: [0],
             dependsOnFactIndexes: [],
+            dependsOnRetainedFactIds: [],
           },
         ],
       }
@@ -490,6 +496,8 @@ describe("Story 模型聚合", () => {
           existingStoryId: null,
           title: "原文摘引",
           body: "模型自由正文不会被使用",
+          retainedSentenceIds: [] as string[],
+          retainedFactIds: [],
           sentences: [
             {
               text: "来源 1 的可核查事实。",
@@ -506,12 +514,14 @@ describe("Story 模型聚合", () => {
               kind: "fact",
               sentenceIndexes: [0],
               dependsOnFactIndexes: [],
+              dependsOnRetainedFactIds: [] as string[],
             },
             {
               text: "来源 2 的可核查事实。",
               kind: "fact",
               sentenceIndexes: [1],
               dependsOnFactIndexes: [],
+              dependsOnRetainedFactIds: [],
             },
           ],
         },
@@ -555,6 +565,8 @@ describe("Story 模型聚合", () => {
               existingStoryId: storyId,
               title: "同一持续事件",
               body: "自由正文不参与持久化",
+              retainedSentenceIds: calls === 1 ? [] : ["sentence-base-0"],
+              retainedFactIds: calls === 1 ? [] : ["fact-base-0"],
               sentences: [
                 {
                   text: `第 ${calls} 批来源事实。`,
@@ -570,6 +582,7 @@ describe("Story 模型聚合", () => {
                   kind: "fact",
                   sentenceIndexes: [0],
                   dependsOnFactIndexes: [],
+                  dependsOnRetainedFactIds: [],
                 },
               ],
             },
@@ -611,6 +624,8 @@ describe("Story 模型聚合", () => {
               existingStoryId: storyId,
               title: "同一持续事件",
               body: "自由正文不参与持久化",
+              retainedSentenceIds: ["sentence-base-0", "sentence-revision-2-0"],
+              retainedFactIds: ["fact-base-0", "fact-revision-2-0"],
               sentences: [
                 {
                   text: "来源 23 的可核查事实。",
@@ -620,9 +635,10 @@ describe("Story 模型聚合", () => {
               facts: [
                 {
                   text: "来源 23 的可核查事实。",
-                  kind: "fact",
+                  kind: "inference",
                   sentenceIndexes: [0],
                   dependsOnFactIndexes: [],
+                  dependsOnRetainedFactIds: ["fact-base-0"],
                 },
               ],
             },
@@ -638,6 +654,144 @@ describe("Story 模型聚合", () => {
     expect(stories.currentSnapshot(storyId)?.sourceSpans.map((span) => span.quote)).toContain(
       "来源 1 的可核查事实。",
     )
+    expect(stories.currentSnapshot(storyId)?.facts.at(-1)?.dependsOnFactIds).toEqual([
+      "fact-base-0",
+    ])
+  })
+
+  it("后续反驳可撤回旧结论并生成不可变的新 revision", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const created = await runStoryAggregation({
+      decisions: [published(db, 1), published(db, 2)],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([modelOutput()]),
+    })
+    const storyId = created.created[0]!.storyId
+    const original = stories.currentSnapshot(storyId)!
+    const correction = {
+      groups: [
+        {
+          existingStoryId: storyId,
+          title: "事件结论已修正",
+          body: "模型自由正文不会被使用",
+          retainedSentenceIds: [],
+          retainedFactIds: [],
+          sentences: [
+            {
+              text: "来源 3 的可核查事实。",
+              sources: [{ inputSeq: 3, evidenceId: evidenceId(3) }],
+            },
+          ],
+          facts: [
+            {
+              text: "旧结论已被后续来源修正。",
+              kind: "source_claim",
+              sentenceIndexes: [0],
+              dependsOnFactIndexes: [],
+              dependsOnRetainedFactIds: [],
+            },
+          ],
+        },
+      ],
+    }
+    const updated = await runStoryAggregation({
+      decisions: [published(db, 3)],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([correction]),
+    })
+
+    const current = stories.currentSnapshot(storyId)!
+    expect(updated.updated).toEqual([{ storyId, ruleId: "aggregate-0", revision: 2 }])
+    expect(current.body).toBe("来源 3 的可核查事实。")
+    expect(current.facts.map((fact) => fact.text)).toEqual(["旧结论已被后续来源修正。"])
+    expect(current.members.map((member) => member.inputSeq)).toEqual([1, 2, 3])
+    expect(current.sourceSpans.map((span) => span.inputSeq)).toEqual([1, 2, 3])
+    expect(stories.revision(storyId, 1)).toEqual(original)
+  })
+
+  it("拒绝保留引用句段或依赖不完整的旧事实", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const created = await runStoryAggregation({
+      decisions: [published(db, 1), published(db, 2)],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([modelOutput()]),
+    })
+    const storyId = created.created[0]!.storyId
+    const invalid = {
+      groups: [
+        {
+          existingStoryId: storyId,
+          title: "不完整保留",
+          body: "模型自由正文不会被使用",
+          retainedSentenceIds: [] as string[],
+          retainedFactIds: ["fact-base-0"] as string[],
+          sentences: [
+            {
+              text: "来源 3 的可核查事实。",
+              sources: [{ inputSeq: 3, evidenceId: evidenceId(3) }],
+            },
+          ],
+          facts: [
+            {
+              text: "新增事实。",
+              kind: "fact",
+              sentenceIndexes: [0],
+              dependsOnFactIndexes: [],
+              dependsOnRetainedFactIds: [] as string[],
+            },
+          ],
+        },
+      ],
+    }
+    const result = await runStoryAggregation({
+      decisions: [published(db, 3)],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([invalid]),
+    })
+
+    expect(result.updated).toEqual([])
+    expect(result.failures).toEqual([
+      { ruleId: "aggregate-0", reason: "invalid_model_output", inputSeqs: [3] },
+    ])
+    expect(stories.story(storyId)?.currentRevision).toBe(1)
+
+    const invalidDependency = structuredClone(invalid)
+    invalidDependency.groups[0]!.retainedSentenceIds = ["sentence-base-0"]
+    invalidDependency.groups[0]!.retainedFactIds = ["fact-base-0"]
+    invalidDependency.groups[0]!.sentences[0]!.sources = [
+      { inputSeq: 4, evidenceId: evidenceId(4) },
+    ]
+    invalidDependency.groups[0]!.facts[0]!.dependsOnRetainedFactIds = ["missing-fact"]
+    const dependencyResult = await runStoryAggregation({
+      decisions: [published(db, 4)],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([invalidDependency]),
+    })
+    expect(dependencyResult.updated).toEqual([])
+    expect(dependencyResult.failures).toEqual([
+      { ruleId: "aggregate-0", reason: "invalid_model_output", inputSeqs: [4] },
+    ])
+    expect(stories.story(storyId)?.currentRevision).toBe(1)
   })
 
   it(">100 候选按连续批次全部处理，不因首批容量饥饿", async () => {

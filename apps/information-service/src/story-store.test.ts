@@ -241,6 +241,16 @@ describe("Story 持久化与版本", () => {
     expect(store.currentSnapshot(keepId)?.members.map((member) => member.inputSeq)).toEqual([
       1, 2, 3, 4,
     ])
+
+    const undo = store.undoCorrection(result.correction.id)
+    expect(undo.payload.restoredRevisions).toEqual({ [keepId]: 3, [mergedId]: 2 })
+    expect(store.currentSnapshot(keepId)?.members.map((member) => member.inputSeq)).toEqual([1, 2])
+    expect(store.currentSnapshot(mergedId)?.members.map((member) => member.inputSeq)).toEqual([
+      3, 4,
+    ])
+    expect(store.resolveLink(mergedId)).toMatchObject({ kind: "current" })
+    // 恢复内容与原实质版本相同，不制造新的未读提醒。
+    expect(store.readStatus(mergedId, "reader").unread).toBe(false)
   })
 
   it("拆分后旧链接保留子 Story，跨组成员不会在下一轮自动误合并", () => {
@@ -266,6 +276,35 @@ describe("Story 持久化与版本", () => {
     expect(() => store.create(draft([1, 3]))).toThrow("invalid_reference")
     expect(store.canAggregate("aggregation-rule", "scope-v1", [1, 2])).toBe(true)
     expect(store.readStatus(firstChildId, "reader").unread).toBe(true)
+
+    store.undoCorrection(result.correction.id)
+    expect(store.resolveLink(parentId)).toMatchObject({ kind: "current" })
+    expect(store.currentSnapshot(parentId)?.members.map((member) => member.inputSeq)).toEqual([
+      1, 2, 3, 4,
+    ])
+    expect(store.resolveLink(firstChildId)).toMatchObject({ kind: "merged", mergedInto: parentId })
+    expect(store.resolveLink(secondChildId)).toMatchObject({ kind: "merged", mergedInto: parentId })
+    expect(store.canAggregate("aggregation-rule", "scope-v1", [1, 3])).toBe(true)
+  })
+
+  it("拓扑纠正后 revision 已推进时拒绝撤销且不产生半恢复状态", () => {
+    const { store } = fixture()
+    const keepId = "00000000-0000-4000-8000-000000000051"
+    const mergedId = "00000000-0000-4000-8000-000000000052"
+    const kept = store.create(draft([1, 2]), keepId)
+    const merged = store.create(draft([3, 4]), mergedId)
+    const result = store.merge({
+      keepStoryId: keepId,
+      mergeStoryId: mergedId,
+      expectedKeepRevision: kept.revision,
+      expectedMergedRevision: merged.revision,
+      revision: draft([1, 2, 3, 4]),
+    })
+    store.appendRevision(keepId, result.revision.revision, draft([1, 2, 3, 4], "后续更新"))
+
+    expect(() => store.undoCorrection(result.correction.id)).toThrow("revision_conflict")
+    expect(store.resolveLink(mergedId)).toMatchObject({ kind: "merged", mergedInto: keepId })
+    expect(store.correction(result.correction.id)?.undoneBy).toBeNull()
   })
 
   it("撤回材料立即停止当前正文；撤销纠正只记录重算，不复活失效材料", () => {

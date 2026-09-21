@@ -405,7 +405,8 @@ export function processingApi(
     const input = z
       .object({
         expectedRevision: positiveInteger,
-        groups: z.array(z.array(positiveInteger).min(1).max(10000)).min(2).max(1000),
+        groups: z.array(z.array(positiveInteger).min(2).max(10000)).max(1000),
+        independentInputSeqs: z.array(positiveInteger).max(10000).default([]),
       })
       .strict()
       .parse(body)
