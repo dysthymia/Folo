@@ -35,6 +35,7 @@ import {
 import { ProcessingPresetPicker } from "./processing-preset-picker"
 import { defaultProcessingSchedule, ProcessingRunSettings } from "./processing-run-settings"
 import { ProcessingTags } from "./processing-tags"
+import { ProcessingTrialPanel } from "./processing-trial-panel"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
 
 const client = createProcessingClient(getOneTimeToken)
@@ -729,6 +730,20 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                     ))}
                   </div>
                 )}
+                <ProcessingTrialPanel
+                  config={draft}
+                  sourceKey={
+                    editor.items.find(
+                      (item) => JSON.stringify([item.sourceKey, item.id]) === sample,
+                    )?.sourceKey
+                  }
+                  entryId={
+                    editor.items.find(
+                      (item) => JSON.stringify([item.sourceKey, item.id]) === sample,
+                    )?.id
+                  }
+                  valid={valid}
+                />
               </section>
             </fieldset>
             <ProcessingRunSettings

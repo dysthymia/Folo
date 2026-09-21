@@ -236,6 +236,60 @@ export const processingPreviewWireSchema = z
 
 const previewSchema = processingPreviewWireSchema
 
+const trialResultSchema = z
+  .object({
+    title: z.string(),
+    summary: z.string(),
+    reason: z.string(),
+    status: z.enum(["keep", "hide", "needs_context"]),
+    policy: presentationPolicySchema,
+    facts: z.array(
+      z
+        .object({
+          text: z.string(),
+          quote: z.string(),
+          kind: z.enum(["fact", "source_claim", "inference"]),
+        })
+        .strict(),
+    ),
+  })
+  .strict()
+export const processingTrialSchema = z
+  .object({
+    entryId: z.string(),
+    sourceKey: z.string(),
+    original: z.object({ title: z.string(), text: z.string() }).strict(),
+    before: trialResultSchema.nullable(),
+    beforeReleaseVersion: z.number().int().positive().nullable(),
+    after: trialResultSchema,
+    model: z.string(),
+    usage: z
+      .object({ inputTokens: z.number(), outputTokens: z.number(), cachedInputTokens: z.number() })
+      .strict()
+      .nullable(),
+    aggregation: z.array(
+      z
+        .object({
+          ruleId: z.string(),
+          mode: z.enum(["same_event", "topic"]),
+          count: z.number().int().nonnegative(),
+          candidates: z.array(
+            z
+              .object({
+                inputSeq: z.number().int().positive(),
+                title: z.string(),
+                sourceKey: z.string(),
+                entryId: z.string(),
+              })
+              .strict(),
+          ),
+        })
+        .strict(),
+    ),
+  })
+  .strict()
+export type ProcessingTrialResult = z.infer<typeof processingTrialSchema>
+
 const scheduleConfigSchema = z
   .object({
     sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10_000),
@@ -426,6 +480,12 @@ export function createProcessingClient(
       }),
     preview: (config: RuleSet, sourceKey: string, entryId: string, signal: AbortSignal) =>
       request("rules/preview", "POST", previewSchema, signal, {
+        config: ruleSetSchema.parse(config),
+        sourceKey,
+        entryId,
+      }),
+    trial: (config: RuleSet, sourceKey: string, entryId: string, signal: AbortSignal) =>
+      request("rules/trial", "POST", processingTrialSchema, signal, {
         config: ruleSetSchema.parse(config),
         sourceKey,
         entryId,

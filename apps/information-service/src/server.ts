@@ -20,6 +20,8 @@ import { NotionExportError } from "./notion-export"
 import { ProcessingFeedbackError } from "./processing-feedback"
 import { ProcessingReadingError } from "./processing-reading-store"
 import { ProcessingScheduleError } from "./processing-schedule"
+import type { ProcessingTrial } from "./processing-trial"
+import { ProcessingTrialError } from "./processing-trial"
 import { errorCode } from "./service"
 import type { Store } from "./store"
 import { StoryStoreError } from "./story-store"
@@ -51,7 +53,7 @@ export function createInformationServer(
   port: number,
   publicOrigin: string,
   authenticate: (token: string) => Promise<void>,
-  ai?: { config: AIConfigStore; chat: FoloChat; signal?: AbortSignal },
+  ai?: { config: AIConfigStore; chat: FoloChat; signal?: AbortSignal; trial?: ProcessingTrial },
   mainWebRoot?: string,
   externalHandlers: Array<{
     handle(method: string, path: string, body: unknown): Promise<object | undefined>
@@ -123,12 +125,32 @@ export function createInformationServer(
           const body = method === "GET" ? undefined : await readJson(request, 1024 * 1024)
           // 外接服务复用同一登录与同源校验，只有对应的显式操作才触发网络请求。
           const path = url.pathname.slice("/information/v1".length)
+          if (path === "/rules/trial" && method === "POST") {
+            if (!ai?.trial) return json(response, 503, { error: "ai_not_configured" })
+            const controller = new AbortController()
+            const abort = () => controller.abort()
+            response.once("close", abort)
+            ai.signal?.addEventListener("abort", abort, { once: true })
+            if (ai.signal?.aborted) abort()
+            try {
+              return json(response, 200, await ai.trial.run(body, controller.signal))
+            } finally {
+              response.removeListener("close", abort)
+              ai.signal?.removeEventListener("abort", abort)
+            }
+          }
           for (const handler of externalHandlers) {
             const result = await handler.handle(method, path, body)
             if (result !== undefined) return json(response, 200, result)
           }
           return json(response, 200, automationApi(store, method, path, body))
         } catch (error) {
+          if (error instanceof ProcessingTrialError)
+            return json(
+              response,
+              error.code === "stale_target" || error.code === "trial_busy" ? 409 : 400,
+              { error: error.code },
+            )
           if (error instanceof ProcessingFeedbackError || error instanceof ProcessingReadingError)
             return json(response, error.code === "stale_target" ? 409 : 400, { error: error.code })
           if (error instanceof XConfigError || error instanceof XQueryError)

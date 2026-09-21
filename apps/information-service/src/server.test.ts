@@ -11,6 +11,7 @@ import { AIConfigStore } from "./ai-config"
 import { FoloChat } from "./chat"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
+import { ProcessingTrial } from "./processing-trial"
 import { createInformationServer, verifyWebBuild } from "./server"
 import { Store } from "./store"
 import { WebAuthError } from "./web-auth"
@@ -24,6 +25,7 @@ describe("information HTTP server", () => {
   let port: number
   let aiConfig: AIConfigStore
   let chat: FoloChat
+  let trial: ProcessingTrial
   const authenticate = vi.fn<(token: string) => Promise<void>>()
 
   const productionHtml =
@@ -77,6 +79,7 @@ describe("information HTTP server", () => {
       reader: async () =>
         new FoloReader({ apiUrl: "https://api.folo.is", token: "unused-test-token" }),
     })
+    trial = new ProcessingTrial({ store, aiConfig, runtimeDir: directory })
     server = createInformationServer(
       store,
       webRoot,
@@ -86,6 +89,7 @@ describe("information HTTP server", () => {
       {
         config: aiConfig,
         chat,
+        trial,
       },
       undefined,
       [externalApi({ store, configPath: join(directory, "integrations.json") })],
@@ -260,6 +264,24 @@ describe("information HTTP server", () => {
     Origin: "http://local.folo.is",
     "X-Folo-One-Time-Token": "valid-one-time-token",
   }
+  it("AI 试运行仍先检查同源登录，仅显式 trial 请求执行模型", async () => {
+    const run = vi.spyOn(trial, "run").mockRejectedValue(new Error("model_failure"))
+    const unauthorized = await request("/information/v1/rules/trial", {
+      method: "POST",
+      headers: { Host: "local.folo.is", Origin: "http://local.folo.is" },
+      body: {},
+    })
+    expect(unauthorized.status).toBe(401)
+    expect(run).not.toHaveBeenCalled()
+    const result = await request("/information/v1/rules/trial", {
+      method: "POST",
+      headers: signedHeaders,
+      body: { sample: "test" },
+    })
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(result.status).toBe(500)
+    expect(JSON.parse(result.body)).toEqual({ error: "internal_error" })
+  })
   it("规则接口复用主站授权，草稿冲突与真实原文预览可追踪", async () => {
     // 新接口与摘要/聊天共用账号核验，不能用旧 Cookie 绕过一次性凭据。
     expect(

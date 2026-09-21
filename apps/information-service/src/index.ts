@@ -12,6 +12,7 @@ import { xPostId } from "./content-identity"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
 import { diagnosticsApi } from "./processing-diagnostics"
+import { ProcessingTrial } from "./processing-trial"
 import { runProcessingWorker } from "./processing-worker"
 import { createInformationServer, verifyWebBuild } from "./server"
 import { errorCode, InformationService, readCredential } from "./service"
@@ -168,6 +169,7 @@ async function main() {
             {
               config: aiConfig,
               chat: new FoloChat({ store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") }),
+              trial: new ProcessingTrial({ store, aiConfig, runtimeDir: join(dataDir, "runtime") }),
               signal: controller.signal,
             },
             mainWebRoot,
