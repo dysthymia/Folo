@@ -709,6 +709,45 @@ export const getSemanticDuplicateEntryRole = (entryId: string) =>
       )
     : null
 
+export interface SemanticDuplicateRoleDetail {
+  role: Exclude<SemanticDuplicateEntryRole, null>
+  /** Set when the role is `duplicate`; points at the entry that kept the content. */
+  keepEntryId: string | null
+  /** Set when the role is `keeper`; the entries merged into it. */
+  mergedEntryIds: string[]
+}
+
+/**
+ * Role plus the counterpart entries, so callers can explain a merge without
+ * re-walking the decision list themselves.
+ */
+export const getSemanticDuplicateRoleDetail = (
+  entryId: string,
+): SemanticDuplicateRoleDetail | null => {
+  if (!isSemanticDedupeEligibleEntry(entryId)) return null
+
+  const decisions = useSemanticDedupeStore.getState().decisions
+  const mergedEntryIds: string[] = []
+
+  for (const decision of Object.values(decisions)) {
+    if (!isConfidentDuplicateDecision(decision)) continue
+
+    if (decision.hideEntryId === entryId) {
+      return {
+        keepEntryId: decision.keepEntryId ?? null,
+        mergedEntryIds: [],
+        role: "duplicate",
+      }
+    }
+
+    if (decision.keepEntryId === entryId && decision.hideEntryId) {
+      mergedEntryIds.push(decision.hideEntryId)
+    }
+  }
+
+  return mergedEntryIds.length > 0 ? { keepEntryId: null, mergedEntryIds, role: "keeper" } : null
+}
+
 export const useSemanticDuplicateEntryRole = (entryId: string) =>
   useSemanticDedupeStore((state) =>
     isSemanticDedupeEligibleEntry(entryId)
