@@ -1,3 +1,5 @@
+import type { ConditionSet } from "@follow/information-core"
+
 import type { AIConfigStore } from "./ai-config"
 import { expandXContexts } from "./content-identity"
 import type { FoloReader } from "./folo"
@@ -45,6 +47,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
             reader: options.reader,
             state: store.sourceSync,
             sourceKeys: foloSourceKeys,
+            membershipListKeys: referencedListKeys(store),
             historySince: trigger.historySince,
           },
           signal,
@@ -242,4 +245,30 @@ function contextFingerprint(store: Store, sourceKey: string, body: import("./fol
   const { metadata: _metadata, ...context } = store.sourceSync.contextFor(sourceKey, body)
   // 同步时间自身不触发重算；来源身份、分类与实际 List 资格变化才使旧目标失效。
   return JSON.stringify(context)
+}
+
+function referencedListKeys(store: Store) {
+  const currentVersions = new Set(
+    store.automation
+      .inputs()
+      .map((input) => input.releaseVersion)
+      .filter((version): version is number => version !== null),
+  )
+  const latestVersion = store.automation.releases()[0]?.version
+  if (latestVersion !== undefined) currentVersions.add(latestVersion)
+  const ids = new Set<string>()
+  const collect = (conditions: ConditionSet) => {
+    if ("all" in conditions) return
+    for (const group of conditions.anyOf)
+      for (const condition of group.allOf)
+        if (condition.field === "list_id") for (const id of condition.value) ids.add(`list/${id}`)
+  }
+  for (const version of currentVersions) {
+    const ruleSet = store.automation.release(version)
+    for (const rule of ruleSet?.rules ?? []) {
+      collect(rule.when)
+      for (const action of rule.actions) if (action.type === "ai_aggregate") collect(action.scope)
+    }
+  }
+  return [...ids].sort()
 }

@@ -79,10 +79,22 @@ const editorSourceSchema = informationSnapshotSchema.shape.sources.element
   })
   .strict()
 const editorItemSchema = informationSnapshotSchema.shape.items.element.strict()
+const listMembershipSchema = z
+  .object({
+    listKey: z.string().min(1),
+    ownerId: z.string().min(1).nullable().optional(),
+    feedIds: z.array(z.string().min(1)),
+    complete: z.boolean(),
+    status: z.enum(["complete", "unknown"]),
+    revision: z.number().int().nonnegative(),
+    syncedAt: z.string().datetime().nullable(),
+  })
+  .strict()
 
 export const processingEditorSchema = processingDraftSchema
   .extend({
     sources: z.array(editorSourceSchema),
+    sourceInventoryKnown: z.boolean().optional(),
     items: z.array(editorItemSchema),
     releases: z.array(processingReleaseWireSchema),
     capabilities: z.object({ automaticProcessing: z.boolean() }).strict(),
@@ -90,6 +102,7 @@ export const processingEditorSchema = processingDraftSchema
     sourceTags: z.array(
       z.object({ sourceKey: z.string().min(1), tagIds: z.array(z.string().min(1)) }).strict(),
     ),
+    listMemberships: z.array(listMembershipSchema),
   })
   .strict()
 

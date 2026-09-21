@@ -54,6 +54,14 @@ import { useDialog } from "~/components/ui/modal/stacked/hooks"
 import { useBatchUpdateSubscription } from "~/hooks/biz/useSubscriptionActions"
 import { useAuthQuery } from "~/hooks/common"
 import { UrlBuilder } from "~/lib/url-builder"
+import type { ProcessingEditor } from "~/modules/action/processing-client"
+import { createProcessingClient, ProcessingRequestError } from "~/modules/action/processing-client"
+import {
+  filterFeedIdsByProcessingTag,
+  processingFeedSourceKey,
+  processingTagNames,
+} from "~/modules/action/processing-tags-utils"
+import { getOneTimeToken, isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { useConfirmUnsubscribeSubscriptionModal } from "~/modules/modal/hooks/useConfirmUnsubscribeSubscriptionModal"
 import { SettingModalContentPortal } from "~/modules/settings/modal/layout"
@@ -71,6 +79,9 @@ type SortField =
   | "monthOpenRate"
 type SortDirection = "asc" | "desc"
 type FeedFilter = "all" | "rsshub"
+type ProcessingTagData = Pick<ProcessingEditor, "subscriptionTags" | "sourceTags">
+
+const processingClient = createProcessingClient(getOneTimeToken)
 
 export const SettingFeeds = () => {
   const inMas = useIsInMASReview()
@@ -82,6 +93,8 @@ export const SettingFeeds = () => {
   )
 }
 
+const GRID_COLS_WITH_TAGS_CLASSNAME =
+  "grid-cols-[30px_minmax(160px,1fr)_96px_minmax(120px,160px)_130px_58px_58px_66px_66px_66px]"
 const GRID_COLS_CLASSNAME = "grid-cols-[30px_minmax(160px,1fr)_96px_130px_58px_58px_66px_66px_66px]"
 const OPEN_RATE_SORT_FIELDS = new Set<SortField>(["dayOpenRate", "weekOpenRate", "monthOpenRate"])
 
@@ -92,6 +105,39 @@ const SubscriptionFeedsSection = () => {
   const [sortField, setSortField] = useState<SortField>("name")
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc")
   const [filter, setFilter] = useState<FeedFilter>("all")
+  const [tagFilter, setTagFilter] = useState("all")
+  const [selectedTagId, setSelectedTagId] = useState("")
+  const [processingTags, setProcessingTags] = useState<ProcessingTagData | null>(null)
+  const [tagBusy, setTagBusy] = useState(false)
+  const [tagError, setTagError] = useState<ProcessingRequestError["kind"] | null>(null)
+  // 官方站没有本地信息服务路由，标签读取和整组 UI 都只在 local.folo.is 开启。
+  const processingTagsEnabled = isLocalFoloHost()
+
+  const loadProcessingTags = useCallback(
+    async (signal: AbortSignal) => {
+      if (!processingTagsEnabled) return
+      try {
+        const editor = await processingClient.load(signal)
+        if (!signal.aborted) {
+          setProcessingTags({
+            subscriptionTags: editor.subscriptionTags,
+            sourceTags: editor.sourceTags,
+          })
+          setTagError(null)
+        }
+      } catch (cause) {
+        if (!signal.aborted)
+          setTagError(cause instanceof ProcessingRequestError ? cause.kind : "request")
+      }
+    },
+    [processingTagsEnabled],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadProcessingTags(controller.signal)
+    return () => controller.abort()
+  }, [loadProcessingTags])
 
   // Calculate RSSHub feeds count
   const rsshubFeedsCount = useMemo(() => {
@@ -103,14 +149,40 @@ const SubscriptionFeedsSection = () => {
 
   // Filter feeds based on selected filter
   const filteredFeeds = useMemo(() => {
-    if (filter === "all") {
-      return allFeeds
-    }
-    return allFeeds.filter((feedId) => {
-      const feed = getFeedById(feedId)
-      return Boolean(feed?.url?.startsWith("rsshub://"))
-    })
-  }, [allFeeds, filter])
+    const byType =
+      filter === "all"
+        ? allFeeds
+        : allFeeds.filter((feedId) => {
+            const feed = getFeedById(feedId)
+            return Boolean(feed?.url?.startsWith("rsshub://"))
+          })
+    return filterFeedIdsByProcessingTag(byType, processingTags?.sourceTags, tagFilter)
+  }, [allFeeds, filter, processingTags?.sourceTags, tagFilter])
+
+  const updateSelectedTags = useCallback(
+    async (operation: "add" | "remove") => {
+      if (!processingTags || !selectedTagId || selectedFeeds.size === 0) return
+      const controller = new AbortController()
+      setTagBusy(true)
+      setTagError(null)
+      try {
+        await processingClient.bindTags(
+          [...selectedFeeds].map(processingFeedSourceKey),
+          [selectedTagId],
+          operation,
+          processingTags.subscriptionTags.revision,
+          controller.signal,
+        )
+        // 写入成功后重新读取同一服务端快照，避免前端维护第二份标签真相。
+        await loadProcessingTags(controller.signal)
+      } catch (cause) {
+        setTagError(cause instanceof ProcessingRequestError ? cause.kind : "request")
+      } finally {
+        setTagBusy(false)
+      }
+    },
+    [loadProcessingTags, processingTags, selectedFeeds, selectedTagId],
+  )
 
   // Clean up selectedFeeds when filter changes
   const filteredFeedsSet = useMemo(() => new Set(filteredFeeds), [filteredFeeds])
@@ -175,34 +247,59 @@ const SubscriptionFeedsSection = () => {
     <section className="relative mt-4">
       <div className="mb-2 flex items-center justify-between gap-4">
         <h2 className="text-lg font-semibold">{t("feeds.subscription")}</h2>
-        {allFeeds.length > 0 && (
-          <ResponsiveSelect
-            size="sm"
-            triggerClassName="w-36"
-            value={filter}
-            onValueChange={(value) => setFilter(value as FeedFilter)}
-            items={[
-              {
-                label: t("feeds.filter.all", { count: allFeeds.length }),
-                value: "all",
-              },
-              {
-                label: t("feeds.filter.rsshub", { count: rsshubFeedsCount }),
-                value: "rsshub",
-              },
-            ]}
-          />
-        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {processingTags && (
+            <ResponsiveSelect
+              size="sm"
+              triggerClassName="w-40"
+              value={tagFilter}
+              onValueChange={setTagFilter}
+              items={[
+                {
+                  label: t("feeds.processing_tags.filter_all"),
+                  value: "all",
+                },
+                ...processingTags.subscriptionTags.tags.map((tag) => ({
+                  label: tag.name,
+                  value: tag.id,
+                })),
+              ]}
+            />
+          )}
+          {allFeeds.length > 0 && (
+            <ResponsiveSelect
+              size="sm"
+              triggerClassName="w-36"
+              value={filter}
+              onValueChange={(value) => setFilter(value as FeedFilter)}
+              items={[
+                {
+                  label: t("feeds.filter.all", { count: allFeeds.length }),
+                  value: "all",
+                },
+                {
+                  label: t("feeds.filter.rsshub", { count: rsshubFeedsCount }),
+                  value: "rsshub",
+                },
+              ]}
+            />
+          )}
+        </div>
       </div>
+      {tagError && (
+        <p role="alert" className="text-sm text-orange">
+          {t("feeds.processing_tags.unavailable")}
+        </p>
+      )}
 
       {filteredFeeds.length > 0 && (
         <div className="mt-6 overflow-x-auto pb-2">
-          <div className="min-w-[840px] space-y-0.5">
+          <div className="min-w-[1000px] space-y-0.5">
             {/* Header - Sticky */}
             <div
               className={clsx(
                 "sticky top-0 z-20 grid h-7 gap-3 border-b border-border bg-background/80 px-1 pb-1.5 text-xs font-medium text-text-secondary backdrop-blur-sm",
-                GRID_COLS_CLASSNAME,
+                processingTagsEnabled ? GRID_COLS_WITH_TAGS_CLASSNAME : GRID_COLS_CLASSNAME,
               )}
             >
               <div className="flex items-center justify-center">
@@ -228,6 +325,9 @@ const SubscriptionFeedsSection = () => {
                   <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>
                 )}
               </button>
+              {processingTagsEnabled && (
+                <div className="text-left">{t("feeds.tableHeaders.processing_tags")}</div>
+              )}
               <button
                 className="text-center transition-colors hover:text-text"
                 onClick={() => handleSort("date")}
@@ -285,6 +385,8 @@ const SubscriptionFeedsSection = () => {
                 sortField={sortField}
                 sortDirection={sortDirection}
                 selectedFeeds={selectedFeeds}
+                processingTags={processingTags}
+                processingTagsEnabled={processingTagsEnabled}
                 onSelect={handleSelectFeed}
               />
             </div>
@@ -331,6 +433,40 @@ const SubscriptionFeedsSection = () => {
                   </span>
 
                   <div className="flex items-center gap-3">
+                    {processingTags && (
+                      <>
+                        <select
+                          aria-label={t("feeds.processing_tags.choose")}
+                          className="max-w-40 rounded border border-fill-secondary bg-material-opaque px-2 py-1 text-xs"
+                          value={selectedTagId}
+                          disabled={tagBusy}
+                          onChange={(event) => setSelectedTagId(event.target.value)}
+                        >
+                          <option value="">{t("feeds.processing_tags.choose")}</option>
+                          {processingTags.subscriptionTags.tags.map((tag) => (
+                            <option key={tag.id} value={tag.id}>
+                              {tag.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="text-xs text-accent disabled:opacity-40"
+                          disabled={!selectedTagId || tagBusy}
+                          onClick={() => void updateSelectedTags("add")}
+                        >
+                          {t("feeds.processing_tags.add")}
+                        </button>
+                        <button
+                          type="button"
+                          className="text-xs text-accent disabled:opacity-40"
+                          disabled={!selectedTagId || tagBusy}
+                          onClick={() => void updateSelectedTags("remove")}
+                        >
+                          {t("feeds.processing_tags.remove")}
+                        </button>
+                      </>
+                    )}
                     <button
                       className="cursor-button text-xs text-accent transition-colors hover:text-accent/80"
                       type="button"
@@ -385,8 +521,18 @@ const SortedFeedsList: FC<{
   sortField: SortField
   sortDirection: SortDirection
   selectedFeeds: Set<string>
+  processingTags: ProcessingTagData | null
+  processingTagsEnabled: boolean
   onSelect: (feedId: string, checked: boolean) => void
-}> = ({ feeds, sortField, sortDirection, selectedFeeds, onSelect }) => {
+}> = ({
+  feeds,
+  sortField,
+  sortDirection,
+  selectedFeeds,
+  processingTags,
+  processingTagsEnabled,
+  onSelect,
+}) => {
   const scrollContainerElement = useScrollViewElement()
   const { data: feedOpenStats } = useFeedOpenStats(feeds)
 
@@ -538,6 +684,8 @@ const SortedFeedsList: FC<{
               id={feedId}
               selected={selectedFeeds.has(feedId)}
               stats={feedOpenStats?.[feedId]}
+              tagNames={processingTagNames(processingFeedSourceKey(feedId), processingTags)}
+              processingTagsEnabled={processingTagsEnabled}
               onSelect={onSelect}
             />
           </div>
@@ -581,11 +729,15 @@ const FeedListItem = memo(
     id,
     selected,
     stats,
+    tagNames,
+    processingTagsEnabled,
     onSelect,
   }: {
     id: string
     selected: boolean
     stats?: FeedOpenStats
+    tagNames: string[]
+    processingTagsEnabled: boolean
     onSelect: (feedId: string, checked: boolean) => void
   }) => {
     const subscription = useSubscriptionByFeedId(id)
@@ -605,7 +757,7 @@ const FeedListItem = memo(
         className={clsx(
           "group relative grid h-11 w-full items-center gap-3 rounded-md px-1.5 transition-all",
           "content-visibility-auto contain-intrinsic-size-[auto_2.75rem]",
-          GRID_COLS_CLASSNAME,
+          processingTagsEnabled ? GRID_COLS_WITH_TAGS_CLASSNAME : GRID_COLS_CLASSNAME,
           "hover:bg-material-medium",
 
           selected && "bg-material-thick",
@@ -667,6 +819,22 @@ const FeedListItem = memo(
           {getView(subscription.view)!.icon}
           <span className="leading-tight">{tCommon(getView(subscription.view)!.name)}</span>
         </div>
+        {processingTagsEnabled && (
+          <div className="flex min-w-0 flex-wrap gap-1 overflow-hidden">
+            {tagNames.length ? (
+              tagNames.map((name) => (
+                <span
+                  key={name}
+                  className="max-w-full truncate rounded bg-fill-secondary px-1.5 py-0.5 text-[10px] text-text-secondary"
+                >
+                  {name}
+                </span>
+              ))
+            ) : (
+              <span className="text-[11px] text-text-secondary">--</span>
+            )}
+          </div>
+        )}
         {!!subscription.createdAt && (
           <div className="whitespace-nowrap pr-1 text-center text-xs">
             <RelativeDay date={new Date(subscription.createdAt)} />

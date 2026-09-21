@@ -80,6 +80,17 @@ const editorResponse = {
     ],
   },
   sourceTags: [{ sourceKey: "feed:1", tagIds: [tagId] }],
+  listMemberships: [
+    {
+      listKey: "list/list-1",
+      ownerId: "owner-list-1",
+      feedIds: ["1"],
+      complete: true,
+      status: "complete" as const,
+      revision: 2,
+      syncedAt: "2026-09-10T00:00:00.000Z",
+    },
+  ],
 }
 
 const processingRun = {
@@ -203,8 +214,23 @@ describe("createProcessingClient", () => {
       ],
     })
     expect(result.sourceTags).toEqual([{ sourceKey: "feed:1", tagIds: [tagId] }])
+    expect(result.listMemberships[0]).toMatchObject({
+      listKey: "list/list-1",
+      ownerId: "owner-list-1",
+      status: "complete",
+      revision: 2,
+    })
     expect(result.capabilities.automaticProcessing).toBe(false)
     expect(processingEditorSchema.safeParse(editorResponse).success).toBe(true)
+    // 旧信息服务响应没有 ownerId 时仍可读取，界面会将所有者显示为未知。
+    expect(
+      processingEditorSchema.safeParse({
+        ...editorResponse,
+        listMemberships: editorResponse.listMemberships.map(
+          ({ ownerId: _ownerId, ...item }) => item,
+        ),
+      }).success,
+    ).toBe(true)
     expect(processingReleaseWireSchema.safeParse(releaseResponse).success).toBe(true)
   })
 

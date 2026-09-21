@@ -96,6 +96,7 @@ const editor = {
   capabilities: { automaticProcessing: false },
   subscriptionTags: { revision: 4, tags: [{ id: "tag-1", name: "Important" }] },
   sourceTags: [{ sourceKey: "feed:1", tagIds: ["tag-1"] }],
+  listMemberships: [],
 }
 
 const preview = {

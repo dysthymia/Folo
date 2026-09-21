@@ -526,12 +526,16 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                     value={rule.when}
                     sources={editor.sources}
                     tags={editor.subscriptionTags.tags}
+                    listMemberships={editor.listMemberships}
+                    sourceInventoryKnown={editor.sourceInventoryKnown ?? false}
                     onChange={(when) => editRule(rule.id, { ...rule, when })}
                   />
                   <ProcessingActionEditor
                     actions={rule.actions}
                     sources={editor.sources}
                     tags={editor.subscriptionTags.tags}
+                    listMemberships={editor.listMemberships}
+                    sourceInventoryKnown={editor.sourceInventoryKnown ?? false}
                     onChange={(actions) => editRule(rule.id, { ...rule, actions })}
                   />
                 </article>

@@ -133,4 +133,58 @@ describe("调度到处理的后台链路", () => {
       options.store.close()
     }
   })
+  it("把已发布规则引用的 List 作为成员同步范围，而不加入条目来源", async () => {
+    const options = fixture()
+    try {
+      const draft = options.store.automation.draft()
+      options.store.automation.saveDraft(
+        {
+          ...draft.config,
+          rules: [
+            {
+              id: randomUUID(),
+              ownerId: "owner",
+              name: "List 条件",
+              enabled: true,
+              order: 0,
+              version: 1,
+              executionLocation: "processing_service",
+              when: {
+                anyOf: [
+                  {
+                    allOf: [{ field: "list_id", operator: "contains_any", value: ["watch-list"] }],
+                  },
+                ],
+              },
+              actions: [{ type: "ai_transform", prompt: "处理内容" }],
+            },
+          ],
+        },
+        draft.revision,
+      )
+      options.store.schedule.save(
+        {
+          sourceKeys: ["feed/1"],
+          historySince: "2026-01-01T00:00:00Z",
+          timeZone: "Asia/Shanghai",
+          enabled: false,
+        },
+        0,
+      )
+      options.store.automation.publish(1, { mode: "future" }, randomUUID())
+      options.store.schedule.manual(randomUUID(), new Date())
+
+      await runProcessingWorker(options, new AbortController().signal)
+
+      expect(options.acquire).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceKeys: ["feed/1"],
+          membershipListKeys: ["list/watch-list"],
+        }),
+        expect.any(AbortSignal),
+      )
+    } finally {
+      options.store.close()
+    }
+  })
 })

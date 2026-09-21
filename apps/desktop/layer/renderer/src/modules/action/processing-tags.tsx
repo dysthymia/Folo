@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import type { ProcessingEditor } from "./processing-client"
 import { createProcessingClient, ProcessingRequestError } from "./processing-client"
 import { processingButtonClass, processingInputClass } from "./processing-condition-editor"
+import { buildProcessingTagSelectionScopes } from "./processing-tags-utils"
 
 const client = createProcessingClient(getOneTimeToken)
 export function ProcessingTags({
@@ -20,6 +21,7 @@ export function ProcessingTags({
   const [filter, setFilter] = useState("")
   const [selected, setSelected] = useState<string[]>([])
   const [tagId, setTagId] = useState("")
+  const [selectionScope, setSelectionScope] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ProcessingRequestError["kind"] | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
@@ -28,6 +30,13 @@ export function ProcessingTags({
     (source) =>
       source.kind !== "list" &&
       `${source.title} ${source.category ?? ""}`.toLowerCase().includes(filter.toLowerCase()),
+  )
+  const selectionScopes = useMemo(
+    () => buildProcessingTagSelectionScopes(editor.sources, editor.listMemberships),
+    [editor.listMemberships, editor.sources],
+  )
+  const selectedScope = [...selectionScopes.categories, ...selectionScopes.lists].find(
+    (scope) => scope.key === selectionScope,
   )
   const run = async (operation: (signal: AbortSignal) => Promise<unknown>) => {
     const controller = new AbortController()
@@ -117,6 +126,54 @@ export function ProcessingTags({
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className={`${processingInputClass} flex-1`}
+            aria-label={t("processing.tags_select_scope")}
+            value={selectionScope}
+            onChange={(event) => setSelectionScope(event.target.value)}
+          >
+            <option value="">{t("processing.tags_select_scope")}</option>
+            <optgroup label={t("processing.tags_scope_categories")}>
+              {selectionScopes.categories.map((scope) => (
+                <option key={scope.key} value={scope.key}>
+                  {scope.label} ({scope.sourceKeys.length})
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label={t("processing.tags_scope_lists")}>
+              {selectionScopes.lists.map((scope) => (
+                <option key={scope.key} value={scope.key} disabled={scope.sourceKeys === null}>
+                  {scope.label} · {scope.listId} ·{" "}
+                  {scope.ownerId
+                    ? t("processing.list_owner", { ownerId: scope.ownerId })
+                    : t("processing.list_owner_unknown")}{" "}
+                  ·{" "}
+                  {scope.sourceKeys === null
+                    ? t("processing.tags_scope_unknown")
+                    : `${scope.sourceKeys.length} · ${t("processing.list_membership_revision", { revision: scope.revision })}`}
+                </option>
+              ))}
+            </optgroup>
+          </select>
+          <button
+            type="button"
+            className={processingButtonClass}
+            disabled={!selectedScope?.sourceKeys?.length}
+            onClick={() => {
+              const sourceKeys = selectedScope?.sourceKeys
+              if (!sourceKeys) return
+              setSelected((current) => [...new Set([...current, ...sourceKeys])])
+            }}
+          >
+            {t("processing.tags_select_scope_action")}
+          </button>
+        </div>
+        {selectedScope?.sourceKeys === null && (
+          <p role="status" className="text-sm text-orange">
+            {t("processing.tags_scope_unavailable")}
+          </p>
+        )}
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"

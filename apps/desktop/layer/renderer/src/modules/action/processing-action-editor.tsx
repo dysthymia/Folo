@@ -1,6 +1,7 @@
-import type { AutomationRule, PresetApplication } from "@follow/information-core"
+import type { AutomationRule } from "@follow/information-core"
 import { useTranslation } from "react-i18next"
 
+import { applyPresetToAction } from "./processing-action-preset"
 import type { ProcessingEditor } from "./processing-client"
 import {
   processingButtonClass,
@@ -11,94 +12,20 @@ import { ProcessingPresetPicker } from "./processing-preset-picker"
 
 type Action = AutomationRule["actions"][number]
 
-const mergePresentation = (actions: Action[], policy: { standalone: "always" }) => {
-  const index = actions.findIndex((item) => item.type === "presentation")
-  if (index < 0) return [...actions, { type: "presentation" as const, policy }]
-  return actions.map((item, itemIndex) =>
-    itemIndex === index && item.type === "presentation"
-      ? { ...item, policy: { ...item.policy, ...policy } }
-      : item,
-  )
-}
-
-const mergeDisplay = (actions: Action[], summaryMaxGraphemes: number) => {
-  const index = actions.findIndex((item) => item.type === "display")
-  if (index < 0) return [...actions, { type: "display" as const, summaryMaxGraphemes }]
-  return actions.map((item, itemIndex) =>
-    itemIndex === index && item.type === "display" ? { ...item, summaryMaxGraphemes } : item,
-  )
-}
-
-const applyPresetToAction = (
-  actions: Action[],
-  index: number,
-  application: PresetApplication,
-): Action[] => {
-  const current = actions[index]
-  const patch = application.patch
-  if (!current) return actions
-
-  if (
-    current.type === "ai_transform" &&
-    application.target === "ai_transform" &&
-    "type" in patch &&
-    patch.type === "ai_transform"
-  ) {
-    // 预设只在用户点击应用后复制到当前动作，目录内容变化不会自动覆盖草稿。
-    let nextActions = actions.map((item, itemIndex) =>
-      itemIndex === index ? { ...current, prompt: patch.prompt, preset: patch.preset } : item,
-    )
-    if (application.presentation)
-      nextActions = mergePresentation(nextActions, application.presentation.policy)
-    if (application.display)
-      nextActions = mergeDisplay(nextActions, application.display.summaryMaxGraphemes)
-    return nextActions
-  }
-
-  if (
-    current.type === "ai_aggregate" &&
-    application.target === "ai_aggregate.createPrompt" &&
-    "createPrompt" in patch &&
-    "mode" in patch === false
-  )
-    return actions.map((item, itemIndex) =>
-      itemIndex === index && item.type === "ai_aggregate"
-        ? {
-            ...item,
-            createPrompt: patch.createPrompt,
-            presets: { ...item.presets, create: patch.presets.create },
-          }
-        : item,
-    )
-
-  if (
-    current.type === "ai_aggregate" &&
-    application.target === "ai_aggregate.updatePrompt" &&
-    "updatePrompt" in patch
-  )
-    return actions.map((item, itemIndex) =>
-      itemIndex === index && item.type === "ai_aggregate"
-        ? {
-            ...item,
-            updatePrompt: patch.updatePrompt,
-            presets: { ...item.presets, update: patch.presets.update },
-          }
-        : item,
-    )
-
-  return actions
-}
-
 export function ProcessingActionEditor({
   actions,
   onChange,
   sources,
   tags,
+  listMemberships,
+  sourceInventoryKnown = false,
 }: {
   actions: Action[]
   onChange: (actions: Action[]) => void
   sources: ProcessingEditor["sources"]
   tags: ProcessingEditor["subscriptionTags"]["tags"]
+  listMemberships: ProcessingEditor["listMemberships"]
+  sourceInventoryKnown?: boolean
 }) {
   const { t } = useTranslation("app")
   const update = (index: number, action: Action) =>
@@ -123,6 +50,7 @@ export function ProcessingActionEditor({
                 targets={["ai_transform"]}
                 initialTarget="ai_transform"
                 currentPrompt={action.prompt}
+                currentPreset={action.preset}
                 onApply={(application) =>
                   onChange(applyPresetToAction(actions, index, application))
                 }
@@ -204,9 +132,10 @@ export function ProcessingActionEditor({
           {action.type === "ai_aggregate" && (
             <>
               <ProcessingPresetPicker
-                targets={["ai_aggregate.createPrompt"]}
-                initialTarget="ai_aggregate.createPrompt"
+                targets={["ai_aggregate.createPrompt", "topic"]}
+                initialTarget={action.mode === "topic" ? "topic" : "ai_aggregate.createPrompt"}
                 currentPrompt={action.createPrompt}
+                currentPreset={action.presets?.create}
                 onApply={(application) =>
                   onChange(applyPresetToAction(actions, index, application))
                 }
@@ -229,6 +158,8 @@ export function ProcessingActionEditor({
                 value={action.scope}
                 sources={sources}
                 tags={tags}
+                listMemberships={listMemberships}
+                sourceInventoryKnown={sourceInventoryKnown}
                 onChange={(scope) => update(index, { ...action, scope })}
               />
               <label className="block space-y-1 text-sm">
@@ -253,6 +184,7 @@ export function ProcessingActionEditor({
                 targets={["ai_aggregate.updatePrompt"]}
                 initialTarget="ai_aggregate.updatePrompt"
                 currentPrompt={action.updatePrompt}
+                currentPreset={action.presets?.update}
                 onApply={(application) =>
                   onChange(applyPresetToAction(actions, index, application))
                 }

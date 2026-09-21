@@ -43,7 +43,9 @@ export class SourceSyncError extends Error {
   }
 }
 
-type ListMembership = {
+export type ListMembershipSnapshot = {
+  listKey: string
+  ownerId: string | null
   feedIds: string[]
   complete: boolean
   status: "complete" | "unknown"
@@ -92,9 +94,17 @@ export class SourceSyncStore {
       );
       CREATE TABLE IF NOT EXISTS source_sync_list_memberships (
         list_key TEXT PRIMARY KEY, feed_ids TEXT NOT NULL, complete INTEGER NOT NULL,
-        status TEXT NOT NULL, revision INTEGER NOT NULL, synced_at TEXT, error TEXT
+        status TEXT NOT NULL, revision INTEGER NOT NULL, synced_at TEXT, error TEXT,
+        owner_id TEXT
       );
     `)
+    const membershipColumns = db
+      .prepare("PRAGMA table_info(source_sync_list_memberships)")
+      .all()
+      .map((row) => String(row.name))
+    // 旧库增量增加可选 owner_id，不重建或清空已有 List 成员快照。
+    if (!membershipColumns.includes("owner_id"))
+      db.exec("ALTER TABLE source_sync_list_memberships ADD COLUMN owner_id TEXT")
   }
 
   replaceSources(sources: Source[], syncedAt: string) {
@@ -193,19 +203,23 @@ export class SourceSyncStore {
     return row ? this.stateFromRow(row) : null
   }
 
+  listMemberships(): ListMembershipSnapshot[] {
+    return this.db
+      .prepare("SELECT * FROM source_sync_list_memberships ORDER BY list_key")
+      .all()
+      .map((row) => ({ listKey: String(row.list_key), ...this.membershipFromRow(row) }))
+  }
+
   contextFor(sourceKey: string, entry: SourceEntry): SourceSyncContext {
     const source = this.source(sourceKey)
     const actualFeedId = entry.feedId ?? (source?.kind === "feed" ? source.id : null)
-    const memberships = this.db
-      .prepare("SELECT * FROM source_sync_list_memberships ORDER BY list_key")
-      .all()
+    const memberships = this.listMemberships()
     const listMembership: Record<string, boolean | null> = {}
     let listMembershipVersion = 0
-    for (const row of memberships) {
-      const membership = this.membershipFromRow(row)
+    for (const membership of memberships) {
       listMembershipVersion = Math.max(listMembershipVersion, membership.revision)
       // 规则条件保存的是官方 list ID，不是服务内部的 `list/<id>` 来源键。
-      listMembership[listId(String(row.list_key))] =
+      listMembership[listId(membership.listKey)] =
         membership.status === "complete" && membership.complete && actualFeedId !== null
           ? membership.feedIds.includes(actualFeedId)
           : null
@@ -232,7 +246,7 @@ export class SourceSyncStore {
 
   saveListMembership(
     listKey: string,
-    result: { feedIds: string[]; complete: boolean },
+    result: { feedIds: string[]; complete: boolean; ownerId?: string | null },
     now: string,
   ) {
     const previous = this.membership(listKey)
@@ -241,9 +255,14 @@ export class SourceSyncStore {
       !previous ||
       previous.complete !== result.complete ||
       previous.status !== "complete" ||
+      previous.ownerId !== (result.ownerId ?? null) ||
       JSON.stringify(previous.feedIds) !== JSON.stringify(feedIds)
     this.db
-      .prepare("INSERT OR REPLACE INTO source_sync_list_memberships VALUES(?,?,?,?,?,?,?)")
+      .prepare(
+        `INSERT OR REPLACE INTO source_sync_list_memberships
+         (list_key,feed_ids,complete,status,revision,synced_at,error,owner_id)
+         VALUES(?,?,?,?,?,?,?,?)`,
+      )
       .run(
         listKey,
         JSON.stringify(feedIds),
@@ -252,6 +271,7 @@ export class SourceSyncStore {
         (previous?.revision ?? 0) + Number(changed),
         now,
         null,
+        result.ownerId ?? null,
       )
   }
 
@@ -259,7 +279,11 @@ export class SourceSyncStore {
     const previous = this.membership(listKey)
     const changed = !previous || previous.status !== "unknown"
     this.db
-      .prepare("INSERT OR REPLACE INTO source_sync_list_memberships VALUES(?,?,?,?,?,?,?)")
+      .prepare(
+        `INSERT OR REPLACE INTO source_sync_list_memberships
+         (list_key,feed_ids,complete,status,revision,synced_at,error,owner_id)
+         VALUES(?,?,?,?,?,?,?,?)`,
+      )
       .run(
         listKey,
         JSON.stringify(previous?.feedIds ?? []),
@@ -268,6 +292,7 @@ export class SourceSyncStore {
         (previous?.revision ?? 0) + Number(changed),
         previous?.syncedAt ?? null,
         error,
+        previous?.ownerId ?? null,
       )
   }
 
@@ -294,15 +319,16 @@ export class SourceSyncStore {
     return row ? String(row.synced_at) : null
   }
 
-  private membership(listKey: string): ListMembership | null {
+  private membership(listKey: string): Omit<ListMembershipSnapshot, "listKey"> | null {
     const row = this.db
       .prepare("SELECT * FROM source_sync_list_memberships WHERE list_key=?")
       .get(listKey)
     return row ? this.membershipFromRow(row) : null
   }
 
-  private membershipFromRow(row: Record<string, unknown>): ListMembership {
+  private membershipFromRow(row: Record<string, unknown>): Omit<ListMembershipSnapshot, "listKey"> {
     return {
+      ownerId: row.owner_id === null || row.owner_id === undefined ? null : String(row.owner_id),
       feedIds: JSON.parse(String(row.feed_ids)) as string[],
       complete: Boolean(row.complete),
       status: String(row.status) as "complete" | "unknown",
@@ -336,6 +362,7 @@ export async function acquireSources(
     reader: () => Promise<FoloReader>
     state: SourceSyncStore
     sourceKeys: string[]
+    membershipListKeys?: string[]
     historySince: string
     pageBudget?: number
     pageSize?: number
@@ -343,6 +370,9 @@ export async function acquireSources(
   signal?: AbortSignal,
 ): Promise<SourceSyncResult[]> {
   const sourceKeys = keys(input.sourceKeys)
+  const membershipListKeys = [...new Set(input.membershipListKeys ?? [])]
+  if (membershipListKeys.some((key) => !/^list\/[^/\s]+$/u.test(key) || key.length > 300))
+    throw new SourceSyncError("invalid_input")
   const historySince = iso(input.historySince)
   const pageBudget = input.pageBudget ?? 20
   const pageSize = input.pageSize ?? 100
@@ -394,13 +424,18 @@ export async function acquireSources(
         (left.previous?.lastSuccessAt ?? "").localeCompare(right.previous?.lastSuccessAt ?? "") ||
         left.index - right.index,
     )
-  await syncListMemberships(
-    reader,
-    input.state,
-    selected.flatMap(({ source }) => (source?.kind === "list" ? [source] : [])),
-    now,
-    signal,
-  )
+  const membershipKeys = new Set([
+    ...membershipListKeys,
+    ...selected.flatMap(({ source }) => (source?.kind === "list" ? [source.key] : [])),
+  ])
+  const membershipSources = [...membershipKeys].flatMap((key) => {
+    const source = sources.find((candidate) => candidate.key === key && candidate.kind === "list")
+    if (source) return [source]
+    input.state.unknownListMembership(key, now, "source_missing")
+    return []
+  })
+  // 规则引用的 List 只同步成员资格，不会加入 ready，因此不会扩大条目采集范围。
+  await syncListMemberships(reader, input.state, membershipSources, now, signal)
 
   const progress = new Map<string, { pages: number; entries: number }>()
   const ready = [] as Array<{

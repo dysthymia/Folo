@@ -274,12 +274,16 @@ export class FoloReader {
     })
   }
 
-  async listMembers(listId: string): Promise<{ feedIds: string[]; complete: boolean }> {
+  async listMembers(
+    listId: string,
+  ): Promise<{ feedIds: string[]; complete: boolean; ownerId: string | null }> {
     const response = await this.request(() => this.client.api.lists.get({ listId }))
     const result = data(
       z.object({
         list: z.object({
           id: identifier,
+          // SDK GetListData.list 使用 ListSchema，真实类型提供 ownerUserId；仅保存稳定 ID。
+          ownerUserId: identifier.nullish(),
           feeds: z.array(z.object({ id: identifier })),
           feedIds: z.array(identifier).optional(),
         }),
@@ -292,6 +296,7 @@ export class FoloReader {
     const declaredIds = result.list.feedIds
     return {
       feedIds,
+      ownerId: result.list.ownerUserId ?? null,
       complete:
         result.feedCount === feedIds.length &&
         (!declaredIds ||

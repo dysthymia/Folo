@@ -83,7 +83,9 @@ function fixture() {
 function reader(input: {
   sources: Source[]
   pages: (source: Source, cursor?: string) => Promise<Page>
-  members?: (id: string) => Promise<{ feedIds: string[]; complete: boolean }>
+  members?: (
+    id: string,
+  ) => Promise<{ feedIds: string[]; complete: boolean; ownerId?: string | null }>
 }) {
   return {
     session: vi.fn(async () => ({ ownerId: "owner", expiresAt: null })),
@@ -300,7 +302,7 @@ describe("来源增量同步", () => {
     const client = reader({
       sources: [list],
       pages: async () => page([]),
-      members: async () => ({ feedIds: ["f1"], complete: true }),
+      members: async () => ({ feedIds: ["f1"], complete: true, ownerId: "owner-list-1" }),
     })
     await acquireSources({
       store,
@@ -313,6 +315,17 @@ describe("来源增量同步", () => {
     const complete = state.contextFor(list.key, { ...entry("x"), sourceKey: list.key })
     expect(complete.listMembership).toEqual({ [list.id]: true })
     expect(complete.metadata.listMembershipVersion).toBe(1)
+    expect(state.listMemberships()).toEqual([
+      {
+        listKey: list.key,
+        ownerId: "owner-list-1",
+        feedIds: ["f1"],
+        complete: true,
+        status: "complete",
+        revision: 1,
+        syncedAt: expect.any(String),
+      },
+    ])
     expect(
       state.contextFor(list.key, {
         ...entry("container"),
@@ -334,6 +347,74 @@ describe("来源增量同步", () => {
     const unknown = state.contextFor(list.key, { ...entry("x"), sourceKey: list.key })
     expect(unknown.listMembership).toEqual({ [list.id]: null })
     expect(unknown.metadata.listMembershipVersion).toBe(2)
+    expect(state.listMemberships()[0]).toMatchObject({
+      listKey: list.key,
+      ownerId: "owner-list-1",
+      feedIds: ["f1"],
+      status: "unknown",
+      revision: 2,
+    })
+  })
+
+  it("旧 List 成员表原位增加 owner_id，并保持历史快照可读", () => {
+    const db = new DatabaseSync(":memory:")
+    databases.push(db)
+    db.exec(`
+      CREATE TABLE source_sync_list_memberships (
+        list_key TEXT PRIMARY KEY, feed_ids TEXT NOT NULL, complete INTEGER NOT NULL,
+        status TEXT NOT NULL, revision INTEGER NOT NULL, synced_at TEXT, error TEXT
+      );
+      INSERT INTO source_sync_list_memberships VALUES(
+        'list/l1', '["f1"]', 1, 'complete', 2, '2026-09-19T00:00:00.000Z', NULL
+      );
+    `)
+
+    const state = new SourceSyncStore(db)
+    expect(state.listMemberships()).toEqual([
+      {
+        listKey: "list/l1",
+        ownerId: null,
+        feedIds: ["f1"],
+        complete: true,
+        status: "complete",
+        revision: 2,
+        syncedAt: "2026-09-19T00:00:00.000Z",
+      },
+    ])
+
+    state.saveListMembership(
+      "list/l1",
+      { feedIds: ["f1"], complete: true, ownerId: "owner-list-1" },
+      "2026-09-20T00:00:00.000Z",
+    )
+    expect(state.listMemberships()[0]).toMatchObject({ ownerId: "owner-list-1", revision: 3 })
+  })
+
+  it("规则引用的 List 只同步成员，不扩大本轮条目采集来源", async () => {
+    const { state, store } = fixture()
+    const client = reader({
+      sources: [feed, list],
+      pages: async (source) => {
+        expect(source.key).toBe(feed.key)
+        return page([])
+      },
+      members: async () => ({ feedIds: [feed.id], complete: true }),
+    })
+
+    const result = await acquireSources({
+      store,
+      reader: async () => client,
+      state,
+      sourceKeys: [feed.key],
+      membershipListKeys: [list.key],
+      historySince: "2026-01-01T00:00:00Z",
+    })
+
+    expect(result.map((item) => item.sourceKey)).toEqual([feed.key])
+    expect(client.page).toHaveBeenCalledTimes(1)
+    expect(client.listMembers).toHaveBeenCalledWith(list.id)
+    expect(state.state(list.key)).toBeNull()
+    expect(state.contextFor(feed.key, entry("member")).listMembership).toEqual({ [list.id]: true })
   })
 
   it("旧发布日期的新到达与正文更新仍会保存，不按发布时间静默过滤", async () => {

@@ -68,11 +68,15 @@ export function ProcessingConditionEditor({
   onChange,
   sources,
   tags = [],
+  listMemberships = [],
+  sourceInventoryKnown = false,
 }: {
   value: ConditionSet
   onChange: (value: ConditionSet) => void
   sources: ProcessingEditor["sources"]
   tags?: ProcessingEditor["subscriptionTags"]["tags"]
+  listMemberships?: ProcessingEditor["listMemberships"]
+  sourceInventoryKnown?: boolean
 }) {
   const { t } = useTranslation("app")
   const groups = "anyOf" in value ? value.anyOf : []
@@ -115,6 +119,8 @@ export function ProcessingConditionEditor({
                 value={condition}
                 sources={sources}
                 tags={tags}
+                listMemberships={listMemberships}
+                sourceInventoryKnown={sourceInventoryKnown}
                 onChange={(next) =>
                   updateGroup(
                     groupIndex,
@@ -174,11 +180,15 @@ function ConditionRow({
   onChange,
   sources,
   tags = [],
+  listMemberships = [],
+  sourceInventoryKnown = false,
 }: {
   value: Condition
   onChange: (value: Condition) => void
   sources: ProcessingEditor["sources"]
   tags?: ProcessingEditor["subscriptionTags"]["tags"]
+  listMemberships?: ProcessingEditor["listMemberships"]
+  sourceInventoryKnown?: boolean
 }) {
   const { t } = useTranslation("app")
   if (!(fields as readonly string[]).includes(value.field))
@@ -244,14 +254,34 @@ function ConditionRow({
           }
         >
           {(value.field === "subscription_tag"
-            ? tags.map((tag) => ({ key: tag.id, title: tag.name }))
+            ? tags.map((tag) => ({ key: tag.id, title: tag.name, disabled: false }))
             : value.field === "list_id"
               ? sources
                   .filter((source) => source.kind === "list")
-                  .map((source) => ({ key: source.id, title: source.title }))
-              : sources.filter((source) => source.kind !== "list")
+                  .map((source) => {
+                    const membership = listMemberships.find((item) => item.listKey === source.key)
+                    const verified =
+                      membership?.status === "complete" && membership.complete === true
+                    const owner = membership?.ownerId
+                      ? t("processing.list_owner", { ownerId: membership.ownerId })
+                      : t("processing.list_owner_unknown")
+                    const status = verified
+                      ? t("processing.list_membership_complete", {
+                          revision: membership.revision,
+                          syncedAt: membership.syncedAt ?? "--",
+                        })
+                      : t("processing.list_membership_unknown")
+                    return {
+                      key: source.id,
+                      title: `${source.title} · ${owner} · ${status}`,
+                      disabled: !verified,
+                    }
+                  })
+              : sources
+                  .filter((source) => source.kind !== "list")
+                  .map((source) => ({ ...source, disabled: false }))
           ).map((item) => (
-            <option key={item.key} value={item.key}>
+            <option key={item.key} value={item.key} disabled={item.disabled}>
               {item.title} ({item.key})
             </option>
           ))}
@@ -270,39 +300,12 @@ function ConditionRow({
             ))}
         </select>
       ) : value.field === "category_ref" ? (
-        <select
-          className={processingInputClass}
-          aria-label={t("processing.value")}
-          value={JSON.stringify(value.value)}
-          onChange={(e) =>
-            onChange({
-              ...value,
-              value: JSON.parse(e.target.value) as { view: number; name: string },
-            })
-          }
-        >
-          <option value={JSON.stringify(value.value)}>
-            {value.value.name
-              ? `${value.value.name} · ${t(viewLabels[value.value.view] ?? "processing.choose")}`
-              : t("processing.choose")}
-          </option>
-          {[
-            ...new Set(
-              sources
-                .filter((source) => source.category !== null && source.view >= 0)
-                .map((source) => JSON.stringify({ view: source.view, name: source.category })),
-            ),
-          ]
-            .filter((category) => category !== JSON.stringify(value.value))
-            .map((category) => {
-              const item = JSON.parse(category) as { view: number; name: string }
-              return (
-                <option key={category} value={category}>
-                  {item.name} · {t(viewLabels[item.view] ?? "processing.choose")}
-                </option>
-              )
-            })}
-        </select>
+        <CategoryReferenceSelect
+          value={value}
+          sources={sources}
+          sourceInventoryKnown={sourceInventoryKnown}
+          onChange={onChange}
+        />
       ) : value.field === "view" ? (
         <select
           className={processingInputClass}
@@ -375,6 +378,80 @@ function ConditionRow({
           value={String(value.value)}
           onChange={(e) => onChange({ ...value, value: e.target.value } as Condition)}
         />
+      )}
+    </div>
+  )
+}
+
+function CategoryReferenceSelect({
+  value,
+  sources,
+  sourceInventoryKnown,
+  onChange,
+}: {
+  value: Extract<Condition, { field: "category_ref" }>
+  sources: ProcessingEditor["sources"]
+  sourceInventoryKnown: boolean
+  onChange: (value: Condition) => void
+}) {
+  const { t } = useTranslation("app")
+  const serialized = JSON.stringify(value.value)
+  const activeCategories = [
+    ...new Set(
+      sources
+        .filter((source) => source.category !== null && source.view >= 0)
+        .map((source) => JSON.stringify({ view: source.view, name: source.category })),
+    ),
+  ]
+  const active = activeCategories.includes(serialized)
+  const identityStatus = active ? "active" : sourceInventoryKnown ? "missing" : "unknown"
+  const selectedLabel = value.value.name
+    ? `${value.value.name} · ${t(viewLabels[value.value.view] ?? "processing.choose")}`
+    : t("processing.choose")
+  return (
+    <div className="space-y-1">
+      <select
+        className={processingInputClass}
+        aria-label={t("processing.value")}
+        value={serialized}
+        onChange={(event) =>
+          onChange({
+            ...value,
+            value: JSON.parse(event.target.value) as { view: number; name: string },
+          })
+        }
+      >
+        <option value={serialized}>
+          {selectedLabel}
+          {identityStatus === "missing"
+            ? ` · ${t("processing.category_identity_missing")}`
+            : identityStatus === "unknown"
+              ? ` · ${t("processing.category_identity_unknown")}`
+              : ""}
+        </option>
+        {activeCategories
+          .filter((category) => category !== serialized)
+          .map((category) => {
+            const item = JSON.parse(category) as { view: number; name: string }
+            return (
+              <option key={category} value={category}>
+                {item.name} · {t(viewLabels[item.view] ?? "processing.choose")}
+              </option>
+            )
+          })}
+      </select>
+      {identityStatus === "missing" && (
+        <p role="alert" className="text-sm text-red">
+          {t("processing.category_identity_repair", {
+            name: value.value.name,
+            view: value.value.view,
+          })}
+        </p>
+      )}
+      {identityStatus === "unknown" && value.value.name && (
+        <p className="text-sm text-text-secondary">
+          {t("processing.category_identity_unverified")}
+        </p>
       )}
     </div>
   )

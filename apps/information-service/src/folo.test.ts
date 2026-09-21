@@ -183,12 +183,37 @@ describe("FoloReader", () => {
       {
         body: {
           code: 0,
-          data: { list: { id: "l1", feeds: [{ id: "f1" }, { id: "f2" }], feedIds }, feedCount },
+          data: {
+            list: {
+              id: "l1",
+              ownerUserId: "owner-list-1",
+              feeds: [{ id: "f1" }, { id: "f2" }],
+              feedIds,
+            },
+            feedCount,
+          },
         },
       },
     ])
-    expect(await reader.listMembers("l1")).toEqual({ feedIds: ["f1", "f2"], complete })
+    expect(await reader.listMembers("l1")).toEqual({
+      feedIds: ["f1", "f2"],
+      complete,
+      ownerId: "owner-list-1",
+    })
     expect(fetch.mock.calls[0]?.[0]).toBe(`${apiUrl}/lists?listId=l1`)
+  })
+
+  it("List 未返回 ownerUserId 时保持未知，不从其他字段推断", async () => {
+    const { reader } = mockReader([
+      {
+        body: {
+          code: 0,
+          data: { list: { id: "l1", feeds: [], feedIds: [] }, feedCount: 0 },
+        },
+      },
+    ])
+
+    expect(await reader.listMembers("l1")).toEqual({ feedIds: [], complete: true, ownerId: null })
   })
 
   it("保留同时间条目并原样暴露时间边界，不声称消除了漏页风险", async () => {
