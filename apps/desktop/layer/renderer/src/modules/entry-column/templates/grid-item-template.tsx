@@ -16,7 +16,7 @@ import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
-import { SemanticDuplicateBadge } from "../semantic-duplicate-badge"
+import { MergedEntriesBadge } from "../merged-entries-badge"
 import { StarIcon } from "../star-icon"
 import type { UniversalItemProps } from "../types"
 
@@ -118,7 +118,7 @@ export const GridItemFooter = ({
         <span className={cn("min-w-0 truncate pl-1", descriptionClassName)}>
           <FeedTitle feed={feeds} />
         </span>
-        <SemanticDuplicateBadge className={timeClassName} entryId={entryId} />
+        <MergedEntriesBadge className={timeClassName} entryId={entryId} />
         <span className={cn("text-zinc-500", timeClassName)}>·</span>
         <span className={cn("text-zinc-500", timeClassName)}>
           {dayjs.duration(dayjs(entry?.publishedAt).diff(dayjs(), "minute"), "minute").humanize()}

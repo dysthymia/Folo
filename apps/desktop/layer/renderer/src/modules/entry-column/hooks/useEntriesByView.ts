@@ -12,10 +12,10 @@ import {
   useEntryIdsByView,
 } from "@follow/store/entry/hooks"
 import {
-  getSemanticDuplicateEntryRole,
-  useSemanticDedupeProcessor,
-  useSemanticDedupeRevision,
-} from "@follow/store/entry/semantic-dedupe"
+  isEntryHiddenByProcessingRole,
+  useEntryProcessingRolesRevision,
+} from "@follow/store/entry/processing-role"
+import { useSemanticDedupeProcessor } from "@follow/store/entry/semantic-dedupe"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
 import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
@@ -34,6 +34,7 @@ import { useGeneralSettingKey } from "~/atoms/settings/general"
 import { ROUTE_FEED_PENDING } from "~/constants/app"
 import { useFeature } from "~/hooks/biz/useFeature"
 import { useRouteParams } from "~/hooks/biz/useRouteParams"
+import { useServiceProcessingRoles } from "~/modules/information/processing-role-client"
 
 import { aiTimelineEnabledAtom } from "../atoms/ai-timeline"
 import { getVisibleLocalEntryIds } from "./filter-local-entry-ids"
@@ -278,14 +279,17 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
   const rawEntryIds: string[] = query.entriesIds
   const semanticDedupeEnabled = useAISettingKey("semanticDedupeEnabled")
   useSemanticDedupeProcessor(semanticDedupeEnabled ? rawEntryIds : [])
-  const semanticDedupeRevision = useSemanticDedupeRevision()
+  // 处理服务的决策（隐藏、综述、同内容转载）先落到角色层，再和本地去重一起生效。
+  useServiceProcessingRoles()
+  // 时间线只读统一角色层：本地去重与处理服务决策都在这里生效，避免各接一套。
+  const processingRoleRevision = useEntryProcessingRolesRevision()
   const entryIds = useMemo(() => {
-    void semanticDedupeRevision
+    void processingRoleRevision
 
-    if (!semanticDedupeEnabled) return rawEntryIds
-
-    return rawEntryIds.filter((entryId) => getSemanticDuplicateEntryRole(entryId) !== "duplicate")
-  }, [rawEntryIds, semanticDedupeEnabled, semanticDedupeRevision])
+    return rawEntryIds.filter(
+      (entryId) => !isEntryHiddenByProcessingRole(entryId, { localDedupe: semanticDedupeEnabled }),
+    )
+  }, [rawEntryIds, semanticDedupeEnabled, processingRoleRevision])
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

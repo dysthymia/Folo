@@ -57,14 +57,6 @@ export interface SemanticDuplicateDecision extends SemanticDuplicateEvaluation {
 
 export type SemanticDuplicateEntryRole = "duplicate" | "keeper" | null
 
-export interface SemanticDuplicateRelatedEntry {
-  feedTitle: string
-  id: string
-  publishedAt: Date | null
-  title: string
-  url: string | null
-}
-
 export interface SemanticDedupeEvaluatorRunInfo {
   candidateCount: number
   command: string | null
@@ -748,57 +740,7 @@ export const getSemanticDuplicateRoleDetail = (
   return mergedEntryIds.length > 0 ? { keepEntryId: null, mergedEntryIds, role: "keeper" } : null
 }
 
-export const useSemanticDuplicateEntryRole = (entryId: string) =>
-  useSemanticDedupeStore((state) =>
-    isSemanticDedupeEligibleEntry(entryId)
-      ? getSemanticDuplicateEntryRoleFromDecisions(state.decisions, entryId)
-      : null,
-  )
-
-const getSemanticDuplicateEntriesForKeeperFromDecisions = (
-  decisions: Record<string, SemanticDuplicateDecision>,
-  entryId: string,
-): SemanticDuplicateRelatedEntry[] => {
-  if (!isSemanticDedupeEligibleEntry(entryId)) return []
-
-  const relatedEntryIds = new Set<string>()
-  const relatedEntries: SemanticDuplicateRelatedEntry[] = []
-
-  for (const decision of Object.values(decisions)) {
-    if (!isConfidentDuplicateDecision(decision)) continue
-    if (decision.keepEntryId !== entryId) continue
-    if (!decision.hideEntryId || relatedEntryIds.has(decision.hideEntryId)) continue
-    if (!isSemanticDedupeEligibleEntry(decision.hideEntryId)) continue
-
-    const duplicateEntry = getEntry(decision.hideEntryId)
-    if (!duplicateEntry) continue
-
-    const feed = duplicateEntry.feedId ? getFeedById(duplicateEntry.feedId) : undefined
-    const subscription = getSubscriptionByEntryId(duplicateEntry.id)
-
-    relatedEntryIds.add(decision.hideEntryId)
-    relatedEntries.push({
-      feedTitle: subscription?.title || feed?.title || "",
-      id: duplicateEntry.id,
-      publishedAt: duplicateEntry.publishedAt ?? null,
-      title: duplicateEntry.title || duplicateEntry.description || duplicateEntry.id,
-      url: duplicateEntry.url || null,
-    })
-  }
-
-  return relatedEntries
-}
-
-export const getSemanticDuplicateEntriesForKeeper = (entryId: string) =>
-  getSemanticDuplicateEntriesForKeeperFromDecisions(
-    useSemanticDedupeStore.getState().decisions,
-    entryId,
-  )
-
-export const useSemanticDuplicateEntriesForKeeper = (entryId: string) =>
-  useSemanticDedupeStore((state) =>
-    getSemanticDuplicateEntriesForKeeperFromDecisions(state.decisions, entryId),
-  )
+// 角色读取与"合并来源"展示统一由 entry/processing-role 提供，本模块只保留引擎自身的决策与角色判断。
 
 export const useSemanticDedupeRevision = () => useSemanticDedupeStore((state) => state.revision)
 const useSemanticDedupeIsReady = () =>

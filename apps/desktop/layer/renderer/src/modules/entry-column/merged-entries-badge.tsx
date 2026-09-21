@@ -3,11 +3,16 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@follow/components/ui/hover-card/index.js"
-import { useSemanticDuplicateEntriesForKeeper } from "@follow/store/entry/semantic-dedupe"
+import {
+  useEntryProcessingRole,
+  useEntryProcessingRoleRelatedEntries,
+} from "@follow/store/entry/processing-role"
 import { cn } from "@follow/utils/utils"
 import type { MouseEvent, PointerEvent } from "react"
+import { useTranslation } from "react-i18next"
 
 import { RelativeTime } from "~/components/ui/datetime"
+import { smartReadingPath } from "~/modules/information/reading-mode-link"
 
 const stopEntryNavigation = (event: MouseEvent | PointerEvent) => {
   event.stopPropagation()
@@ -18,24 +23,41 @@ const preventEntryNavigation = (event: MouseEvent | PointerEvent) => {
   event.stopPropagation()
 }
 
-export const SemanticDuplicateBadge = ({
+/**
+ * Shows the entries merged into this one. The relation comes from the unified
+ * processing role, so it covers both the local semantic dedupe and service side
+ * stories without a second badge.
+ *
+ * A service story representative stays in the timeline as one entry: the badge
+ * marks it as a digest and lists what was folded into it, while the digest body
+ * itself stays in the smart reading page.
+ */
+export const MergedEntriesBadge = ({
   className,
   entryId,
 }: {
   className?: string
   entryId: string
 }) => {
-  const duplicateEntries = useSemanticDuplicateEntriesForKeeper(entryId)
+  const { t } = useTranslation("app")
+  const role = useEntryProcessingRole(entryId)
+  const mergedEntries = useEntryProcessingRoleRelatedEntries(entryId)
+  const isStory = role?.kind === "story" && Boolean(role.storyId)
 
-  if (duplicateEntries.length === 0) return null
+  if (!isStory && mergedEntries.length === 0) return null
+
+  const sourceCount = mergedEntries.length + 1
+  const label = isStory
+    ? t("processing.badge.story_related", { count: mergedEntries.length })
+    : t("processing.badge.merged_entries", { count: mergedEntries.length })
 
   return (
     <HoverCard openDelay={120} closeDelay={120}>
       <HoverCardTrigger asChild>
         <span
-          aria-label={`${duplicateEntries.length} duplicate entries`}
+          aria-label={label}
           className={cn(
-            "inline-flex h-5 shrink-0 cursor-default select-none items-center rounded px-1.5 text-[11px] font-semibold leading-none",
+            "inline-flex h-5 shrink-0 cursor-default select-none items-center gap-0.5 rounded px-1.5 text-[11px] font-semibold leading-none",
             "bg-fill-secondary text-text-secondary transition-colors hover:bg-fill hover:text-text",
             className,
           )}
@@ -44,7 +66,8 @@ export const SemanticDuplicateBadge = ({
           role="button"
           tabIndex={0}
         >
-          +{duplicateEntries.length}
+          {isStory ? t("processing.badge.story") : null}
+          <span className="tabular-nums">{isStory ? sourceCount : `+${mergedEntries.length}`}</span>
         </span>
       </HoverCardTrigger>
       <HoverCardContent
@@ -54,8 +77,24 @@ export const SemanticDuplicateBadge = ({
         onPointerDown={stopEntryNavigation}
         side="top"
       >
+        {isStory && (
+          <div className="mb-1 border-b border-border px-2 pb-1.5 pt-1">
+            <div className="text-[11px] text-text-tertiary">{t("processing.badge.story")}</div>
+            <div className="line-clamp-2 text-xs font-medium text-text">
+              {role?.storyTitle ?? entryId}
+            </div>
+            <a
+              className="mt-1 inline-block text-[11px] text-accent underline"
+              href={smartReadingPath(window.location.pathname + window.location.search)}
+              onClick={stopEntryNavigation}
+              onPointerDown={stopEntryNavigation}
+            >
+              {t("processing.badge.open_story")}
+            </a>
+          </div>
+        )}
         <div className="max-h-72 overflow-y-auto">
-          {duplicateEntries.map((entry) => {
+          {mergedEntries.map((entry) => {
             const content = (
               <>
                 <div className="line-clamp-2 text-xs font-medium text-text">{entry.title}</div>

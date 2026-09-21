@@ -33,7 +33,7 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { HighlightedText } from "~/modules/spotlight/HighlightedText"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
-import { SemanticDuplicateBadge } from "../semantic-duplicate-badge"
+import { MergedEntriesBadge } from "../merged-entries-badge"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
@@ -206,7 +206,7 @@ export function AllItem({
       </div>
 
       <div className="ml-4 flex shrink-0 items-center gap-1 text-xs text-text-secondary">
-        <SemanticDuplicateBadge entryId={entryId} />
+        <MergedEntriesBadge entryId={entryId} />
         {!!displayTime && <RelativeTime date={displayTime} postfix="" />}
       </div>
     </div>

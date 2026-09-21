@@ -8,7 +8,6 @@ import type { SubscriptionModel } from "../subscription/types"
 import type { SemanticDuplicateCandidate } from "./semantic-dedupe"
 import {
   getSemanticDuplicateCandidates,
-  getSemanticDuplicateEntriesForKeeper,
   getSemanticDuplicateEntryRole,
   registerSemanticDuplicateEvaluator,
   semanticDedupeActions,
@@ -207,7 +206,6 @@ describe("semantic duplicate entry marking", () => {
     expect(getSemanticDuplicateCandidates([firstEntry.id, secondEntry.id])).toHaveLength(0)
     expect(getSemanticDuplicateEntryRole("entry-a")).toBeNull()
     expect(getSemanticDuplicateEntryRole("entry-b")).toBeNull()
-    expect(getSemanticDuplicateEntriesForKeeper("entry-a")).toEqual([])
   })
 
   it("prioritizes newer entry candidates before older higher-similarity pairs", () => {
@@ -532,52 +530,5 @@ describe("semantic duplicate entry marking", () => {
     expect(getSemanticDuplicateEntryRole("entry-b")).toBe("duplicate")
     expect(getSemanticDuplicateEntryRole("entry-c")).toBeNull()
     expect(getSemanticDuplicateEntryRole("entry-d")).toBeNull()
-  })
-
-  it("returns hidden duplicate entries for the kept entry", () => {
-    const keptEntry = createEntry({
-      description: "Microsoft disclosed clipboard malware.",
-      id: "entry-a",
-      title: "微软公布新型加密剪贴板木马软件威胁",
-    })
-    const duplicateEntry = createEntry({
-      description: "A clipboard malware campaign can steal crypto wallet addresses.",
-      id: "entry-b",
-      title: "微软公布新型加密剪贴板木马软件威胁，可隐匿传播",
-    })
-
-    useEntryStore.setState((state) => ({
-      ...state,
-      data: {
-        [keptEntry.id]: keptEntry,
-        [duplicateEntry.id]: duplicateEntry,
-      },
-    }))
-    useSemanticDedupeStore.setState({
-      decisions: {
-        "entry-a::entry-b": {
-          confidence: 0.96,
-          duplicate: true,
-          entryIds: ["entry-a", "entry-b"],
-          hideEntryId: "entry-b",
-          keepEntryId: "entry-a",
-          pairKey: "entry-a::entry-b",
-          reason: null,
-          updatedAt: "2026-06-19T12:00:00.000Z",
-        },
-      },
-      revision: 1,
-    })
-
-    expect(getSemanticDuplicateEntriesForKeeper("entry-a")).toEqual([
-      {
-        feedTitle: "BlockBeats",
-        id: "entry-b",
-        publishedAt: duplicateEntry.publishedAt,
-        title: duplicateEntry.title,
-        url: duplicateEntry.url,
-      },
-    ])
-    expect(getSemanticDuplicateEntriesForKeeper("entry-b")).toEqual([])
   })
 })

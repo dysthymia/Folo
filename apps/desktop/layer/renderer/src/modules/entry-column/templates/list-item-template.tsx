@@ -24,7 +24,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
-import { SemanticDuplicateBadge } from "../semantic-duplicate-badge"
+import { MergedEntriesBadge } from "../merged-entries-badge"
 import { EntryStarActionButton } from "../star-action-button"
 import type { UniversalItemProps } from "../types"
 
@@ -200,7 +200,7 @@ export function ListItem({
               className="space-x-0.5"
             />
           </EllipsisHorizontalTextWithTooltip>
-          <SemanticDuplicateBadge entryId={entryId} />
+          <MergedEntriesBadge entryId={entryId} />
           <span className="shrink-0">·</span>
           <span className="shrink-0">{!!displayTime && <RelativeTime date={displayTime} />}</span>
         </div>
