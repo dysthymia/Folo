@@ -77,7 +77,7 @@ describe("长文分块", () => {
         text,
         provider: "codex",
         model: "test-model",
-        instructions,
+        instructions: { ...instructions, display: { language: "en", summaryMaxGraphemes: 2 } },
         sourceRole: "媒体",
         historySince: "2026-09-01T00:00:00.000Z",
         runtimeDir,
@@ -85,6 +85,11 @@ describe("长文分块", () => {
         execute: async (options) => {
           prompts.push(options.prompt)
           const output = outputFor(options, ["甲", "乙", "丙"][chunks]!, ++chunks)
+          if (options.prompt.includes("长文分块阅读器")) {
+            expect(options.validate({ ...output, chunkId: "other-chunk" })).toBe(false)
+          } else {
+            expect(options.validate({ ...output, entryId: "other-entry" })).toBe(false)
+          }
           if (!options.validate(output)) throw new Error("invalid_stub_output")
           return {
             result: output,
@@ -99,6 +104,8 @@ describe("长文分块", () => {
         status: "complete",
       })
       if (result.status !== "complete") throw new Error("unexpected_pending")
+      expect(result.output.summary).toBe("综合")
+      expect(prompts.at(-1)).toContain("标题与摘要使用语言：en")
       expect(result.output.facts.map((fact) => fact.quote[0])).toEqual(["甲", "乙", "丙"])
       expect(result.output.facts.every((fact) => fact.quote.length === 4_000)).toBe(true)
       expect(chunks).toBe(4)
@@ -147,17 +154,11 @@ describe("长文分块", () => {
               summary: "分块摘要",
               facts: [{ text: "事实", evidenceId: "C1E999999", kind: "fact" }],
             }
-            if (!options.validate(output)) throw new Error("invalid_stub_output")
-            return {
-              result: output,
-              model: options.model,
-              durationMs: 1,
-              usage: null,
-              toolCalls: 0,
-            }
+            expect(options.validate(output)).toBe(false)
+            throw new Error("invalid_stub_output")
           },
         }),
-      ).rejects.toThrow("invalid_model_reference")
+      ).rejects.toThrow("invalid_stub_output")
     } finally {
       await rm(runtimeDir, { recursive: true, force: true })
     }
@@ -195,7 +196,10 @@ describe("长文分块", () => {
                   labels: [],
                   facts: [{ text: "事实", evidenceId: "FE999999", kind: "fact" }],
                 }
-            if (!options.validate(output)) throw new Error("invalid_stub_output")
+            if (!options.validate(output)) {
+              expect(options.prompt).not.toContain("长文分块阅读器")
+              throw new Error("invalid_stub_output")
+            }
             return {
               result: output,
               model: options.model,
@@ -205,7 +209,7 @@ describe("长文分块", () => {
             }
           },
         }),
-      ).rejects.toThrow("invalid_model_reference")
+      ).rejects.toThrow("invalid_stub_output")
     } finally {
       await rm(runtimeDir, { recursive: true, force: true })
     }

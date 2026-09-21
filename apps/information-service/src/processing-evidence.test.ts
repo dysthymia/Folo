@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import {
   createEvidenceCatalog,
   createEvidenceCatalogFromQuotes,
   evidenceFactSelectionSchema,
+  evidenceFactsSelectionSchema,
   materializeEvidenceFacts,
   renderEvidenceCatalog,
 } from "./processing-evidence"
@@ -54,5 +56,21 @@ describe("确定性证据目录", () => {
         quote: "自由抄写",
       }).success,
     ).toBe(false)
+  })
+
+  it("请求 schema 只接受当前目录编号，空目录只接受空 facts", () => {
+    const catalog = createEvidenceCatalog("第一句。第二句。")
+    const schema = evidenceFactsSelectionSchema(catalog, 3)
+    const allowed = { text: "事实", kind: "fact", evidenceId: "E000001" }
+    expect(schema.safeParse([allowed]).success).toBe(true)
+    expect(schema.safeParse([{ ...allowed, evidenceId: "E999999" }]).success).toBe(false)
+    expect(z.toJSONSchema(schema)).toMatchObject({
+      items: { properties: { evidenceId: { enum: ["E000001", "E000002"] } } },
+    })
+
+    const empty = createEvidenceCatalogFromQuotes([])
+    const emptySchema = evidenceFactsSelectionSchema(empty, 3)
+    expect(emptySchema.safeParse([]).success).toBe(true)
+    expect(emptySchema.safeParse([allowed]).success).toBe(false)
   })
 })

@@ -1,5 +1,20 @@
-// 提示语义变化时同步递增；该版本同时隔离短文决策缓存与长文分块缓存。
-export const ENTRY_PROMPT_VERSION = 7
+// 单篇、批量和长文共享缓存版本；任一 prompt 语义变化都必须同步递增。
+export const ENTRY_PROMPT_VERSION = 10
+
+// 展示动作也是实际执行指令，不能只进入指纹和设置页。
+export function entryDisplayRequirements(display: {
+  language?: string
+  summaryMaxGraphemes?: number
+}) {
+  return [
+    display.language ? `标题与摘要使用语言：${display.language}；原文引用保持原语言。` : "",
+    display.summaryMaxGraphemes
+      ? `最终摘要最多 ${display.summaryMaxGraphemes} 个可见字符，优先保留关键信息，不靠新增推断压缩。`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+}
 
 export const SOURCE_FIDELITY_REQUIREMENTS = `原文忠实要求：
 - 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。

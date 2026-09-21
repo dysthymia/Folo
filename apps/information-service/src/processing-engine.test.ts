@@ -131,12 +131,239 @@ function executeWith(output: unknown, prompts: string[] = []) {
   }
 }
 
+function batchSelection(entryId: string, evidenceId: string) {
+  return {
+    entryId,
+    title: `标题 ${entryId}`,
+    summary: `摘要 ${entryId}`,
+    disposition: "keep" as const,
+    reason: "原因",
+    aggregation: true,
+    rewrite: true,
+    labels: [],
+    facts: [{ text: "事实", evidenceId, kind: "fact" as const }],
+  }
+}
+
 const aiConfig = {
   read: async () => ({ provider: "codex" as const, model: "test-model" }),
   execution: async () => undefined,
 }
 
+function batchStoreFixture(count: number) {
+  const inputs = Array.from({ length: count }, (_, index) => {
+    const seq = index + 1
+    const body = {
+      ...entry,
+      id: `entry-${seq}`,
+      url: `https://example.test/${seq}`,
+      content: `<p>第 ${seq} 篇真实事实。</p>`,
+    }
+    return { ...input, seq, itemId: body.id, body }
+  })
+  const current = new Map(inputs.map((item) => [item.itemId, item]))
+  const cached = new Map<string, unknown>()
+  const completed = new Map<string, unknown>()
+  const failed: Array<{ inputSeq: number; code: string }> = []
+  const batchRelease: RuleSet = {
+    ...release,
+    rules: [{ ...release.rules[0]!, when: { all: true } }],
+  }
+  const store = {
+    automation: {
+      inputs: () => inputs,
+      release: () => batchRelease,
+      current: (_sourceKey: string, itemId: string) => current.get(itemId) ?? null,
+      complete: (target: (typeof inputs)[number], decision: unknown) => {
+        const latest = current.get(target.itemId)
+        const published =
+          latest?.seq === target.seq &&
+          latest.generation === target.generation &&
+          latest.releaseVersion === target.releaseVersion
+        if (published) completed.set(target.itemId, decision)
+        return { id: `decision-${target.seq}`, published }
+      },
+    },
+    processingState: {
+      prepare: (seq: number, snapshot: unknown) => {
+        const original = inputs[seq - 1]!
+        return { input: current.get(original.itemId) ?? original, snapshot }
+      },
+      start: () => true,
+      cache: (fingerprint: string) => cached.get(fingerprint) ?? null,
+      saveCache: (decision: { fingerprint: string }) => cached.set(decision.fingerprint, decision),
+      fail: (target: (typeof inputs)[number], code: string) =>
+        failed.push({ inputSeq: target.seq, code }),
+      material: () => "complete" as const,
+      overrides: () => [],
+    },
+    sources: () => [
+      { key: "feed/1", kind: "feed", id: "1", title: "媒体订阅", view: 0, category: null },
+    ],
+    sourceSync: {
+      contextFor: () => ({
+        sourceId: "feed/1",
+        contextId: "feed/1",
+        view: null,
+        categoryRef: null,
+        listMembership: {},
+        metadata: { sourceSyncedAt: null, listMembershipVersion: 0 },
+      }),
+    },
+    subscriptionTags: {
+      sourceTagBindings: () => ({ revision: 1, bindings: [] }),
+      snapshot: () => ({ formatVersion: 1, revision: 1, tags: [] }),
+    },
+  } as unknown as ProcessingEngineStore
+  return {
+    store,
+    completed,
+    failed,
+    cacheSize: () => cached.size,
+    bumpGeneration: (itemId: string) => {
+      const previous = current.get(itemId)!
+      current.set(itemId, { ...previous, generation: previous.generation + 1 })
+    },
+  }
+}
+
 describe("单篇处理 engine", () => {
+  it("批量响应逐项隔离证据，并只补做缺失、重复或跨项引用的条目", async () => {
+    const fixture = batchStoreFixture(5)
+    const calls: string[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: async <T>(options: CodexJsonOptions<T>) => {
+        calls.push(options.prompt)
+        const isBatch = options.prompt.includes("有界批量单篇阅读处理器")
+        const requestedId = options.prompt.match(/entryId=(entry-\d+)/u)?.[1]
+        if (isBatch) {
+          const schema = JSON.stringify(options.schema)
+          expect(schema).toContain('"entryId":{"type":"string","enum":["entry-1"]}')
+          expect(schema).toContain('"entryId":{"type":"string","enum":["entry-5"]}')
+          expect(schema).toContain('"evidenceId":{"type":"string","enum":["B1E000001"]}')
+          expect(schema).toContain('"evidenceId":{"type":"string","enum":["B5E000001"]}')
+          expect(schema).toContain(
+            '"required":["entryId","title","summary","disposition","reason","aggregation","rewrite","labels","facts"]',
+          )
+        }
+        const output = isBatch
+          ? {
+              items: [
+                batchSelection("entry-1", "B1E000001"),
+                batchSelection("entry-3", "B3E000001"),
+                batchSelection("entry-3", "B3E000001"),
+                // entry-4 故意引用 entry-1 的命名空间，必须单独补做。
+                batchSelection("entry-4", "B1E000001"),
+                { ...batchSelection("entry-5", "B5E000001"), title: 42 },
+              ],
+            }
+          : batchSelection(requestedId!, "E000001")
+        expect(options.validate(output)).toBe(true)
+        return {
+          result: output as T,
+          model: options.model,
+          durationMs: 2,
+          usage: isBatch
+            ? { inputTokens: 100, outputTokens: 40, cachedInputTokens: 10 }
+            : { inputTokens: 10, outputTokens: 5, cachedInputTokens: 1 },
+          toolCalls: 0,
+        }
+      },
+    })
+
+    expect(result).toMatchObject({ completed: 5, pending: 0, failures: [] })
+    expect(result.usage).toEqual({ inputTokens: 140, outputTokens: 60, cachedInputTokens: 14 })
+    expect(calls).toHaveLength(5)
+    expect(calls.filter((prompt) => prompt.includes("entryId=entry-1"))).toHaveLength(0)
+    expect(calls[0]).toContain("B1E000001")
+    expect(calls[0]).toContain("B4E000001")
+    expect(calls[0]).toContain("B5E000001")
+    expect(fixture.completed.get("entry-1")).toMatchObject({ usage: null, reused: false })
+    expect(fixture.completed.get("entry-2")).toMatchObject({
+      usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 1 },
+      reused: false,
+    })
+  })
+
+  it("多个批次等待期间 generation 换代时不发布旧批结果", async () => {
+    const fixture = batchStoreFixture(10)
+    let calls = 0
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: async <T>(options: CodexJsonOptions<T>) => {
+        calls++
+        const range = calls === 1 ? [1, 8] : [9, 10]
+        const items = Array.from({ length: range[1]! - range[0]! + 1 }, (_, offset) => {
+          const seq = range[0]! + offset
+          return batchSelection(`entry-${seq}`, `B${seq}E000001`)
+        })
+        expect(options.validate({ items })).toBe(true)
+        if (calls === 2) fixture.bumpGeneration("entry-1")
+        return {
+          result: { items } as T,
+          model: options.model,
+          durationMs: 2,
+          usage: { inputTokens: 20, outputTokens: 8, cachedInputTokens: 2 },
+          toolCalls: 0,
+        }
+      },
+    })
+
+    expect(calls).toBe(2)
+    expect(result).toMatchObject({ completed: 9, pending: 1, failures: [] })
+    expect(fixture.completed.has("entry-1")).toBe(false)
+  })
+
+  it("批调用取消后的晚返回只计实际 usage，不写缓存或发布结果", async () => {
+    const fixture = batchStoreFixture(2)
+    const controller = new AbortController()
+    let calls = 0
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: controller.signal,
+      execute: async <T>(options: CodexJsonOptions<T>) => {
+        calls++
+        const output = {
+          items: [batchSelection("entry-1", "B1E000001"), batchSelection("entry-2", "B2E000001")],
+        }
+        expect(options.validate(output)).toBe(true)
+        controller.abort()
+        return {
+          result: output as T,
+          model: options.model,
+          durationMs: 2,
+          usage: { inputTokens: 20, outputTokens: 8, cachedInputTokens: 2 },
+          toolCalls: 0,
+        }
+      },
+    })
+
+    expect(calls).toBe(1)
+    expect(result).toEqual({
+      completed: 0,
+      pending: 2,
+      failures: [],
+      usage: { inputTokens: 20, outputTokens: 8, cachedInputTokens: 2 },
+    })
+    expect(fixture.completed.size).toBe(0)
+    expect(fixture.cacheSize()).toBe(0)
+  })
+
   it.each([
     { standalone: "always" as const, aggregation: "allow" as const, status: "keep" },
     { standalone: "never" as const, aggregation: "allow" as const, status: "hide" },
@@ -291,6 +518,17 @@ describe("单篇处理 engine", () => {
   it("拒绝未知 evidenceId，记录失败且不发布决策", async () => {
     const fixture = storeFixture()
     fixture.setMaterial("complete")
+    const output = {
+      entryId: "entry-1",
+      title: "标题",
+      summary: "摘要",
+      disposition: "keep" as const,
+      reason: "原因",
+      aggregation: true,
+      rewrite: true,
+      labels: [],
+      facts: [{ text: "事实", evidenceId: "E999999", kind: "fact" as const }],
+    }
     const result = await runEntryProcessing({
       store: fixture.store,
       aiConfig: aiConfig as never,
@@ -298,17 +536,24 @@ describe("单篇处理 engine", () => {
       sourceKeys: ["feed/1"],
       historySince: "2026-09-01T00:00:00.000Z",
       signal: new AbortController().signal,
-      execute: executeWith({
-        entryId: "entry-1",
-        title: "标题",
-        summary: "摘要",
-        disposition: "keep",
-        reason: "原因",
-        aggregation: true,
-        rewrite: true,
-        labels: [],
-        facts: [{ text: "事实", evidenceId: "E999999", kind: "fact" }],
-      }),
+      execute: async (options) => {
+        // 真实执行器会先拒绝越界输出；这里绕过一次以证明服务端原有严格校验仍然有效。
+        expect(options.validate(output)).toBe(false)
+        expect(options.validate({ ...output, entryId: "other-entry", facts: [] })).toBe(false)
+        expect(JSON.stringify(options.schema)).toContain(
+          '"entryId":{"type":"string","enum":["entry-1"]}',
+        )
+        expect(JSON.stringify(options.schema)).toContain(
+          '"evidenceId":{"type":"string","enum":["E000001"]}',
+        )
+        return {
+          result: output as never,
+          model: options.model,
+          durationMs: 1,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
     })
 
     expect(result.failures).toEqual([{ inputSeq: 1, code: "invalid_model_reference" }])

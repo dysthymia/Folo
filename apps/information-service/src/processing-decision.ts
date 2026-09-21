@@ -2,7 +2,8 @@ import type { PresentationPolicy, RuleInput } from "@follow/information-core"
 import { z } from "zod"
 
 import type { ProcessingInput } from "./automation-store"
-import { evidenceFactSelectionSchema } from "./processing-evidence"
+import type { EvidenceCatalog } from "./processing-evidence"
+import { evidenceFactSelectionSchema, evidenceFactsSelectionSchema } from "./processing-evidence"
 
 // 模型只能建议语义结论，最终展示/综合/改写资格仍由显式规则和缺失材料保护决定。
 const entryModelBaseSchema = z.object({
@@ -31,11 +32,40 @@ export const entryModelOutputSchema = entryModelBaseSchema
   })
   .strict()
 export type EntryModelOutput = z.infer<typeof entryModelOutputSchema>
+
+export function applyEntryDisplay(
+  output: EntryModelOutput,
+  display: { summaryMaxGraphemes?: number },
+): EntryModelOutput {
+  if (!display.summaryMaxGraphemes) return output
+  // 展示长度由程序执行，按 grapheme 截断不切开 emoji；事实和原文引用不受影响。
+  const segments = [
+    ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(output.summary),
+  ]
+  if (segments.length <= display.summaryMaxGraphemes) return output
+  return {
+    ...output,
+    summary: segments
+      .slice(0, display.summaryMaxGraphemes)
+      .map((item) => item.segment)
+      .join(""),
+  }
+}
 // 模型只选择证据编号；持久化前由服务端还原为上面的既有 quote 结构。
 export const entryModelSelectionSchema = entryModelBaseSchema
   .extend({ facts: z.array(evidenceFactSelectionSchema).max(30) })
   .strict()
 export type EntryModelSelection = z.infer<typeof entryModelSelectionSchema>
+
+// 请求级 schema 同时约束当前条目与当前证据目录；静态 schema 继续负责通用类型和持久化边界。
+export function createEntryModelSelectionSchema(entryId: string, catalog: EvidenceCatalog) {
+  return entryModelBaseSchema
+    .extend({
+      entryId: z.enum([entryId]),
+      facts: evidenceFactsSelectionSchema(catalog, 30),
+    })
+    .strict()
+}
 export type ProcessingDecision = {
   schemaVersion: 1
   fingerprint: string

@@ -20,6 +20,23 @@ export type EvidenceCatalogOptions = { prefix?: string; maxFragmentChars?: numbe
 const MAX_QUOTE_CHARS = 4_000
 const prefixPattern = /^[A-Za-z][\w-]{0,31}$/u
 
+// 每次请求只把本次目录里的编号暴露给结构化输出；空目录只能返回空 facts。
+export function evidenceFactsSelectionSchema(catalog: EvidenceCatalog, maxFacts: number) {
+  if (!Number.isSafeInteger(maxFacts) || maxFacts < 0)
+    throw new Error("invalid_evidence_fact_limit")
+  const [firstEvidenceId, ...remainingEvidenceIds] = catalog.fragments.map(
+    (fragment) => fragment.evidenceId,
+  )
+  if (firstEvidenceId === undefined) return z.array(evidenceFactSelectionSchema).max(0)
+  return z
+    .array(
+      evidenceFactSelectionSchema.extend({
+        evidenceId: z.enum([firstEvidenceId, ...remainingEvidenceIds]),
+      }),
+    )
+    .max(maxFacts)
+}
+
 // 原文只出现一次；模型选择编号，服务端持有编号到连续原文的唯一映射。
 export function createEvidenceCatalog(
   text: string,
