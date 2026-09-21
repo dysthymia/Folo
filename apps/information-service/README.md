@@ -4,7 +4,7 @@
 
 早期 P0 实测见 [P0 验证记录](../../docs/information-p0-verification.md)。真实 Feed 已跑通读取、模型处理、落盘和同域展示；长期观察及分页覆盖边界仍待验收。
 
-v3.1 的完整开发范围和逐项状态见 [开发与验收台账](../../docs/information-v3.1-progress.md)。新增规则核心和 `/information/v1/` 草稿/发布/预览 API 已有定向测试，尚未部署，也尚未连接规则执行 worker 或现有 Actions 编辑器；不能将这些接口视为完整自动化功能。
+v3.1 的完整开发范围和逐项状态见 [开发与验收台账](../../docs/information-v3.1-progress.md)。规则核心与 `/information/v1/` API 已连接 Actions、后台 worker 和稳定阅读页。日常配置、标签、预览、发布回退与排错见 [使用与运维手册](../../docs/information-user-guide.md)。开发完成度与真实效果验收分别记录。
 
 ## 运行
 
@@ -14,6 +14,7 @@ v3.1 的完整开发范围和逐项状态见 [开发与验收台账](../../docs/
 pnpm install --frozen-lockfile
 pnpm --filter @follow/information-service build
 pnpm --filter @follow/information-service build:web
+pnpm --filter Folo build:web
 
 # 推荐：安装或更新 macOS 登录后常驻服务（等待当前任务结束再执行）。
 python3 apps/information-service/scripts/install-launch-agent.py
@@ -30,7 +31,7 @@ python3 apps/information-service/scripts/install-launch-agent.py
 
 `connect` 命令仅保留打开工作台的兼容入口，不签发本地会话。旧 `/information/connect` 返回 410，旧 Cookie 不再授权；快照接口只接受同源 POST 和新的一次性凭据。服务仍仅监听127.0.0.1:2240，Apache 代理 `/information` 与 `/information-static/`，主站页面也由同域生产构建提供。
 
-## 扫描与处理
+## 旧 P0 调试命令
 
 ```sh
 # 使用 sync 返回的真实来源 key，支持 feed/、list/、inbox/。
@@ -51,13 +52,15 @@ pnpm --filter @follow/information-service start resume --job '<scan-job-id>'
 pnpm --filter @follow/information-service start members --source 'list/<id>'
 ```
 
+以下描述是旧 P0 调试队列的口径；正式自动化由 Actions 计划驱动，智能阅读按固定快照分页提供全量范围，不受此调试快照条数限制。
+
 `scan` / `process` 只入队；`serve` 或 `run-once` 执行队列，二者不能同时作为 worker。扫描默认3页、每页5条并取详情，不代表历史全量完成。`status` 返回最近100项任务；Web最多展示最近200条输入和100条结果。分页字段 `coverage` 区分 `pending`、`budget`、`end`、`timestamp_boundary`，`succeeded` 只代表本次作业正常结束。
 
 现有上游分页用 `publishedAfter` 表示继续读取更早条目。没有可验证的 ID 次序游标，时间戳密集边界、API保留范围、迟到条目和更新覆盖都必须实测；不能把短页当作全部历史已覆盖的证明。适配器在游标不前进或页面逆序时失败并保留断点。检测到多条相同边界时间时保留覆盖缺口标记，不使用减1毫秒跳过数据。
 
 页面详情与水位在同一 SQLite 事务提交；事务回滚时内存水位也不前进。进程重启后扫描恢复排队，运行中的模型任务标为 `interrupted_model_outcome_unknown`，不自动重复调用。对相同账号、来源、条目、正文、标题、材料类型、模型与 Prompt 版本，成功结果幂等复用。需重试失败的模型任务时明确重新入队。
 
-`source_text` 表示上游提供的正文，不保证是外站文章全文。Feed/List 详情没有有效正文时，按条目 ID 请求 Folo 官方 readability 接口；仍没有正文才处理描述并标记 `description_only`。正文接口认证或网络错误显式失败；邮箱只使用邮件自身材料。没有材料报 `material_missing`；超过60000字符报 `needs_context`，不静默截断。P0不主动抓取任意外部URL，不修改官方条目阅读状态。
+`source_text` 表示上游提供的正文，不保证是外站文章全文。Feed/List 详情没有有效正文时，按条目 ID 请求 Folo 官方 readability 接口；仍没有正文才处理描述并标记 `description_only`。正文接口认证或网络错误显式失败；邮箱只使用邮件自身材料。没有材料报 `material_missing`。旧 P0 命令超过60000字符报 `needs_context`；正式自动化对长文执行完整分块、逐块引用校验与综合，不静默截断，分块或汇总失败仍保留明确待处理状态。不会主动抓取任意外部 URL 或自动修改官方条目阅读状态。
 
 ## Folo AI 模型设置
 

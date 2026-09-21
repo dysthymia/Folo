@@ -280,5 +280,69 @@
       "账本不保存 triggerId，按已完成 trigger 的时间区间关联；不包含原生 chat 或区间外调用。",
       "吞吐只描述最后 17 次串行 entry 调用的观测窗口，不代表稳态容量或全天恢复能力。"
     ]
+  },
+  "productRelease20260920": {
+    "at": "2026-09-19T16:41:57.726098+00:00",
+    "origin": "http://local.folo.is",
+    "runtimeSHA256": "602edacdf5bf767acafd4e5d644c0e1e793296f08c052391fa534b22cd9dd35c",
+    "development": "core_functionality_implemented",
+    "validation": {
+      "serviceTests": 266,
+      "codexSubprocessTests": 15,
+      "rendererTests": 82,
+      "coreTests": 26,
+      "storeTests": 8,
+      "typecheck": ["information-service", "information-core", "store", "web"],
+      "lint": "0 errors; 2 pre-existing React warnings",
+      "productionBuilds": ["service", "information-web", "main-web"]
+    },
+    "isolatedRealBatchSmoke": {
+      "model": "qwen3.8-flash",
+      "harness": "codex_cli",
+      "syntheticEntries": 2,
+      "modelCalls": 1,
+      "completed": 2,
+      "failures": 0,
+      "quotesMatchSource": true,
+      "inputTokens": 3404,
+      "outputTokens": 286,
+      "productionDataModified": false
+    },
+    "backup": "~/.local/share/folo-information-p0/backups/before-product-completion-20260920.sqlite",
+    "backupQuickCheck": "ok",
+    "browserVerified": [
+      "existing_login_actions_loaded",
+      "public_export_default",
+      "trial_explicit_button",
+      "release_impact_counts",
+      "history_v2_loaded",
+      "restore_to_draft_confirmation"
+    ],
+    "browserPending": "remaining reader and context-menu interactions blocked by Chrome extension UI",
+    "acceptanceOutstanding": [
+      "user-confirmed semantic evaluation corpus",
+      "real List permission/coverage cases",
+      "sustained capacity and disaster recovery drills",
+      "optional external integrations"
+    ],
+    "git": "not_committed_or_pushed",
+    "deployedFrontendArtifacts": {
+      "main-web": {
+        "files": 427,
+        "matchesBuild": true,
+        "indexSHA256": "eca60dd3d0a880c92030e1430a9cb9e399bb76a4c2284e9ca3515246a0587e27"
+      },
+      "information-web": {
+        "files": 453,
+        "matchesBuild": true,
+        "indexSHA256": "d709f9cc74de15fa2acbcc4504efbbe569ffb21a45c4254071aca6582a9f4f17"
+      }
+    },
+    "httpVerification": {
+      "paths": ["/information", "/action?scope=processing_service", "/ai"],
+      "allStatus200": true,
+      "viteClientAbsent": true
+    },
+    "lastFrontendFix": "Frozen target count is shown only for an existing release; history copy-to-draft text describes confirmation and publishing a new release."
   }
 }
