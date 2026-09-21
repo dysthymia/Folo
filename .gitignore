@@ -23,6 +23,9 @@ vite.config.*.mjs
 .generated
 .turbo
 
+# pnpm content-addressable store (local cache)
+.pnpm-store
+
 apps/desktop/src/renderer/dev-dist
 tsconfig.tsbuildinfo
 buildServer.json
