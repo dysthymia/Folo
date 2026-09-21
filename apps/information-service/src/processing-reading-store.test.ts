@@ -201,7 +201,7 @@ describe("时间线角色投影", () => {
     ])
   })
 
-  it("恢复覆盖让隐藏条目回到时间线，手动隐藏无需重新处理", () => {
+  it("恢复覆盖让隐藏条目回到时间线并标注为已恢复，手动隐藏无需重新处理", () => {
     const store = fixture()
     publishRelease(store)
     const restored = publishDecision(store, entry("restored", "2026-01-01T00:00:00.000Z"), {
@@ -211,7 +211,96 @@ describe("时间线角色投影", () => {
     store.processingState.setOverride(restored.seq, "restore", 0)
     store.processingState.setOverride(forced.seq, "hide", 0)
 
-    expect(rolesOf(store)).toEqual([expect.objectContaining({ itemId: "forced", kind: "hidden" })])
+    // 恢复后条目要以 restored 回到时间线（不是悄悄消失成「无角色」），手动隐藏的要保持 hidden。
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "restored", inputSeq: restored.seq, kind: "restored" }),
+      expect.objectContaining({ itemId: "forced", kind: "hidden" }),
+    ])
+  })
+
+  it("取消恢复（改回 automatic）后条目重新被规则隐藏", () => {
+    const store = fixture()
+    publishRelease(store)
+    const restored = publishDecision(store, entry("restored", "2026-01-01T00:00:00.000Z"), {
+      status: "hide",
+    })
+    store.processingState.setOverride(restored.seq, "restore", 0)
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "restored", kind: "restored" }),
+    ])
+
+    store.processingState.setOverride(restored.seq, "automatic", 1)
+
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "restored", kind: "hidden" }),
+    ])
+  })
+
+  it("恢复综述成员让它退出并入，代表条目的来源计数同步扣减", () => {
+    const store = fixture()
+    const otherSource = { ...source, key: "feed/f2", id: "f2", title: "其他来源" }
+    store.replaceSources([source, otherSource])
+    publishRelease(store)
+    const first = publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    createAggregateStory(store, [first, second], "同事件综述")
+
+    // 基线：较新的一条代表整篇，较早的一条并入它。
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "one", kind: "merged" }),
+      expect.objectContaining({ itemId: "two", kind: "story", relatedEntryIds: ["one"] }),
+    ])
+
+    store.processingState.setOverride(first.seq, "restore", 0)
+
+    // 恢复后该条目以 restored 回到时间线；它是综述唯一成员，代表条目退回普通条目，
+    // 不留一个「综述 · 1」的空壳角标。
+    expect(rolesOf(store)).toEqual([expect.objectContaining({ itemId: "one", kind: "restored" })])
+  })
+
+  it("恢复综述代表本身不改变归属：它本来就是可见的那一条", () => {
+    const store = fixture()
+    const otherSource = { ...source, key: "feed/f2", id: "f2", title: "其他来源" }
+    store.replaceSources([source, otherSource])
+    publishRelease(store)
+    const first = publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    createAggregateStory(store, [first, second], "同事件综述")
+
+    store.processingState.setOverride(second.seq, "restore", 0)
+
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "one", kind: "merged" }),
+      expect.objectContaining({ itemId: "two", kind: "story", relatedEntryIds: ["one"] }),
+    ])
+  })
+
+  it("同一原帖的转载被恢复后不再算作已并入", () => {
+    const store = fixture()
+    const otherSource = { ...source, key: "feed/f2", id: "f2", title: "其他来源" }
+    store.replaceSources([source, otherSource])
+    publishRelease(store)
+    const post = "1900000000000000001"
+    const first = publishDecision(store, {
+      ...entry(`x:${post}`, "2026-01-01T00:00:00.000Z"),
+      url: `https://x.com/u/status/${post}`,
+    })
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const repost = publishDecision(store, {
+      ...entry(`x:${post}`, "2026-01-03T00:00:00.000Z"),
+      sourceKey: otherSource.key,
+      url: `https://x.com/u/status/${post}`,
+    })
+    createAggregateStory(store, [first, second], "同事件综述")
+
+    // 转载默认并入代表条目；手工恢复后它以 restored 独立占位。
+    expect(rolesOf(store).find((role) => role.inputSeq === repost.seq)?.kind).toBe("merged")
+
+    store.processingState.setOverride(repost.seq, "restore", 0)
+
+    expect(rolesOf(store)).toContainEqual(
+      expect.objectContaining({ itemId: `x:${post}`, inputSeq: repost.seq, kind: "restored" }),
+    )
   })
 
   it("综述按最新成员代表整篇，其余成员与同内容转载都并入它", () => {
@@ -591,5 +680,52 @@ describe("稳定阅读快照", () => {
       markdown: null,
       references: [],
     })
+  })
+
+  // 综述摘要（GET /processing/stories/:storyId/digest）：时间线就地读综述的数据源，
+  // §6 场景二要求来源数 ≥2、可看到句段引用与更新时间，这里逐项钉住。
+  it("综述摘要给出来源数、逐句引用与更新时间", () => {
+    const store = fixture()
+    const otherSource = { ...source, key: "feed/f2", id: "f2", title: "其他来源" }
+    store.replaceSources([source, otherSource])
+    publishRelease(store)
+    const first = publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const storyId = createAggregateStory(store, [first, second], "同事件综述")
+
+    const digest = processingApi(store, "GET", `/processing/stories/${storyId}/digest`, {}) as {
+      status: string
+      sourceCount: number
+      sentences: Array<{ citations: Array<{ quote: string; sourceTitle: string }> }>
+      sources: unknown[]
+      updatedAt: string | null
+      revision: number | null
+      uncitedSentenceCount: number
+      body: string
+    }
+
+    expect(digest.status).toBe("ready")
+    expect(digest.sourceCount).toBeGreaterThanOrEqual(2)
+    expect(digest.sources).toHaveLength(2)
+    expect(digest.body).toContain("同事件综述")
+    expect(digest.updatedAt).not.toBeNull()
+    expect(digest.revision).toBe(1)
+    // 每句都带可核查的连续原文，前端才能显示句段引用。
+    expect(digest.sentences).toHaveLength(2)
+    for (const sentence of digest.sentences) {
+      expect(sentence.citations).toHaveLength(1)
+      expect(sentence.citations[0]!.quote).toContain("可核查事实")
+      expect(sentence.citations[0]!.sourceTitle).toBeTruthy()
+    }
+    expect(digest.uncitedSentenceCount).toBe(0)
+  })
+
+  it("不存在的综述返回 missing，而不是抛错或返回别篇", () => {
+    const store = fixture()
+    publishRelease(store)
+
+    expect(
+      processingApi(store, "GET", `/processing/stories/${randomUUID()}/digest`, {}),
+    ).toMatchObject({ status: "missing", revision: null, sourceCount: 0, sentences: [] })
   })
 })

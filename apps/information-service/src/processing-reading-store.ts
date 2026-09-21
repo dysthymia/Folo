@@ -789,7 +789,11 @@ export class ProcessingReadingStore {
       if (override?.mode !== "restore") continue
       if (!publishedBySeq.has(input.seq)) continue
       const current = roles.get(input.seq)
-      if (!current || (current.kind !== "hidden" && current.kind !== "merged")) continue
+      // 恢复本身已经让它不再被隐藏，所以「由决定隐藏」的条目在这里不会留下 hidden 角色。
+      // 要按「若没有这次恢复会被隐藏」来判定，否则恢复只让条目悄悄回到列表、看不出效果。
+      const wouldBeHidden = this.entryHidden(undefined, publishedBySeq.get(input.seq)?.decision)
+      if (!current && !wouldBeHidden) continue
+      if (current && current.kind !== "hidden" && current.kind !== "merged") continue
       roles.set(input.seq, {
         itemId: input.itemId,
         inputSeq: input.seq,
