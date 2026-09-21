@@ -39,6 +39,12 @@ const config: RuleSet = {
             anyOf: [{ allOf: [{ field: "list_id", operator: "in", value: ["private-list"] }] }],
           },
         },
+        {
+          type: "ai_dedupe",
+          scope: {
+            anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: ["private-source"] }] }],
+          },
+        },
       ],
     },
   ],
@@ -73,6 +79,13 @@ describe("规则导出范围", () => {
           ],
         },
       ],
+    })
+    // 去重动作的参与范围同样是私人身份，导出必须一并替换。
+    expect(exported.rules[0]?.actions[1]).toEqual({
+      type: "ai_dedupe",
+      scope: {
+        anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: ["REPLACE_SOURCE_ID"] }] }],
+      },
     })
     expect(JSON.stringify(config)).toBe(before)
   })

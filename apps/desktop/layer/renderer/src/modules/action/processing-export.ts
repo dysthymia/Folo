@@ -41,7 +41,7 @@ export function processingExport(config: RuleSet, scope: ProcessingExportScope):
       enabled: false,
       when: publicConditions(rule.when),
       actions: rule.actions.map((action) =>
-        action.type === "ai_aggregate"
+        action.type === "ai_aggregate" || action.type === "ai_dedupe"
           ? { ...action, scope: publicConditions(action.scope) }
           : action,
       ),

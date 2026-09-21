@@ -136,6 +136,50 @@ export function ProcessingActionEditor({
               </label>
             </div>
           )}
+          {action.type === "ai_dedupe" && (
+            <>
+              <p className="text-sm text-text-secondary">{t("processing.dedupe_hint")}</p>
+              {isInheritedScope(action.scope) && !expandedScopes[index] ? (
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">{t("processing.dedupe_scope")}</p>
+                  <p className="text-sm text-text-secondary">
+                    {t("processing.dedupe_scope_inherited")}
+                  </p>
+                  <button
+                    type="button"
+                    className={processingButtonClass}
+                    onClick={() => setScopeExpanded(index, true)}
+                  >
+                    {t("processing.dedupe_scope_customize")}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{t("processing.dedupe_scope")}</p>
+                    <button
+                      type="button"
+                      className={processingButtonClass}
+                      onClick={() => {
+                        update(index, { ...action, scope: { all: true } })
+                        setScopeExpanded(index, false)
+                      }}
+                    >
+                      {t("processing.dedupe_scope_inherit")}
+                    </button>
+                  </div>
+                  <ProcessingConditionEditor
+                    value={action.scope}
+                    sources={sources}
+                    tags={tags}
+                    listMemberships={listMemberships}
+                    sourceInventoryKnown={sourceInventoryKnown}
+                    onChange={(scope) => update(index, { ...action, scope })}
+                  />
+                </div>
+              )}
+            </>
+          )}
           {action.type === "ai_aggregate" && (
             <>
               <ProcessingPresetPicker
@@ -263,6 +307,14 @@ export function ProcessingActionEditor({
           onClick={() => onChange([...actions, createSameEventAggregateAction()])}
         >
           {t("processing.add_same_event")}
+        </button>
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={actions.some((action) => action.type === "ai_dedupe")}
+          onClick={() => onChange([...actions, { type: "ai_dedupe", scope: { all: true } }])}
+        >
+          {t("processing.add_dedupe")}
         </button>
       </div>
     </div>

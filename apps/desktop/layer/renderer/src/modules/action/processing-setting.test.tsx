@@ -285,6 +285,30 @@ describe("ProcessingSetting", () => {
     )
   })
 
+  it("通过动作编辑器添加同事件去重，参与范围默认沿用规则范围", async () => {
+    await render()
+
+    await act(async () => findButton(container!, "processing.add_dedupe")?.click())
+    // 已经存在一个去重动作时按钮禁用，避免落成同规则里的重复设置而保存失败。
+    expect(findButton(container!, "processing.add_dedupe")?.disabled).toBe(true)
+    await act(async () => findButton(container!, "processing.save")?.click())
+
+    expect(clientMock.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rules: [
+          expect.objectContaining({
+            actions: [
+              { type: "ai_transform", prompt: "summarize" },
+              { type: "ai_dedupe", scope: { all: true } },
+            ],
+          }),
+        ],
+      }),
+      11,
+      expect.any(AbortSignal),
+    )
+  })
+
   it("keeps an invalid empty condition explicit and disables saving", async () => {
     await render()
     const mode = container!.querySelector<HTMLSelectElement>(

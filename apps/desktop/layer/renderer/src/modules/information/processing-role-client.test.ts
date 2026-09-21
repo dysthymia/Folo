@@ -37,15 +37,19 @@ afterEach(() => {
 })
 
 describe("processing role client", () => {
-  it("严格校验角色投影，拒绝未声明字段与本地角色类型", () => {
+  it("严格校验角色投影，拒绝未声明字段与非法角色类型", () => {
     expect(processingEntryRolesResponseSchema.safeParse({ roles }).success).toBe(true)
     expect(
       processingEntryRolesResponseSchema.safeParse({ roles: [{ ...roles[0], unexpected: true }] })
         .success,
     ).toBe(false)
-    // keeper 只属于本地去重，服务端不该产生它。
+    // 服务端的语义去重同样会产出 keeper：它保留了内容，角标列出被并入的条目。
     expect(
       processingEntryRolesResponseSchema.safeParse({ roles: [{ ...roles[0], kind: "keeper" }] })
+        .success,
+    ).toBe(true)
+    expect(
+      processingEntryRolesResponseSchema.safeParse({ roles: [{ ...roles[0], kind: "unknown" }] })
         .success,
     ).toBe(false)
   })

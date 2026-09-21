@@ -11,7 +11,8 @@ const entryRoleSchema = z
   .object({
     itemId: z.string().min(1),
     inputSeq: z.number().int().positive(),
-    kind: z.enum(["hidden", "story", "merged"]),
+    // `keeper` 来自服务端的语义去重：它保留了内容，角标列出被并入的条目。
+    kind: z.enum(["hidden", "story", "merged", "keeper"]),
     reason: z.string().nullable(),
     relatedEntryIds: z.array(z.string().min(1)),
     storyId: z.string().nullable(),

@@ -179,6 +179,15 @@ const aggregateSchema = z
   })
   .strict()
 
+const dedupeSchema = z
+  .object({
+    ruleId: identifierSchema,
+    version: positiveIntegerSchema,
+    order: revisionSchema,
+    scope: conditionSetSchema,
+  })
+  .strict()
+
 export const processingPreviewWireSchema = z
   .object({
     entryId: z.string().min(1),
@@ -231,6 +240,7 @@ export const processingPreviewWireSchema = z
         .strict(),
     ),
     aggregates: z.array(aggregateSchema),
+    dedupes: z.array(dedupeSchema),
   })
   .strict()
 

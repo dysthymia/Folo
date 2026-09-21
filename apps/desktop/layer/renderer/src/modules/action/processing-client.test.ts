@@ -143,6 +143,7 @@ const previewResponse = {
   blocksFinalPresentation: false,
   transformations: [{ ruleId: "rule-1", version: 1, order: 0, prompt: "summarize" }],
   aggregates: [],
+  dedupes: [{ ruleId: "rule-1", version: 1, order: 0, scope: { all: true as const } }],
 }
 
 describe("createProcessingClient", () => {
