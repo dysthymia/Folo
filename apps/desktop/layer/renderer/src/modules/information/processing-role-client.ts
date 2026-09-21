@@ -12,7 +12,8 @@ const entryRoleSchema = z
     itemId: z.string().min(1),
     inputSeq: z.number().int().positive(),
     // `keeper` 来自服务端的语义去重：它保留了内容，角标列出被并入的条目。
-    kind: z.enum(["hidden", "story", "merged", "keeper"]),
+    // `restored` 是用户手动恢复的条目，它豁免隐藏与并入，时间线要照常显示。
+    kind: z.enum(["hidden", "story", "merged", "keeper", "restored"]),
     reason: z.string().nullable(),
     relatedEntryIds: z.array(z.string().min(1)),
     storyId: z.string().nullable(),
@@ -40,6 +41,7 @@ export function toServiceProcessingRoles(
     kind: role.kind,
     reason: role.reason,
     relatedEntryIds: role.relatedEntryIds,
+    inputSeq: role.inputSeq,
     ...(role.storyId ? { storyId: role.storyId } : {}),
     ...(role.storyTitle ? { storyTitle: role.storyTitle } : {}),
   }))
@@ -68,7 +70,12 @@ export function syncServiceProcessingRoles(): Promise<void> {
 /**
  * 把处理服务的决策接进时间线。只在处理服务可用的部署（`local.folo.is`）下工作，
  * 正式站点不请求本地服务。
+ *
+ * 后台跑完一轮不会主动通知渲染层，因此除挂载与切回标签页之外，可见期间按固定间隔
+ * 轮询一次：间隔远大于一轮处理的耗时量级，代价是每分钟一个本机请求。
  */
+const ROLE_POLL_INTERVAL_MS = 60_000
+
 export function useServiceProcessingRoles() {
   useEffect(() => {
     if (!isLocalFoloHost()) return
@@ -79,8 +86,13 @@ export function useServiceProcessingRoles() {
       if (document.visibilityState === "visible") void syncServiceProcessingRoles()
     }
     document.addEventListener("visibilitychange", handleVisibilityChange)
+    // 后台任务没有推送通道，只能在可见时轮询；隐藏时停表，避免无意义的本机请求。
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void syncServiceProcessingRoles()
+    }, ROLE_POLL_INTERVAL_MS)
 
     return () => {
+      clearInterval(timer)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [])

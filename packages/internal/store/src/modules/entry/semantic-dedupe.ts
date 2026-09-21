@@ -16,7 +16,6 @@ const MAX_CANDIDATES_PER_RUN = 8
 const MAX_DESCRIPTION_LENGTH = 400
 const MIN_TITLE_SIMILARITY = 0.42
 const MIN_CONTEXT_SIMILARITY = 0.32
-const SEMANTIC_DEDUPE_ALLOWED_CATEGORIES = new Set(["ai", "blockchain", "internet", "互联网"])
 
 export interface SemanticDuplicateEntryContext {
   id: string
@@ -490,7 +489,9 @@ const getEntrySemanticDedupeCategory = (entryId: string) => {
 const isSemanticDedupeEligibleEntry = (entryId: string) => {
   const category = normalizeSemanticDedupeCategory(getEntrySemanticDedupeCategory(entryId))
 
-  return !!category && SEMANTIC_DEDUPE_ALLOWED_CATEGORIES.has(category)
+  // The hardcoded category allowlist was removed (D5): the local fallback now covers every
+  // subscription category. Eligibility only requires a non-empty category.
+  return !!category
 }
 
 const getSemanticDedupeEligibleEntryIds = (entryIds: string[]) =>

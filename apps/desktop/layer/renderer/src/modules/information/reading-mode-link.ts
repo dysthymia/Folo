@@ -9,6 +9,9 @@ export function originalReadingPath(path: string | null) {
     : defaultTimeline
 }
 
-export function smartReadingPath(path: string) {
-  return `/information?returnTo=${encodeURIComponent(originalReadingPath(path))}#smart-reading`
+export function smartReadingPath(path: string, storyId?: string) {
+  // 深链：带上 storyId 让智能阅读页直接定位到那一篇综述，而不是只回到列表首页。
+  const query = new URLSearchParams({ returnTo: originalReadingPath(path) })
+  if (storyId) query.set("storyId", storyId)
+  return `/information?${query.toString()}#smart-reading`
 }

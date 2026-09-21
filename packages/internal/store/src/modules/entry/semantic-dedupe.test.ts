@@ -160,7 +160,7 @@ describe("semantic duplicate entry marking", () => {
     })
   })
 
-  it("skips entries outside the semantic dedupe category allowlist", () => {
+  it("treats entries from any category as eligible for semantic dedupe", () => {
     const firstEntry = createEntry({
       description: "Iran says vessels crossing the Strait of Hormuz must submit applications.",
       id: "entry-a",
@@ -187,23 +187,10 @@ describe("semantic duplicate entry marking", () => {
         "feed-1": createSubscription("News"),
       },
     }))
-    useSemanticDedupeStore.setState({
-      decisions: {
-        "entry-a::entry-b": {
-          confidence: 0.96,
-          duplicate: true,
-          entryIds: ["entry-a", "entry-b"],
-          hideEntryId: "entry-b",
-          keepEntryId: "entry-a",
-          pairKey: "entry-a::entry-b",
-          reason: null,
-          updatedAt: "2026-06-19T12:00:00.000Z",
-        },
-      },
-      revision: 1,
-    })
 
-    expect(getSemanticDuplicateCandidates([firstEntry.id, secondEntry.id])).toHaveLength(0)
+    // The hardcoded category allowlist was removed (D5); a "News" subscription is now eligible,
+    // so the two similar entries still produce a candidate pair.
+    expect(getSemanticDuplicateCandidates([firstEntry.id, secondEntry.id])).toHaveLength(1)
     expect(getSemanticDuplicateEntryRole("entry-a")).toBeNull()
     expect(getSemanticDuplicateEntryRole("entry-b")).toBeNull()
   })

@@ -10,6 +10,7 @@
 
 - 评审方向可用：**自动化负责配置，时间线负责阅读，后台负责执行**。五项收敛的优先级排序合理，本轮不应再加功能。
 - 直接照它开工前必须补三件事：一条架构决策（§2 D1）、一张能力矩阵（§2 D2）、一套可判定验收标准（§6）。
+- **§2 的 D1–D5 已全部决议**（D5 于 2026-09-21 早先决议，D2/D3/D4 于同日补齐）。本轮按 §7 施工到第三轮，出口是 §6 三场景验收；**未验收 ≠ 可删除**，台账 U01–U14 仍需单独确认。
 - 评审有三处需要修正（§3），另有一处会改变施工方案的遗漏（§1.2）。
 - **未验收 ≠ 可删除**。台账 U01–U14 全为"未验收"，这既不构成功能失效，也不构成重写许可。
 
@@ -74,17 +75,33 @@
 
 **建议：选 B**，把 `semantic-dedupe` 的角色过滤点抽象为通用的"条目处理角色"（落点见 D5 的角色层模块），由处理服务做决策源。理由：与现有实现同构、能承载 Story 角标语义、且不必先发明一套跨库合并分页规则。C 只在 B 被证否（如 Story 需要独立正文区）时启用。
 
-### D2 本地部署边界能力矩阵
+### D2 本地部署边界能力矩阵（2026-09-21 已决议）
 
-统一入口之后，哪些能力只在 `local.folo.is` 可见，必须显式呈现（当前是静默隐藏）。至少需要回答：处理服务不可用时，自动化页显示什么；旧 cloud/local 规则是否仍可编辑；Electron 端与浏览器端能力差如何告知。
+**决议：合并为一处配置面，执行位置降级为规则详情内的标识；能力边界在界面内常驻说明，不靠隐藏。**
 
-### D3 「原始内容可恢复查看」的机制
+- 官方 `cloud` / `local` 规则与新规则**同列在一个列表**里，规则详情显示执行位置标识（`cloud` / `local` / `processing_service`）；编辑任何规则都不需要先选执行位置。
+- **处理服务不可用时**（非 `local.folo.is`，或 2240 不可达）：规则仍可查看与编辑，但 `processing_service` 规则的启用与「立即运行」不可用，并在该规则详情内写明原因与前提。不用灰按钮代替解释，也不隐藏入口。
+- **Electron 与浏览器能力差**：受 `isLocalFoloHost()` 门控，Electron 下处理服务入口不可见、本地兜底去重可用；浏览器开 `local.folo.is` 时相反。两处各有一条常驻说明（不是 tooltip）：自动化页顶部一条讲执行位置可用性，AI 设置里一条讲本地执行器可用性。
 
-方案里这句话必须变成可实现动作，三选一并写清：条目级 local override、Story 撤回复原、或"原始内容"视图切换（已存在，`ProcessingReadingModeSwitch`）。若走 A 方案的"标记已读"，必须额外说明如何恢复未读，否则不满足"可恢复"。
+### D3 「原始内容可恢复查看」的机制（2026-09-21 已决议）
 
-### D4 运行范围的动态语义
+**决议：条目级 restore 覆盖 + 时间线就地视图切换，两者都做，缺一不满足「可恢复」。**
 
-范围需支持三态：**全部订阅／当前分类／固定名单**。后两者按约定动态纳入新增来源，只有固定名单才保存成员快照。当前"全选"落库为当时 `sourceKeys`（`processing-run-settings.tsx:214`），全局说明因此不覆盖后来新增的订阅。
+- **时间线就地切换**：头部新增「AI 处理后 / 原始内容」两态切换，**不再跳转**信息工作台。切到「原始内容」时，该视图内被隐藏与被并入的条目全部恢复显示、计数随之恢复（对应 §6 场景一判据）。
+- **条目级恢复**：沿用 `processing_entry_overrides` 的 `restore`，并把豁免范围从「仅隐藏」扩展到「隐藏 + 并入」——这正是 §9 记录为已知缺陷的那条。恢复后该条目在「AI 处理后」视图里单独可见，并标注「已手动恢复」。
+- 不引入第二套口径：`restore` 只影响角色投影，**不改原文 read 状态**（§5.2）。
+
+### D4 运行范围的动态语义（2026-09-21 已决议）
+
+**决议：范围三态，落库只存描述符；只有固定名单保存名单快照。**
+
+| 范围     | 落库形态                               | 新增来源                                                   |
+| -------- | -------------------------------------- | ---------------------------------------------------------- |
+| 全部订阅 | `{ mode: "all" }`                      | 自动纳入                                                   |
+| 当前分类 | `{ mode: "category", view, category }` | 该分类下的新来源自动纳入                                   |
+| 固定名单 | `{ mode: "fixed", sourceKeys: [...] }` | **不**自动纳入，界面上标明「固定名单，不会自动纳入新来源」 |
+
+三种范围共用同一份解析（发布目标计算与运行范围读取不再各写一遍），避免出现「全局说明不覆盖后来新增的订阅」。当前把「全选」落库为当时 `sourceKeys`（`processing-run-settings.tsx:214`）的做法废弃。
 
 ### D5 语义去重与 Story 的整合（评审未提及，2026-09-21 已决议）
 
@@ -214,36 +231,47 @@
 
 ### 已完成
 
-| 项                                    | 落点                                                                                                                                                                                                                                                                                                                                                            | 证据                                                                              |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **D5 角色层**（整合第 1 步）          | 新增 `packages/internal/store/src/modules/entry/processing-role.ts`：`hidden / merged / keeper / story` 四类角色，来源 `service > local-dedupe`，服务端角色先留出写入口                                                                                                                                                                                         | `processing-role.test.ts` 6 项通过                                                |
-| 去重引擎降为角色来源                  | `semantic-dedupe.ts` 新增 `getSemanticDuplicateRoleDetail`；删除被角色层取代的 3 个 UI 级导出（含 `getSemanticDuplicateEntriesForKeeper`），对应测试迁到角色层                                                                                                                                                                                                  | `semantic-dedupe.test.ts` 10 项通过（原 11 项，1 项迁走）                         |
-| 时间线过滤单一出口                    | `entry-column/hooks/useEntriesByView.ts` 改读 `isEntryHiddenByProcessingRole`；本地去重关闭时不再读取本地决策                                                                                                                                                                                                                                                   | 渲染层 156 项通过                                                                 |
-| 角标收敛                              | `semantic-duplicate-badge.tsx` → `merged-entries-badge.tsx`（`MergedEntriesBadge`），数据源改为角色层的合并来源，3 个挂载点不变                                                                                                                                                                                                                                 | 同上                                                                              |
-| 条目角色可观测                        | `EntryItemWrapper.tsx` 输出 `data-processing-role` / `data-processing-role-source`（原 `data-semantic-duplicate-role` 全仓仅此一处用）                                                                                                                                                                                                                          | —                                                                                 |
-| **P0-3 同事件综述默认动作**           | 新增 `createSameEventAggregateAction()`：自动带上 P06/P07 预设，用户不必先手写两段 Prompt；`scope` 默认 `{all:true}` 即沿用规则范围（服务端 `candidatesForAction` 确认 scope 与 when 是叠加关系）                                                                                                                                                               | `processing-action-editor.test.ts` 新增 1 项，断言默认动作直接通过 `actionSchema` |
-| P0-3 范围不再挡路                     | 聚合范围默认折叠为一句"将对本条规则范围内的相关内容做跨文章整合。"，可展开自定义、可一键改回                                                                                                                                                                                                                                                                    | —                                                                                 |
-| **P0-2 第一步：执行位置降级**         | `action-setting.tsx` 本机部署默认进入处理服务（`?scope=cloud\|local` 仍可直接访问），选择器下沉并加说明                                                                                                                                                                                                                                                         | —                                                                                 |
-| **P0-1 第一步：服务端决策接回时间线** | 服务端新增 `GET /processing/roles`（`processing-reading-store.ts` 的 `roles()`）：按隐藏判定 + 活跃 Story 成员 + 同内容转载，投影出 `hidden / story / merged` 三类角色，范围取全部 current input（不受计划 scope 限制）。渲染层新增 `modules/information/processing-role-client.ts`：拉取后 1:1 搬运进 `replaceServiceRoles()`，只在 `isLocalFoloHost()` 下工作 | 服务端 270 项通过（新增 4 项角色投影）；渲染层 262 项通过（新增 3 项）            |
-| 隐藏/代表判定单一来源                 | `refresh()` 里内联的隐藏表达式抽成 `entryHidden(override, decision)`，快照成员与时间线角色共用；行为不变                                                                                                                                                                                                                                                        | 快照既有 6 项测试未改仍通过                                                       |
-| 角标承载综述                          | `MergedEntriesBadge` 在角色带 `storyId` 时改为"综述 · N"（N=并入条数+1），悬停卡显示综述标题、被并入条目与"在智能阅读中查看"入口；本地去重角标行为不变                                                                                                                                                                                                          | —                                                                                 |
+| 项                                    | 落点                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 证据                                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **D5 角色层**（整合第 1 步）          | 新增 `packages/internal/store/src/modules/entry/processing-role.ts`：`hidden / merged / keeper / story` 四类角色，来源 `service > local-dedupe`，服务端角色先留出写入口                                                                                                                                                                                                                                                                                 | `processing-role.test.ts` 6 项通过                                                |
+| 去重引擎降为角色来源                  | `semantic-dedupe.ts` 新增 `getSemanticDuplicateRoleDetail`；删除被角色层取代的 3 个 UI 级导出（含 `getSemanticDuplicateEntriesForKeeper`），对应测试迁到角色层                                                                                                                                                                                                                                                                                          | `semantic-dedupe.test.ts` 10 项通过（原 11 项，1 项迁走）                         |
+| 时间线过滤单一出口                    | `entry-column/hooks/useEntriesByView.ts` 改读 `isEntryHiddenByProcessingRole`；本地去重关闭时不再读取本地决策                                                                                                                                                                                                                                                                                                                                           | 渲染层 156 项通过                                                                 |
+| 角标收敛                              | `semantic-duplicate-badge.tsx` → `merged-entries-badge.tsx`（`MergedEntriesBadge`），数据源改为角色层的合并来源，3 个挂载点不变                                                                                                                                                                                                                                                                                                                         | 同上                                                                              |
+| 条目角色可观测                        | `EntryItemWrapper.tsx` 输出 `data-processing-role` / `data-processing-role-source`（原 `data-semantic-duplicate-role` 全仓仅此一处用）                                                                                                                                                                                                                                                                                                                  | —                                                                                 |
+| **P0-3 同事件综述默认动作**           | 新增 `createSameEventAggregateAction()`：自动带上 P06/P07 预设，用户不必先手写两段 Prompt；`scope` 默认 `{all:true}` 即沿用规则范围（服务端 `candidatesForAction` 确认 scope 与 when 是叠加关系）                                                                                                                                                                                                                                                       | `processing-action-editor.test.ts` 新增 1 项，断言默认动作直接通过 `actionSchema` |
+| P0-3 范围不再挡路                     | 聚合范围默认折叠为一句"将对本条规则范围内的相关内容做跨文章整合。"，可展开自定义、可一键改回                                                                                                                                                                                                                                                                                                                                                            | —                                                                                 |
+| **P0-2 第一步：执行位置降级**         | `action-setting.tsx` 本机部署默认进入处理服务（`?scope=cloud\|local` 仍可直接访问），选择器下沉并加说明                                                                                                                                                                                                                                                                                                                                                 | —                                                                                 |
+| **P0-1 第一步：服务端决策接回时间线** | 服务端新增 `GET /processing/roles`（`processing-reading-store.ts` 的 `roles()`）：按隐藏判定 + 活跃 Story 成员 + 同内容转载，投影出 `hidden / story / merged` 三类角色，范围取全部 current input（不受计划 scope 限制）。渲染层新增 `modules/information/processing-role-client.ts`：拉取后 1:1 搬运进 `replaceServiceRoles()`，只在 `isLocalFoloHost()` 下工作                                                                                         | 服务端 270 项通过（新增 4 项角色投影）；渲染层 262 项通过（新增 3 项）            |
+| 隐藏/代表判定单一来源                 | `refresh()` 里内联的隐藏表达式抽成 `entryHidden(override, decision)`，快照成员与时间线角色共用；行为不变                                                                                                                                                                                                                                                                                                                                                | 快照既有 6 项测试未改仍通过                                                       |
+| 角标承载综述                          | `MergedEntriesBadge` 在角色带 `storyId` 时改为"综述 · N"（N=并入条数+1），悬停卡显示综述标题、被并入条目与"在智能阅读中查看"入口；本地去重角标行为不变                                                                                                                                                                                                                                                                                                  | —                                                                                 |
+| **D2 统一规则列表**                   | 新增 `modules/action/unified-action-list.tsx`（单一列表：名称／条件摘要／处理方式摘要／启停／执行位置徽标）与 `use-processing-service-rules.ts`（取本机 2240 规则）；`action-setting.tsx` 去掉「先选执行位置」的 `SegmentGroup` 主路径，`?scope=` 退化为初始筛选；处理服务不可用时规则仍可查看编辑，启用与「立即运行」在详情内说明原因与前提（`processing-service-detail.tsx`）                                                                         | `unified-action-list.test.tsx` 4 项通过                                           |
+| **D3 条目级 restore 豁免并入**        | `processing-reading-store.ts` 角色类型新增 `restored`：`roles()` 在角色投影最前强制投 `restored`，使其同时豁免隐藏与并入（语义去重 `merged`／综述 `merged`／同内容转载）；综述代表与保留条目的来源计数同步扣掉被恢复条目；代表本身被恢复时原成员降级为普通条目                                                                                                                                                                                          | 服务端 292 项通过（新增 8 项 restore/scope 用例）                                 |
+| **D3 时间线就地切换**                 | 新增 `entry-column/atoms/processing-timeline.ts`（`timelineContentModeAtom`）与 `layouts/ProcessingTimelineModeSwitch.tsx`（「AI 处理后 / 原始内容」两态，挂进 `EntryListHeader`）；`useEntriesByView` 的 `rawEntryIds` 单一过滤点上，「原始内容」直接返回未过滤的 `rawEntryIds`，范围与排序不变、计数随之恢复                                                                                                                                          | —                                                                                 |
+| **P0-1 Story 内联渲染 + 深链**        | 服务端新增 `GET /processing/stories/:storyId/digest`（`processing-reading-store.ts` 的 `storyDigest()`：正文、逐句引用、来源清单、`updatedAt`、`sourceCount`、`revision`，`repairing`/`missing` 也要能返回）；渲染层新增 `StoryDigestPanel.tsx`，在综述角标处就地打开，显示来源数、更新时间与句段引用，并带 `storyId` 深链（`smartReadingPath(path, storyId)` → `ProcessingReader` 的 `deepLinkedStoryIdRef` 直接 `openStory`），只有要改综述才进工作台 | 服务端 292 项、渲染层 275 项通过                                                  |
+| **P1-4 保存并启用一体化**             | `processing-setting.tsx` 收敛为单主按钮「保存并启用」（保存草稿 → 发布生效 → 保存计划），新增可勾选「重新处理近期内容」（默认不勾）；原「必须已发布、无脏改动」门槛降级为高级说明，草稿无改动时「立即运行」也可用已生效版本跑；常驻提示「有草稿时当前使用已生效版本 vN」                                                                                                                                                                                | —                                                                                 |
+| **D4 运行范围三态**                   | 新增共享解析器 `packages/internal/information-core/src/schedule-scope.ts`（`{mode:"all"}`／`{mode:"category",view,category}`／`{mode:"fixed",sourceKeys}`，旧扁平 `sourceKeys` 读作 `fixed`），并在 `index.ts` 导出；服务端 `processing-schedule.ts` 与渲染层 `processing-client.ts` / `processing-run-settings.tsx` 共用它，废弃「全选落库为当时 sourceKeys」                                                                                          | `schedule-scope.test.ts` 5 项、服务端新增 3 项通过                                |
+| **D5 去重开关降级**                   | 删除 `SEMANTIC_DEDUPE_ALLOWED_CATEGORIES` 硬编码白名单（任意非空分类合格）；新增 `useSemanticDedupeEvaluatorAvailability()` 判定本地执行器可执行性；`SemanticDedupeSection.tsx` 的开关降级为「本地兜底执行器启停」并给出运行时可执行性提示                                                                                                                                                                                                              | `semantic-dedupe.test.ts` 通过                                                    |
+| **P1-5 切标签状态保持**               | `InformationPage.tsx` 隐藏时只 `abort()` 在途请求、不再 `setSnapshot(null)`；回前台按 `ownerId` 核验账号后复用快照；删除主路径重复的 AI 摘要结果列表。`ProcessingReader.tsx` 新增 `offsetRef`，回前台重载当前页并保留选中项，仅 `initial` 清空选择                                                                                                                                                                                                      | `InformationPage.test.tsx` / `ProcessingReader.test.tsx` 新增用例通过             |
+| **角色刷新时机**                      | `processing-role-client.ts` 在挂载与 `visibilitychange` 之外，可见期间每 60s 轮询一次角色投影；隐藏时停表，避免无意义的本机请求                                                                                                                                                                                                                                                                                                                         | —                                                                                 |
 
 ### 质量门
 
-`turbo run typecheck` 22/22 通过（含 `@follow/store`、`@follow/web`、`@follow/information-service` 实跑）；改动文件 `eslint` 0 error（保留 3 条既有 warning）；`prettier --check` 通过；
-`@follow/store` entry 模块、渲染层 69 文件 262 项、`@follow/information-service` 37 文件 270 项全部通过。
+`turbo run format:check lint typecheck test`（`--filter` 到 `@follow/web` / `@follow/store` / `@follow/information-service` / `@follow/information-core`）**9/9 任务通过**：
+
+- `prettier --check` 通过（0 warning）；`eslint` + `tsslint` 1134 项通过；
+- `typecheck` 4 包全部通过（0 `error TS`）；
+- 测试：`information-core` 33 项、`store` 39 项、`information-service` 292 项（39 文件）、`web` 275 项（73 文件），合计 **639 项全绿**。
 
 ### P0-1 第一步的口径与偏离（必须知道）
 
 - **范围口径**：角色投影取全部 current input，不做计划范围过滤。理由：时间线覆盖全部订阅，若按计划 `sourceKeys + historySince` 投影，范围外条目的隐藏/并入会在时间线里失效（正是 §3.1 的范围口径问题）。因此角色层能看到比阅读快照更多的角色。
-- **代表条目而非新条目类型**：本轮**没有**把 Story 做成时间线里的新条目类型。做法是让 Story 成员里最新的一条代表整篇综述（`kind: "story"`，角标显示来源数），其余成员与同内容转载标为 `merged` 被过滤。这样内容不消失（代表条目仍显示自己的标题摘要，悬停卡列出被并入项），也与本地去重"保留 keeper、隐藏重复"同构。**代价**：综述正文仍需到智能阅读页查看，未满足场景二"不跳页"。
-- **`restore` 覆盖不豁免"并入"**：与阅读快照保持一致（快照的 `represented` 同样不看覆盖）。已知缺陷，属 D3「原始内容可恢复查看」要一起解决的项，本轮不为修它引入两套口径。
-- **未做深链**：角标只能跳到智能阅读页首页，不能定位到具体那篇综述（工作台没有按 storyId 路由的入口）。
+- **代表条目而非新条目类型**：本轮**没有**把 Story 做成时间线里新增的一种条目类型。做法是让 Story 成员里最新的一条代表整篇综述（`kind: "story"`，角标显示来源数），其余成员与同内容转载标为 `merged` 被过滤。这样内容不消失（代表条目仍显示自己的标题摘要，悬停卡列出被并入项），也与本地去重"保留 keeper、隐藏重复"同构。**综述正文改为在列表内就地打开**（`StoryDigestPanel`，走 `GET /processing/stories/:storyId/digest`），已满足场景二"不跳页"；代表条目本身仍是普通条目，不新增一种条目类型。
+- **`restore` 覆盖不豁免"并入"** —— **已在第三轮修复**：服务端角色投影新增 `restored`，条目级 `restore` 现在同时豁免隐藏与并入（见《已完成》表），阅读快照成员与时间线角色共用同一份判定。
+- **深链已补**：`smartReadingPath(path, storyId)` 会带上 `storyId`，`ProcessingReader` 挂载后按它 `openStory` 直接定位到那一篇综述。
 
 ### 未完成（明确不计入完成）
 
-1. **P0-2 的"合并为一个可编辑列表"没做**：官方 cloud/local 规则仍按原位置管理，只是不再作为默认起点。是否迁移旧规则属 D2，需先定。
-2. **P0-1 剩余部分**：Story 作为时间线新条目类型渲染（内联正文、句段引用、更新时间、按 storyId 深链）未做；因此场景二目前只能判定到"列表内可见来源数"为止。**未做单分类（Blockchain）真机跑通验证**。
-3. **角色刷新时机**：目前只在时间线挂载与标签页重新可见时拉取，后台跑完一轮不会自动刷新（可接受但需真机确认体验）。
-4. D2/D3/D4 的界面呈现未做；AI 设置里"语义去重"开关在浏览器端仍是空转（本轮的整合只统一了出口，没有接线）。
-5. **真机交互未验证**：本机 `local.folo.is` 仍是部署前的生产构建，本轮改动未构建、未部署、未做浏览器验收。三个场景的验收标准（§6）全部待跑。
+1. **真机交互未验证**：本机 `local.folo.is` 仍是部署前的生产构建，本轮改动未构建、未部署、未做浏览器验收。§6 三个场景的验收标准全部待跑。
+2. **单分类（Blockchain）端到端未跑通**：场景二要求在一真实分类里看到综述与来源数，需要先有该分类的处理输出，目前只有离线对照证据。
+3. **`{mode:"category"}` 的"自动纳入新来源"依赖客户端重解析**：处理服务不知道 Folo 的 view/category 体系，因此服务端无法独立把分类描述符展开成 `sourceKeys`。当前实现是客户端用共享解析器解析后把名单一并落库，重开自动化页/信息页时再解析并在结果变化时写回；服务端只读描述符 + 已落库名单。这是 §2 D4 允许的偏离，尚未真机验证"新订阅加入后自动纳入"。
+4. **AI 设置里"语义去重"开关在浏览器端仍不产生本地判定**：该开关现在只控制本地兜底执行器（Electron 专用），浏览器 `local.folo.is` 走服务端语义去重。这是 D5 的有意收敛，界面上已有可执行性提示，但**未真机确认文案与实际行为一致**。

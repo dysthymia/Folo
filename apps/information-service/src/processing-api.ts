@@ -12,6 +12,7 @@ import type {
   ReadingSnapshotCounts,
   ReadingSnapshotPage,
   ResearchPack,
+  StoryDigest,
 } from "./processing-reading-store"
 import type {
   ProcessingScheduleInput,
@@ -28,6 +29,24 @@ const revision = z.number().int().nonnegative()
 const positiveInteger = z.number().int().positive()
 const scheduleConfig = z
   .object({
+    scope: z
+      .union([
+        z.object({ mode: z.literal("all") }).strict(),
+        z
+          .object({
+            mode: z.literal("category"),
+            view: z.number().int().min(0).max(5),
+            category: z.string().trim().min(1).max(200),
+          })
+          .strict(),
+        z
+          .object({
+            mode: z.literal("fixed"),
+            sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10000),
+          })
+          .strict(),
+      ])
+      .optional(),
     sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10000),
     historySince: z.iso.datetime({ offset: true }),
     timeZone: z.string().min(1).max(100),
@@ -105,6 +124,7 @@ export type ReadingSnapshotResponse = {
 }
 export type ReadingSnapshotPageResponse = ReadingSnapshotPage
 export type ResearchPackResponse = ResearchPack
+export type StoryDigestResponse = StoryDigest
 
 function owner(store: Store): string {
   if (!store.ownerId) throw new AutomationError("owner_required")
@@ -279,6 +299,10 @@ export function processingApi(
   const researchPackPath = /^\/research-pack\/([^/]+)$/.exec(path)
   if (researchPackPath && method === "GET")
     return store.reading.researchPack(researchPackPath[1]!) satisfies ResearchPackResponse
+  const storyDigestPath = /^\/processing\/stories\/([^/]+)\/digest$/.exec(path)
+  if (storyDigestPath && method === "GET")
+    // 时间线内联综述：口径与 research-pack 一致，补充更新时间与按句分组的引用。
+    return store.reading.storyDigest(storyDigestPath[1]!) satisfies StoryDigestResponse
   if (path === "/processing/roles" && method === "GET")
     // 时间线角色投影不受计划范围限制：时间线覆盖全部订阅，只取当前 input。
     return { roles: store.reading.roles() } satisfies ProcessingEntryRolesResponse

@@ -5,6 +5,7 @@ import {
   presentationPolicySchema,
   ruleSchema,
   ruleSetSchema,
+  scheduleScopeSchema,
 } from "@follow/information-core"
 import { z } from "zod"
 
@@ -302,6 +303,7 @@ export type ProcessingTrialResult = z.infer<typeof processingTrialSchema>
 
 const scheduleConfigSchema = z
   .object({
+    scope: scheduleScopeSchema,
     sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10_000),
     historySince: isoDateTime,
     timeZone: z.string().min(1).max(100),

@@ -4,6 +4,7 @@ import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
 import { setAISetting, useAISettingValue } from "~/atoms/settings/ai"
+import { useSemanticDedupeEvaluatorAvailability } from "~/providers/semantic-dedupe-provider"
 
 import {
   SettingDescription,
@@ -21,7 +22,9 @@ const normalizeReasoningEffort = (value: string): SemanticDedupeReasoningEffort 
 
 export const SemanticDedupeSection = () => {
   const { t } = useTranslation("ai")
+  const { t: tApp } = useTranslation("app")
   const settings = useAISettingValue()
+  const availability = useSemanticDedupeEvaluatorAvailability()
   const reasoningEffort = normalizeReasoningEffort(settings.semanticDedupeReasoningEffort)
   const effortValues = useMemo(
     () =>
@@ -39,15 +42,36 @@ export const SemanticDedupeSection = () => {
   return (
     <div className="-mt-4 space-y-4">
       <div>
+        <SettingDescription className="-mt-2">
+          {tApp("processing.local_dedupe.description")}
+        </SettingDescription>
+      </div>
+
+      <div>
         <SettingSwitch
           checked={settings.semanticDedupeEnabled}
-          label={t("semantic_dedupe.enabled.label")}
+          label={tApp("processing.local_dedupe.enabled.label")}
           onCheckedChange={(checked) => setAISetting("semanticDedupeEnabled", checked)}
         />
         <SettingDescription className="-mt-2">
-          {t("semantic_dedupe.enabled.description")}
+          {tApp("processing.local_dedupe.enabled.description")}
         </SettingDescription>
       </div>
+
+      {availability.available ? (
+        <div className="rounded-md border border-border bg-fill-secondary px-3 py-2 text-xs leading-relaxed text-text-tertiary">
+          {tApp(`processing.local_dedupe.availability.reason.${availability.reason}`)}
+        </div>
+      ) : (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed">
+          <p className="font-medium text-amber-600 dark:text-amber-400">
+            {tApp("processing.local_dedupe.availability.unavailable")}
+          </p>
+          <p className="mt-1 text-text-secondary">
+            {tApp(`processing.local_dedupe.availability.reason.${availability.reason}`)}
+          </p>
+        </div>
+      )}
 
       {settings.semanticDedupeEnabled && (
         <>

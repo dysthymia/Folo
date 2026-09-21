@@ -61,6 +61,8 @@ describe("processing role client", () => {
         kind: "merged",
         reason: "同事件综述",
         relatedEntryIds: ["entry-b"],
+        // inputSeq 一并搬运：时间线靠它按需取处理理由（命中规则），不另建映射表。
+        inputSeq: 2,
         storyId: "story-1",
         storyTitle: "同事件综述",
       },
@@ -69,6 +71,7 @@ describe("processing role client", () => {
         kind: "hidden",
         reason: "娱乐内容",
         relatedEntryIds: [],
+        inputSeq: 3,
       },
     ])
   })

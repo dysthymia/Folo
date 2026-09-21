@@ -101,9 +101,10 @@ export type ReadingSnapshotPage = {
  * 因此角色单独投影一次：判定口径与快照一致（同一个 `entryHidden`），但范围取全部
  * current input。`hidden` 是显式隐藏，`story` 代表整篇综述、`merged` 表示内容已在
  * 别处呈现（综述的其他成员、语义去重判定的重复条目，或与成员同内容的转载），
- * `keeper` 是语义去重里保留了内容的那一条。
+ * `keeper` 是语义去重里保留了内容的那一条，`restored` 是被用户手动恢复、重新独立
+ * 显示的条目——它优先于隐藏与并入，否则"恢复"在界面上看不出来。
  */
-export type ProcessingEntryRoleKind = "hidden" | "story" | "merged" | "keeper"
+export type ProcessingEntryRoleKind = "hidden" | "story" | "merged" | "keeper" | "restored"
 export type ProcessingEntryRole = {
   /** Folo 条目 id，渲染层用它作为角色层的键。 */
   itemId: string
@@ -140,6 +141,59 @@ export type ResearchPack =
       title: null
       markdown: null
       references: []
+    }
+
+/**
+ * 时间线内联综述摘要（§6 场景二）。
+ *
+ * 与 `ResearchPack` 的区别：研究包是「把综述交给研究流程」的输入，按来源片段平铺引用；
+ * 这里是「在列表里就地读综述」，需要按句子分组引用，并给出更新时间与来源数。
+ */
+export type StoryDigestCitation = {
+  id: string
+  quote: string
+  sourceKey: string
+  sourceTitle: string
+  sourceUrl: string | null
+}
+export type StoryDigestSentence = {
+  id: string
+  text: string
+  citations: StoryDigestCitation[]
+}
+export type StoryDigestSource = {
+  inputSeq: number
+  sourceKey: string
+  itemId: string
+  title: string
+  url: string | null
+}
+export type StoryDigest =
+  | {
+      status: "ready"
+      storyId: string
+      revision: number
+      title: string
+      body: string
+      updatedAt: string
+      /** 参与这篇综述的来源条目数（同一来源多条按条目计）。 */
+      sourceCount: number
+      sources: StoryDigestSource[]
+      sentences: StoryDigestSentence[]
+      /** 句子中未被任何引用支撑的条数，用于提示「分歧与未证实」需人工核对。 */
+      uncitedSentenceCount: number
+    }
+  | {
+      status: "repairing" | "missing"
+      storyId: string
+      revision: null
+      title: null
+      body: null
+      updatedAt: null
+      sourceCount: 0
+      sources: []
+      sentences: []
+      uncitedSentenceCount: 0
     }
 
 export class ProcessingReadingError extends Error {
@@ -283,8 +337,10 @@ export class ProcessingReadingStore {
       const published = publishedBySeq.get(input.seq)
       const override = overrides.get(input.seq)
       const hidden = this.entryHidden(override, published?.decision)
+      // 手动恢复的条目豁免「并入」：不因综述已覆盖或同内容已有先例而退居幕后。
+      const restored = !hidden && override?.mode === "restore"
       const identity = contentIdentity(input.body)
-      const duplicate = !hidden && standaloneContent.has(identity)
+      const duplicate = !hidden && !restored && standaloneContent.has(identity)
       if (!hidden) standaloneContent.add(identity)
       members.push({
         member: {
@@ -297,7 +353,8 @@ export class ProcessingReadingStore {
           entryStatus: input.status,
           hidden,
           represented:
-            (published?.decision.policy.standalone !== "always" &&
+            (!restored &&
+              published?.decision.policy.standalone !== "always" &&
               (representedContent.has(identity) || semanticallyMerged.has(input.seq))) ||
             duplicate,
         },
@@ -429,6 +486,80 @@ export class ProcessingReadingStore {
         "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'')!='failed'",
       ),
       failed: count("kind='entry' AND decision_id IS NULL AND entry_status='failed'"),
+    }
+  }
+
+  /**
+   * 时间线内联综述摘要。判定口径与 `researchPack` 完全一致（同一个 `resolveLink` 与
+   * `revisionAvailable`），只是把引用按句子分组，并补上更新时间与来源数。
+   */
+  storyDigest(storyId: string): StoryDigest {
+    this.requireOwner()
+    if (!isUuid(storyId)) throw new ProcessingReadingError("invalid_snapshot")
+    const unavailable = (status: "repairing" | "missing"): StoryDigest => ({
+      status,
+      storyId,
+      revision: null,
+      title: null,
+      body: null,
+      updatedAt: null,
+      sourceCount: 0,
+      sources: [],
+      sentences: [],
+      uncitedSentenceCount: 0,
+    })
+    const link = this.stories.resolveLink(storyId)
+    if (link.kind === "missing") return unavailable("missing")
+    if (link.kind !== "current") return unavailable("repairing")
+    const decisionBySeq = new Map(
+      this.processingState.published().map((published) => [published.input.seq, published]),
+    )
+    if (!this.revisionAvailable(link.revision, decisionBySeq)) return unavailable("repairing")
+
+    const sourceBySeq = new Map<number, StoryDigestSource>()
+    for (const span of link.revision.sourceSpans) {
+      if (sourceBySeq.has(span.inputSeq)) continue
+      const input = decisionBySeq.get(span.inputSeq)?.input
+      if (!input) continue
+      sourceBySeq.set(span.inputSeq, {
+        inputSeq: input.seq,
+        sourceKey: input.sourceKey,
+        itemId: input.itemId,
+        title: input.body.title,
+        url: input.body.url,
+      })
+    }
+    const spanById = new Map(link.revision.sourceSpans.map((span) => [span.id, span]))
+    const sentences = link.revision.sentences.map((sentence) => ({
+      id: sentence.id,
+      text: sentence.text,
+      citations: sentence.citationIds.flatMap((citationId) => {
+        const citation = link.revision.citations.find((item) => item.id === citationId)
+        const span = citation ? spanById.get(citation.sourceSpanId) : undefined
+        const input = span ? decisionBySeq.get(span.inputSeq)?.input : undefined
+        if (!citation || !span || !input) return []
+        return [
+          {
+            id: citation.id,
+            quote: span.quote,
+            sourceKey: input.sourceKey,
+            sourceTitle: input.body.title,
+            sourceUrl: input.body.url,
+          },
+        ]
+      }),
+    }))
+    return {
+      status: "ready",
+      storyId,
+      revision: link.revision.revision,
+      title: link.revision.title,
+      body: link.revision.body,
+      updatedAt: link.story.updatedAt,
+      sourceCount: sourceBySeq.size,
+      sources: [...sourceBySeq.values()],
+      sentences,
+      uncitedSentenceCount: sentences.filter((sentence) => sentence.citations.length === 0).length,
     }
   }
 
@@ -650,6 +781,42 @@ export class ProcessingReadingStore {
       })
     }
 
+    // 手动恢复最后统一覆盖：restore 覆盖既要豁免隐藏，也要豁免并入（综述成员、同内容转载、
+    // 语义去重）。放在这里而不是循环开头，是因为「并入」集合在 Story 与去重两段之后才完整。
+    const restoredSeqs = new Set<number>()
+    for (const input of inputs) {
+      const override = overrides.get(input.seq)
+      if (override?.mode !== "restore") continue
+      if (!publishedBySeq.has(input.seq)) continue
+      const current = roles.get(input.seq)
+      if (!current || (current.kind !== "hidden" && current.kind !== "merged")) continue
+      roles.set(input.seq, {
+        itemId: input.itemId,
+        inputSeq: input.seq,
+        kind: "restored",
+        reason: null,
+        relatedEntryIds: [],
+        storyId: null,
+        storyTitle: null,
+      })
+      restoredSeqs.add(input.seq)
+    }
+    // 恢复后条目不再算作被并入，保留方（综述代表 / 语义去重保留条）的来源计数要同步扣掉它；
+    // 综述成员被逐条恢复完时，代表条目退回普通条目，不留一个「综述 · 1」的空壳角标。
+    if (restoredSeqs.size > 0) {
+      const restoredItemIds = new Set([...restoredSeqs].map((seq) => inputBySeq.get(seq)!.itemId))
+      for (const [seq, role] of [...roles]) {
+        if (role.kind !== "story" && role.kind !== "keeper") continue
+        const relatedEntryIds = role.relatedEntryIds.filter(
+          (entryId) => !restoredItemIds.has(entryId),
+        )
+        if (relatedEntryIds.length === role.relatedEntryIds.length) continue
+        // 综述成员被逐条恢复完时，代表条目退回普通条目，不留一个「综述 · 1」的空壳角标。
+        if (relatedEntryIds.length === 0 && role.kind === "story") roles.delete(seq)
+        else roles.set(seq, { ...role, relatedEntryIds })
+      }
+    }
+
     return [...roles.values()].sort((left, right) => left.inputSeq - right.inputSeq)
   }
 
@@ -674,7 +841,8 @@ export class ProcessingReadingStore {
 
   /**
    * 条目级隐藏判定。快照成员与时间线角色共用，避免两处口径漂移。
-   * `always` 是显式例外，优先级高于决定与覆盖；`restore` 只豁免隐藏。
+   * `always` 是显式例外，优先级高于决定与覆盖；`restore` 豁免隐藏（并入的豁免在 `roles()`
+   * 与 `refresh()` 里单独处理，因为并入集合要到 Story 与去重两段跑完才完整）。
    */
   private entryHidden(
     override: { mode: string } | undefined,

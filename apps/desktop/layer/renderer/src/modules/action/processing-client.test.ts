@@ -320,6 +320,7 @@ describe("createProcessingClient", () => {
     const schedule = {
       revision: 4,
       config: {
+        scope: { mode: "fixed" as const, sourceKeys: ["feed:1"] },
         sourceKeys: ["feed:1"],
         historySince: "2026-09-01T00:00:00.000Z",
         timeZone: "Asia/Shanghai",

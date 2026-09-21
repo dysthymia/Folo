@@ -82,6 +82,14 @@ export function ProcessingReader() {
     null,
   )
   const viewRef = useRef<ReadingView>(view)
+  // 跟踪当前页偏移，回到前台时重新加载当前页而非第 0 页。
+  const offsetRef = useRef(0)
+
+  // 深链：时间线的综述角标带 storyId 进来时，直接定位到那一篇，而不是回到列表首页。
+  // 只在挂载时消费一次，之后的分页/刷新不再重放。
+  const deepLinkedStoryIdRef = useRef(
+    new URLSearchParams(window.location.search).get("storyId") ?? null,
+  )
 
   const fail = useCallback((cause: unknown) => {
     setError(cause instanceof RequestError ? cause.kind : "request")
@@ -120,6 +128,7 @@ export function ProcessingReader() {
         setSnapshot(page.snapshot)
         setView(page.view)
         setOffset(page.offset)
+        offsetRef.current = page.offset
         setTotal(page.total)
         setItems(
           page.items.map((item) => {
@@ -133,9 +142,12 @@ export function ProcessingReader() {
             }
           }),
         )
-        setSelected(null)
-        setSelectedSnapshotRevision(null)
-        setSelectedStoryIds([])
+        // 仅在（重新）挂载或账号切换后的初次载入时清空所选；切标签回到当前页时保留所选条目。
+        if (mode === "initial") {
+          setSelected(null)
+          setSelectedSnapshotRevision(null)
+          setSelectedStoryIds([])
+        }
       } catch (cause) {
         if (!request.signal.aborted) fail(cause)
       } finally {
@@ -147,18 +159,13 @@ export function ProcessingReader() {
 
   useEffect(() => {
     void load("initial", "smart", 0)
+    // 切标签：隐藏时只中止在途请求，保留阅读进度（页码/所选/滚动）；回到前台重新加载当前页。
     const visibility = () => {
       if (document.visibilityState === "hidden") {
         controllerRef.current?.abort()
-        setItems([])
-        setSelected(null)
-        setSelectedSnapshotRevision(null)
-        setSnapshot(null)
-        setReadingStatus(null)
-        snapshotRef.current = null
       } else {
-        // 回到页面只读取当前固定快照，不自动吸收后台新结果。
-        void load("initial", viewRef.current, 0)
+        // 回到页面只读取当前固定快照的当前页，不跳位、不改变快照内容。
+        void load("page", viewRef.current, offsetRef.current)
       }
     }
     document.addEventListener("visibilitychange", visibility)
@@ -188,7 +195,7 @@ export function ProcessingReader() {
         typeof result.id === "string"
       )
         setUndo(result.id)
-      if (refreshAfter) await load("refresh", view, 0)
+      if (refreshAfter) await load("refresh", view, offsetRef.current)
     } catch (cause) {
       if (!request.signal.aborted) fail(cause)
     } finally {
@@ -196,30 +203,44 @@ export function ProcessingReader() {
     }
   }
 
-  const openStory = async (id: string, snapshotRevision?: number) => {
-    controllerRef.current?.abort()
-    const request = new AbortController()
-    controllerRef.current = request
-    setBusy(true)
-    setError(null)
-    try {
-      const story = await readingRequest(
-        `stories/${encodeURIComponent(id)}`,
-        readingStorySchema,
-        request.signal,
-      )
-      setSelected(story)
-      setSelectedSnapshotRevision(snapshotRevision ?? null)
-      if (story.kind === "current")
-        setSplitAssignments(
-          Object.fromEntries(story.revision.members.map((member) => [member.inputSeq, 0])),
+  // 依赖只为 `fail`（已 memo），因此深链消费的 effect 不会每次渲染都重跑。
+  const openStory = useCallback(
+    async (id: string, snapshotRevision?: number) => {
+      controllerRef.current?.abort()
+      const request = new AbortController()
+      controllerRef.current = request
+      setBusy(true)
+      setError(null)
+      try {
+        const story = await readingRequest(
+          `stories/${encodeURIComponent(id)}`,
+          readingStorySchema,
+          request.signal,
         )
-    } catch (cause) {
-      if (!request.signal.aborted) fail(cause)
-    } finally {
-      if (!request.signal.aborted) setBusy(false)
-    }
-  }
+        setSelected(story)
+        setSelectedSnapshotRevision(snapshotRevision ?? null)
+        if (story.kind === "current")
+          setSplitAssignments(
+            Object.fromEntries(story.revision.members.map((member) => [member.inputSeq, 0])),
+          )
+      } catch (cause) {
+        if (!request.signal.aborted) fail(cause)
+      } finally {
+        if (!request.signal.aborted) setBusy(false)
+      }
+    },
+    [fail],
+  )
+
+  // 深链消费：列表页的综述角标带 storyId 过来时，挂载后直接打开那一篇。
+  useEffect(() => {
+    const storyId = deepLinkedStoryIdRef.current
+    if (!storyId) return
+    deepLinkedStoryIdRef.current = null
+    void openStory(storyId)
+    // 首帧的 #smart-reading 锚点可能早于内容渲染，这里显式补一次滚动。
+    document.getElementById("smart-reading")?.scrollIntoView({ block: "start" })
+  }, [openStory])
 
   const mergeSelectedStories = () => {
     const stories = items.filter(
@@ -488,7 +509,13 @@ export function ProcessingReader() {
           type="button"
           className={processingButtonClass}
           disabled={busy}
-          onClick={() => void load("refresh", view, 0)}
+          onClick={() => {
+            // 显式刷新：回到第 0 页并清空所选条目（与切标签回到当前页的保活语义不同）。
+            setSelected(null)
+            setSelectedSnapshotRevision(null)
+            setSelectedStoryIds([])
+            void load("refresh", view, 0)
+          }}
         >
           {t("processing.reader.refresh")}
         </button>

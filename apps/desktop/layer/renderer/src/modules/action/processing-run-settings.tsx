@@ -1,4 +1,5 @@
-import type { RuleSet } from "@follow/information-core"
+import type { RuleSet, ScheduleScope } from "@follow/information-core"
+import { resolveScheduleSourceKeys } from "@follow/information-core"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -45,6 +46,7 @@ export type ProcessingRunSettingsProps = {
 }
 
 export const defaultProcessingSchedule = (): ProcessingScheduleConfig => ({
+  scope: { mode: "fixed", sourceKeys: [] },
   sourceKeys: [],
   historySince: new Date().toISOString(),
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
@@ -82,7 +84,7 @@ const dateValue = (iso: string, timeZone: string) => {
   }
   return fallback
 }
-const isoFromDate = (date: string, timeZone: string) => {
+export const isoFromDate = (date: string, timeZone: string) => {
   const parts = date.split("-")
   const year = Number(parts[0])
   const month = Number(parts[1])
@@ -167,7 +169,16 @@ export function ProcessingRunSettings({
 }: ProcessingRunSettingsProps) {
   const { t } = useTranslation("app")
   const config = value ?? defaultProcessingSchedule()
-  const selectedSources = new Set(config.sourceKeys)
+  // 运行范围三态（§2 D4）：fixed 用名单快照，all 展开全部源，category 展开指定分类下的源。
+  // 注意与同名 prop（发布范围）区分，这里始终是计划自身的范围描述符；缺失时按旧记录等价 fixed。
+  const runScope: ScheduleScope = useMemo(
+    () => config.scope ?? { mode: "fixed", sourceKeys: config.sourceKeys },
+    [config.scope, config.sourceKeys],
+  )
+  const effectiveKeys = useMemo(
+    () => resolveScheduleSourceKeys(runScope, sources),
+    [runScope, sources],
+  )
   const activeTimes = useMemo(() => new Set(config.times), [config.times])
   const timeSlots = useMemo(
     () => [...new Set([...config.times, ...defaultTimes])].slice(0, 5),
@@ -179,11 +190,35 @@ export function ProcessingRunSettings({
       [...runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 5),
     [runs],
   )
-  const allSourcesSelected =
-    sources.length > 0 && sources.every((source) => selectedSources.has(source.key))
-  // 没有来源时保存没有可执行范围，避免把空范围写成有效计划。
-  const canSave = config.sourceKeys.length > 0 && scheduleValid && !saving
+  // 没有可解析来源时保存没有可执行范围，避免把空范围写成有效计划。
+  const canSave = effectiveKeys.length > 0 && scheduleValid && !saving
   const change = (next: Partial<ProcessingScheduleConfig>) => onChange({ ...config, ...next })
+  const changeScope = (next: ScheduleScope) =>
+    onChange({ ...config, scope: next, sourceKeys: resolveScheduleSourceKeys(next, sources) })
+  // 分类模式下可选的 view / category 组合；由客户端本地订阅数据解析（服务端不独立解析）。
+  const categoryOptions = useMemo(() => {
+    const seen = new Map<string, { view: number; category: string }>()
+    for (const source of sources) {
+      if (source.category === null || !source.category) continue
+      seen.set(`${source.view}\u0000${source.category}`, {
+        view: source.view,
+        category: source.category,
+      })
+    }
+    return [...seen.values()].sort(
+      (left, right) => left.view - right.view || left.category.localeCompare(right.category),
+    )
+  }, [sources])
+  const fixedKeys = new Set(runScope.mode === "fixed" ? runScope.sourceKeys : [])
+  const allFixedSelected =
+    runScope.mode === "fixed" && sources.length > 0 && runScope.sourceKeys.length === sources.length
+  const toggleFixedSource = (key: string, checked: boolean) => {
+    if (runScope.mode !== "fixed") return
+    const next = new Set(runScope.sourceKeys)
+    if (checked) next.add(key)
+    else next.delete(key)
+    changeScope({ mode: "fixed", sourceKeys: [...next] })
+  }
 
   return (
     <section
@@ -202,38 +237,109 @@ export function ProcessingRunSettings({
         />
         {t("processing.run.enabled")}
       </label>
-      <fieldset className="space-y-2">
-        <legend className="text-sm font-medium">{t("processing.run.sources")}</legend>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={allSourcesSelected}
-            disabled={sources.length === 0}
-            onChange={(event) =>
-              change({
-                sourceKeys: event.target.checked ? sources.map((source) => source.key) : [],
-              })
-            }
-          />
-          {t("processing.run.select_all_sources", { count: sources.length })}
-        </label>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {sources.map((source) => (
-            <label key={source.key} className="flex items-center gap-2 text-sm">
+      <fieldset className="space-y-2" data-schedule-scope={runScope.mode}>
+        <legend className="text-sm font-medium">{t("processing.run.scope")}</legend>
+        <div className="flex flex-wrap gap-3 text-sm">
+          {(["all", "category", "fixed"] as const).map((mode) => (
+            <label key={mode} className="flex items-center gap-2">
               <input
-                type="checkbox"
-                checked={selectedSources.has(source.key)}
-                onChange={(event) => {
-                  const next = new Set(selectedSources)
-                  if (event.target.checked) next.add(source.key)
-                  else next.delete(source.key)
-                  change({ sourceKeys: [...next] })
-                }}
+                type="radio"
+                name="processing-schedule-scope"
+                checked={runScope.mode === mode}
+                onChange={() =>
+                  changeScope(
+                    mode === "all"
+                      ? { mode: "all" }
+                      : mode === "category"
+                        ? {
+                            mode: "category",
+                            view: categoryOptions[0]?.view ?? 0,
+                            category: categoryOptions[0]?.category ?? "",
+                          }
+                        : { mode: "fixed", sourceKeys: sources.map((source) => source.key) },
+                  )
+                }
               />
-              {source.title}
+              {t(`processing.run.scope_mode.${mode}`)}
             </label>
           ))}
         </div>
+        {runScope.mode === "all" && (
+          <p className="text-xs leading-5 text-text-secondary">
+            {t("processing.run.scope_all_note", { count: effectiveKeys.length })}
+          </p>
+        )}
+        {runScope.mode === "category" && (
+          <div className="space-y-1">
+            <select
+              aria-label={t("processing.run.scope_category")}
+              className={processingInputClass}
+              value={`${runScope.view}\u0000${runScope.category}`}
+              onChange={(event) => {
+                const separator = event.target.value.indexOf("\u0000")
+                changeScope({
+                  mode: "category",
+                  view: Number(event.target.value.slice(0, separator)),
+                  category: event.target.value.slice(separator + 1),
+                })
+              }}
+            >
+              {categoryOptions.map((option) => (
+                <option
+                  key={`${option.view}\u0000${option.category}`}
+                  value={`${option.view}\u0000${option.category}`}
+                >
+                  {t("processing.run.scope_category_option", {
+                    view: option.view,
+                    category: option.category,
+                  })}
+                </option>
+              ))}
+              {categoryOptions.length === 0 && (
+                <option value={`${runScope.view}\u0000${runScope.category}`}>
+                  {t("processing.run.scope_category_empty")}
+                </option>
+              )}
+            </select>
+            <p className="text-xs leading-5 text-text-secondary">
+              {t("processing.run.scope_category_note", { count: effectiveKeys.length })}
+            </p>
+          </div>
+        )}
+        {runScope.mode === "fixed" && (
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={allFixedSelected}
+                disabled={sources.length === 0}
+                onChange={(event) =>
+                  changeScope({
+                    mode: "fixed",
+                    sourceKeys: event.target.checked ? sources.map((source) => source.key) : [],
+                  })
+                }
+              />
+              {t("processing.run.select_all_sources", { count: sources.length })}
+            </label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {sources.map((source) => (
+                <label key={source.key} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={fixedKeys.has(source.key)}
+                    onChange={(event) => toggleFixedSource(source.key, event.target.checked)}
+                  />
+                  {source.title}
+                </label>
+              ))}
+            </div>
+            {/* 固定名单不自动纳入新来源，必须写在界面上（§2 D4）。 */}
+            <p className="text-xs leading-5 text-text-secondary">
+              {t("processing.run.scope_fixed_note")}
+            </p>
+          </div>
+        )}
       </fieldset>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="space-y-1 text-sm">

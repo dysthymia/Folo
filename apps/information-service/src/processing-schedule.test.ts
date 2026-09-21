@@ -128,4 +128,76 @@ describe("处理计划", () => {
       schedule.finish(retried.id, retried.leaseToken!, "succeeded", "2026-04-02T00:00:01.000Z"),
     ).toBe(true)
   })
+
+  it("只传扁平 sourceKeys 的计划按 fixed 读回（向后兼容）", () => {
+    const { schedule } = fixture()
+    // 旧调用方只传 sourceKeys，不带范围描述符：等价 fixed，仍应可读可运行。
+    configure(schedule)
+    expect(schedule.snapshot().config).toMatchObject({
+      // 描述符与已解析名单都按同一份排序结果落库，不保留两份可能漂移的名单。
+      scope: { mode: "fixed", sourceKeys: ["feed/a", "inbox/c", "list/b"] },
+      sourceKeys: ["feed/a", "inbox/c", "list/b"],
+    })
+  })
+
+  it("新范围描述符（all）落库后 scope 与已解析名单都保留", () => {
+    const { schedule } = fixture()
+    schedule.save(
+      {
+        scope: { mode: "all" },
+        sourceKeys: ["feed/a", "list/b", "inbox/c"],
+        historySince: "2026-01-01T00:00:00.000Z",
+        timeZone: "Asia/Shanghai",
+        enabled: true,
+        times: ["23:00"],
+      },
+      0,
+    )
+    const config = schedule.snapshot().config!
+    expect(config.scope).toEqual({ mode: "all" })
+    // 运行范围读取直接沿用已落库名单，不重复做分类解析。
+    expect(schedule.tick("2026-04-01T14:50:00.000Z")).toEqual([])
+    const triggers = schedule.tick("2026-04-01T16:10:00.000Z")
+    expect(triggers[0]!.sourceKeys).toEqual(["feed/a", "inbox/c", "list/b"])
+  })
+
+  it("category 描述符落库后运行范围使用 client 解析后的名单", () => {
+    const { schedule } = fixture()
+    schedule.save(
+      {
+        scope: { mode: "category", view: 0, category: "tech" },
+        // client 已把该分类下的源解析为名单落库；新来源不在此名单内。
+        sourceKeys: ["feed/a"],
+        historySince: "2026-01-01T00:00:00.000Z",
+        timeZone: "Asia/Shanghai",
+        enabled: true,
+        times: ["23:00"],
+      },
+      0,
+    )
+    const config = schedule.snapshot().config!
+    expect(config.scope).toEqual({ mode: "category", view: 0, category: "tech" })
+    expect(schedule.tick("2026-04-01T14:50:00.000Z")).toEqual([])
+    const triggers = schedule.tick("2026-04-01T16:10:00.000Z")
+    expect(triggers[0]!.sourceKeys).toEqual(["feed/a"])
+  })
+
+  it("fixed 描述符是权威名单：与顶层扁平字段不一致时以描述符为准", () => {
+    const { schedule } = fixture()
+    schedule.save(
+      {
+        scope: { mode: "fixed", sourceKeys: ["feed/a"] },
+        // 客户端本应保持一致；这里刻意不一致，验证落库口径唯一（不产生第二份名单）。
+        sourceKeys: ["feed/a", "list/b"],
+        historySince: "2026-01-01T00:00:00.000Z",
+        timeZone: "Asia/Shanghai",
+        enabled: true,
+      },
+      0,
+    )
+    expect(schedule.snapshot().config).toMatchObject({
+      scope: { mode: "fixed", sourceKeys: ["feed/a"] },
+      sourceKeys: ["feed/a"],
+    })
+  })
 })

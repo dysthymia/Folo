@@ -300,6 +300,65 @@ export const researchPackSchema = z.discriminatedUnion("status", [
     references: z.array(researchPackReferenceSchema).length(0),
   }),
 ])
+/**
+ * 时间线内联综述摘要（§6 场景二）。来源数、更新时间、按句分组的引用都由服务端给出，
+ * 渲染层不再自己数一遍引用，避免两套口径。
+ */
+const storyDigestCitationSchema = z
+  .object({
+    id: z.string(),
+    quote: z.string(),
+    sourceKey: z.string(),
+    sourceTitle: z.string(),
+    sourceUrl: z.string().nullable(),
+  })
+  .strict()
+const storyDigestSourceSchema = z
+  .object({
+    inputSeq: z.number().int().positive(),
+    sourceKey: z.string(),
+    itemId: z.string(),
+    title: z.string(),
+    url: z.string().nullable(),
+  })
+  .strict()
+const storyDigestSentenceSchema = z
+  .object({
+    id: z.string(),
+    text: z.string(),
+    citations: z.array(storyDigestCitationSchema),
+  })
+  .strict()
+export const storyDigestSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ready"),
+      storyId: z.string(),
+      revision: z.number().int().positive(),
+      title: z.string(),
+      body: z.string(),
+      updatedAt: isoDateTime,
+      sourceCount: z.number().int().nonnegative(),
+      sources: z.array(storyDigestSourceSchema),
+      sentences: z.array(storyDigestSentenceSchema),
+      uncitedSentenceCount: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.enum(["repairing", "missing"]),
+      storyId: z.string(),
+      revision: z.null(),
+      title: z.null(),
+      body: z.null(),
+      updatedAt: z.null(),
+      sourceCount: z.literal(0),
+      sources: z.array(storyDigestSourceSchema).length(0),
+      sentences: z.array(storyDigestSentenceSchema).length(0),
+      uncitedSentenceCount: z.literal(0),
+    })
+    .strict(),
+])
 const mutationResultSchema = z
   .object({
     inputSeq: z.number().int().positive(),
@@ -393,6 +452,7 @@ export type ReadingStories = ReadingStory[]
 export type ReadingView = ReadingSnapshotPage["view"]
 export type ReadingEntryOverride = z.infer<typeof readingEntriesSchema>["entries"][number]
 export type ResearchPack = z.infer<typeof researchPackSchema>
+export type StoryDigest = z.infer<typeof storyDigestSchema>
 export type ReadingMutation =
   | z.infer<typeof mutationResultSchema>
   | z.infer<typeof retryResultSchema>
@@ -474,6 +534,13 @@ export const loadEntryOverrides = async (signal: AbortSignal) => {
 }
 export const loadResearchPack = (storyId: string, signal: AbortSignal) =>
   readingRequest(`research-pack/${encodeURIComponent(storyId)}`, researchPackSchema, signal)
+
+export const loadStoryDigest = (storyId: string, signal: AbortSignal) =>
+  readingRequest(
+    `processing/stories/${encodeURIComponent(storyId)}/digest`,
+    storyDigestSchema,
+    signal,
+  )
 
 export const mutationSchemas = {
   override: mutationResultSchema,

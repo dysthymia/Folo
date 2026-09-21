@@ -14,7 +14,6 @@ import {
   saveInformationAISettings,
 } from "./session"
 import type { InformationSnapshot } from "./snapshot"
-import { getInformationArticleUrl } from "./snapshot"
 import { XSearchPanel } from "./XSearchPanel"
 
 type LoadError = InformationLoadError["kind"]
@@ -32,6 +31,9 @@ export function InformationPage() {
   const [model, setModel] = useState("qwen3.8-flash")
   const [apiKey, setApiKey] = useState("")
   const requestRef = useRef<AbortController | null>(null)
+  // 跟踪当前快照的所有者，用于回前台时核验账号是否变化（避免闭包拿到旧值）。
+  const snapshotRef = useRef<InformationSnapshot | null>(null)
+  snapshotRef.current = snapshot
 
   const refresh = useCallback(async () => {
     // 刷新时取消前一个请求，避免旧账号或旧快照覆盖最新响应。
@@ -75,13 +77,49 @@ export function InformationPage() {
 
   useEffect(() => {
     void refresh()
-    // 返回页面时重新核验主站账号；页面隐藏时清除结果，避免切号后短暂展示旧数据。
+    // 隐藏时只中止在途请求，不销毁子树（保留页码/滚动/所选条目）；
+    // 回前台只核验账号：同账号复用既有快照与阅读进度，不重置；仅当账号变化才替换快照并重新初始化阅读器。
     const onVisibility = () => {
-      if (document.visibilityState === "visible") void refresh()
-      else {
+      if (document.visibilityState === "hidden") {
         requestRef.current?.abort()
-        setSnapshot(null)
+        return
       }
+      void (async () => {
+        requestRef.current?.abort()
+        const controller = new AbortController()
+        requestRef.current = controller
+        try {
+          const data = await loadInformationSnapshot(
+            () => oneTimeToken.generate(),
+            controller.signal,
+          )
+          if (controller.signal.aborted) return
+          if (snapshotRef.current?.ownerId === data.ownerId) return
+          // 账号变化：完整重新初始化（含设置与阅读器），等价于一次显式刷新。
+          setSnapshot(data)
+          setSettings(null)
+          setSettingsError(null)
+          try {
+            const nextSettings = await loadInformationAISettings(
+              () => oneTimeToken.generate(),
+              controller.signal,
+            )
+            if (!controller.signal.aborted) {
+              setSettings(nextSettings)
+              setProvider(nextSettings.provider)
+              setModel(nextSettings.model)
+            }
+          } catch (error) {
+            if (!controller.signal.aborted)
+              setSettingsError(error instanceof InformationLoadError ? error.kind : "request")
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return
+          // 鉴权失败：清掉旧快照，避免展示其它账号或已失效的内容。
+          setSnapshot(null)
+          setError(error instanceof InformationLoadError ? error.kind : "request")
+        }
+      })()
     }
     document.addEventListener("visibilitychange", onVisibility)
     return () => {
@@ -279,71 +317,6 @@ export function InformationPage() {
             </section>
 
             <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
-              <section aria-labelledby="information-results" className="min-w-0 space-y-4">
-                <h2 id="information-results" className="text-lg font-semibold">
-                  {t("information.results")}
-                </h2>
-                {snapshot.results.length === 0 && (
-                  <div className="rounded-xl border border-dashed border-fill-secondary px-6 py-14 text-center">
-                    <p className="font-medium">{t("information.empty_results")}</p>
-                    <p className="mt-2 text-sm leading-6 text-text-secondary">
-                      {t("information.empty_results_hint")}
-                    </p>
-                  </div>
-                )}
-                {[...snapshot.results]
-                  .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-                  .map((result) => {
-                    const articleUrl = getInformationArticleUrl(items.get(result.itemId)?.url)
-                    return (
-                      <article
-                        key={result.id}
-                        className="space-y-4 rounded-xl border border-fill-secondary bg-material-thick p-5 sm:p-6"
-                      >
-                        <div className="space-y-2">
-                          <p className="break-words text-xs text-text-secondary">
-                            {sourceTitles.get(result.sourceKey) || result.sourceKey}
-                          </p>
-                          <h3 className="break-words text-lg font-semibold leading-7">
-                            {result.title}
-                          </h3>
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary">
-                            <span className="rounded bg-fill-secondary px-2 py-1">
-                              {result.model}
-                            </span>
-                            <span>{t(`information.material.${result.material}`)}</span>
-                            <time dateTime={result.createdAt}>{formatDate(result.createdAt)}</time>
-                          </div>
-                        </div>
-                        {/* 模型输出始终作为文本渲染，不解释其中的 HTML 或可执行链接。 */}
-                        <p className="whitespace-pre-wrap break-words text-sm leading-7">
-                          {result.payload.summary}
-                        </p>
-                        {result.payload.points.length > 0 && (
-                          <ul className="list-disc space-y-2 pl-5 text-sm leading-6">
-                            {result.payload.points.map((point, index) => (
-                              <li key={`${index}-${point}`} className="break-words">
-                                {point}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {articleUrl && (
-                          <a
-                            className="inline-flex items-center gap-1 text-sm text-blue hover:underline"
-                            href={articleUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t("information.open_original")}
-                            <i className="i-mgc-external-link-cute-re size-4" aria-hidden />
-                          </a>
-                        )}
-                      </article>
-                    )
-                  })}
-              </section>
-
               <aside className="min-w-0 space-y-8">
                 <section aria-labelledby="information-jobs" className="space-y-4">
                   <h2 id="information-jobs" className="text-lg font-semibold">

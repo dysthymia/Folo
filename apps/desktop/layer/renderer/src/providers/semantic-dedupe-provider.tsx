@@ -2,6 +2,7 @@ import type {
   SemanticDedupeEvaluatorRunInfo,
   SemanticDuplicateCandidate,
   SemanticDuplicateEvaluation,
+  SemanticDuplicateEvaluatorSource,
 } from "@follow/store/entry/semantic-dedupe"
 import {
   registerSemanticDuplicateEvaluator,
@@ -12,10 +13,11 @@ import {
 } from "@follow/store/entry/semantic-dedupe"
 import { useWhoami } from "@follow/store/user/hooks"
 import { cn } from "@follow/utils/utils"
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 import { useAISettingSelector } from "~/atoms/settings/ai"
 import { ipcServices } from "~/lib/client"
+import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
 const SEMANTIC_DEDUPE_DEFAULT_MODEL = "gpt-5.3-codex-spark"
@@ -221,6 +223,44 @@ const evaluateCandidatesWithDevServer = async (
   }
 
   return parsed.results
+}
+
+export type SemanticDedupeEvaluatorAvailabilityReason =
+  "electron" | "dev-server" | "browser-local-folo" | "browser-web"
+
+export interface SemanticDedupeEvaluatorAvailability {
+  available: boolean
+  /** Matches the evaluator source reported by the store when the executor is registered. */
+  source: SemanticDuplicateEvaluatorSource
+  /** Why the local executor is or is not available, used to pick the localized hint. */
+  reason: SemanticDedupeEvaluatorAvailabilityReason
+}
+
+/**
+ * Whether the local semantic-dedupe fallback executor can actually run in the current
+ * environment. This is derived from environment signals only (not from the user toggle), so it
+ * stays accurate even when the switch is off.
+ *
+ * - Electron desktop with the IPC service: the on-device executor runs.
+ * - Vite dev server (`import.meta.env.DEV`): the dev-server executor runs.
+ * - `local.folo.is` in the browser: the processing service is reachable but the on-device
+ *   executor is not, so dedupe is owned by the processing service rules.
+ * - Any other browser: same as above, no local executor.
+ */
+export const useSemanticDedupeEvaluatorAvailability = (): SemanticDedupeEvaluatorAvailability => {
+  return useMemo<SemanticDedupeEvaluatorAvailability>(() => {
+    const inRenderer = typeof window !== "undefined"
+    if (inRenderer && window.electron && ipcServices?.semanticDedupe) {
+      return { available: true, source: "electron", reason: "electron" }
+    }
+    if (import.meta.env.DEV) {
+      return { available: true, source: "dev-server", reason: "dev-server" }
+    }
+    if (inRenderer && isLocalFoloHost()) {
+      return { available: false, source: "none", reason: "browser-local-folo" }
+    }
+    return { available: false, source: "none", reason: "browser-web" }
+  }, [])
 }
 
 export const SemanticDedupeProvider = () => {

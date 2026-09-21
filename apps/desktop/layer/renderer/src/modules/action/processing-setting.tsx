@@ -1,5 +1,5 @@
 import type { AutomationRule, RuleSet } from "@follow/information-core"
-import { ruleSetSchema } from "@follow/information-core"
+import { resolveScheduleSourceKeys, ruleSetSchema } from "@follow/information-core"
 import { localActionSyncService } from "@follow/store/action/local-store"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -34,7 +34,11 @@ import {
 } from "./processing-migration-switch"
 import { ProcessingPresetPicker } from "./processing-preset-picker"
 import { parseProcessingRuleContext, prepareProcessingRuleContext } from "./processing-rule-link"
-import { defaultProcessingSchedule, ProcessingRunSettings } from "./processing-run-settings"
+import {
+  defaultProcessingSchedule,
+  isoFromDate,
+  ProcessingRunSettings,
+} from "./processing-run-settings"
 import { ProcessingTags } from "./processing-tags"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
@@ -77,6 +81,10 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
     null,
   )
   const [targetRuleId, setTargetRuleId] = useState<string | null>(null)
+  // 「保存并启用」：一次完成保存 → 发布 → 保存计划；勾选后把近期内容一并纳入本轮发布目标。
+  const [reprocessRecent, setReprocessRecent] = useState(false)
+  const [enableBusy, setEnableBusy] = useState(false)
+  const [enableStatus, setEnableStatus] = useState<"idle" | "saved" | "failed">("idle")
   const requestRef = useRef<AbortController | null>(null)
   const draftRef = useRef<RuleSet | null>(null)
   const editorRef = useRef<ProcessingEditor | null>(null)
@@ -89,6 +97,10 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
   // 刷新后使用服务端发布记录恢复运行资格；旧 revision 的发布不能解锁当前新草稿。
   const currentRevisionPublished =
     !!release || !!editor?.releases.some((item) => item.draftRevision === editor.revision)
+  // 已生效版本：取历史发布里的最高版本号，不依赖返回顺序。
+  const liveReleaseVersion = editor?.releases.length
+    ? Math.max(...editor.releases.map((item) => item.version))
+    : (release?.version ?? null)
   const canRun =
     !!schedule?.config &&
     schedule.config.sourceKeys.length > 0 &&
@@ -273,8 +285,8 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
     if (draft)
       change({ ...draft, rules: draft.rules.map((rule) => (rule.id === id ? next : rule)) })
   }
-  const save = async () => {
-    if (!draft || !editor || !valid) return
+  const save = async (): Promise<boolean> => {
+    if (!draft || !editor || !valid) return false
     const controller = new AbortController()
     requestRef.current = controller
     setBusy(true)
@@ -282,7 +294,7 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
     setSaved(false)
     try {
       const result = await client.save(draft, editor.revision, controller.signal)
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return false
       const data = { ...editor, ...result }
       editorRef.current = data
       setEditor(data)
@@ -290,12 +302,62 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
       setDraft(result.config)
       setRelease(null)
       setSaved(true)
+      return true
     } catch (cause) {
       if (!controller.signal.aborted) reportError(cause)
+      return false
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
   }
+  // 计划的 sourceKeys 始终是「描述符 + 已解析名单」里的名单部分：all/category 由本地订阅解析。
+  const resolvedScheduleDraft = (): ProcessingScheduleConfig => {
+    const config = scheduleDraft ?? defaultProcessingSchedule()
+    return {
+      ...config,
+      sourceKeys: resolveScheduleSourceKeys(config.scope, editor?.sources ?? []),
+    }
+  }
+
+  /**
+   * §4 P1-4「保存并启用」一体化：保存草稿 → 发布生效 → 保存计划，三步一次完成。
+   * 「重新处理近期内容」只影响本次发布目标范围：不勾选时只面向未来输入。
+   */
+  const saveAndEnable = async () => {
+    if (!draft || !editor || !valid) return
+    setEnableBusy(true)
+    setEnableStatus("idle")
+    setSaved(false)
+    try {
+      const timeZone =
+        scheduleDraft?.timeZone ??
+        schedule?.config?.timeZone ??
+        Intl.DateTimeFormat().resolvedOptions().timeZone
+      // 未勾选时强制「未来输入」，避免上一次遗留的 recent/selected 范围被静默沿用。
+      const scope: ProcessingReleaseScope = reprocessRecent
+        ? releaseScope.mode === "future"
+          ? { mode: "recent", since: isoFromDate(recentSince, timeZone) }
+          : releaseScope
+        : { mode: "future" }
+      setReleaseScope(scope)
+      if (!(await save())) {
+        setEnableStatus("failed")
+        return
+      }
+      if (!(await releaseRuleSet(scope, { skipDirtyCheck: true }))) {
+        setEnableStatus("failed")
+        return
+      }
+      if (!(await saveSchedule(resolvedScheduleDraft()))) {
+        setEnableStatus("failed")
+        return
+      }
+      setEnableStatus("saved")
+    } finally {
+      setEnableBusy(false)
+    }
+  }
+
   const runPreview = async () => {
     const item = editor?.items.find((item) => JSON.stringify([item.sourceKey, item.id]) === sample)
     if (!item || !draft || !valid) return
@@ -313,32 +375,44 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
       if (!controller.signal.aborted) setBusy(false)
     }
   }
-  const saveSchedule = async () => {
-    if (!editor || typeof client.saveSchedule !== "function") return
+  const saveSchedule = async (next?: ProcessingScheduleConfig): Promise<boolean> => {
+    if (!editor || typeof client.saveSchedule !== "function") return false
     const controller = new AbortController()
     setScheduleBusy(true)
     setError(null)
     try {
-      const config = scheduleDraft ?? defaultProcessingSchedule()
+      const config = next ?? scheduleDraft ?? defaultProcessingSchedule()
       const result = await client.saveSchedule(config, schedule?.revision ?? 0, controller.signal)
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return false
       setSchedule(result)
       setScheduleDraft(result.config)
+      return true
     } catch (cause) {
       if (!controller.signal.aborted) reportError(cause)
+      return false
     } finally {
       if (!controller.signal.aborted) setScheduleBusy(false)
     }
   }
-  const releaseRuleSet = async () => {
-    if (!editor || dirty || typeof client.releaseRuleSet !== "function") return
+  // 发布不要求「先手动保存过」：统一入口会先保存再发布，因此允许跳过脏检查。
+  const releaseRuleSet = async (
+    scope: ProcessingReleaseScope = releaseScope,
+    options?: { skipDirtyCheck?: boolean },
+  ): Promise<boolean> => {
+    if (
+      !editor ||
+      (dirty && !options?.skipDirtyCheck) ||
+      typeof client.releaseRuleSet !== "function"
+    )
+      return false
     const controller = new AbortController()
     setReleaseBusy(true)
     setError(null)
     try {
       const result = await client.releaseRuleSet(
-        editor.revision,
-        releaseScope,
+        // 保存刚刷新过 editorRef，用它拿到最新 revision，避免用闭包里的旧版本发布。
+        editorRef.current?.revision ?? editor.revision,
+        scope,
         crypto.randomUUID(),
         controller.signal,
       )
@@ -354,7 +428,7 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
         ) {
           // 发布等待期间账号或草稿所有者变化时，绝不能停用当前账号的本地规则。
           setMigrationSwitchStatus("failed")
-          return
+          return false
         }
         const activePending = pendingLocalSwitches.filter((target) =>
           currentDraft?.rules.some((rule) => rule.id === target.migratedRuleId),
@@ -384,8 +458,10 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
           }
         }
       }
+      return true
     } catch (cause) {
       if (!controller.signal.aborted) reportError(cause)
+      return false
     } finally {
       if (!controller.signal.aborted) setReleaseBusy(false)
     }
@@ -634,21 +710,57 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                   {t("processing.invalid_draft")}
                 </p>
               )}
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   className={`${processingButtonClass} bg-accent text-white`}
-                  disabled={!dirty || !valid}
+                  disabled={!valid || enableBusy || busy || releaseBusy || scheduleBusy}
+                  onClick={() => void saveAndEnable()}
+                >
+                  {t("processing.run.save_and_enable")}
+                </button>
+                {/* 只保存不启用的路径保留为次要操作，主路径是上面的单主按钮。 */}
+                <button
+                  type="button"
+                  className={processingButtonClass}
+                  disabled={!dirty || !valid || enableBusy}
                   onClick={() => void save()}
                 >
                   {t("processing.save")}
                 </button>
+                <label className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={reprocessRecent}
+                    onChange={(event) => setReprocessRecent(event.target.checked)}
+                  />
+                  {t("processing.run.reprocess_recent")}
+                </label>
                 {saved && (
                   <span role="status" className="text-sm text-green">
                     {t("processing.saved_hint")}
                   </span>
                 )}
               </div>
+              <p className="text-xs leading-5 text-text-secondary">
+                {t("processing.run.save_and_enable_hint")}
+              </p>
+              {enableStatus === "saved" && (
+                <p role="status" className="text-sm text-green">
+                  {t("processing.run.saved_enabled")}
+                </p>
+              )}
+              {enableStatus === "failed" && (
+                <p role="alert" className="text-sm text-red">
+                  {t("processing.run.save_and_enable_failed")}
+                </p>
+              )}
+              {/* §6 场景三：重开同一分类时「AI 处理后」直接可用，并明确当前用的是哪一版。 */}
+              {liveReleaseVersion !== null && (
+                <p role="status" className="text-sm text-text-secondary">
+                  {t("processing.run.active_version", { version: liveReleaseVersion })}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <ProcessingExportControls config={draft} />
                 <label className={processingButtonClass}>

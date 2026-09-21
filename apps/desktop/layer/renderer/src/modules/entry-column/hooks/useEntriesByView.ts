@@ -37,6 +37,7 @@ import { useRouteParams } from "~/hooks/biz/useRouteParams"
 import { useServiceProcessingRoles } from "~/modules/information/processing-role-client"
 
 import { aiTimelineEnabledAtom } from "../atoms/ai-timeline"
+import { timelineContentModeAtom } from "../atoms/processing-timeline"
 import { getVisibleLocalEntryIds } from "./filter-local-entry-ids"
 import { useIsPreviewFeed } from "./useIsPreviewFeed"
 
@@ -283,13 +284,17 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
   useServiceProcessingRoles()
   // 时间线只读统一角色层：本地去重与处理服务决策都在这里生效，避免各接一套。
   const processingRoleRevision = useEntryProcessingRolesRevision()
+  // 「原始内容」只跳过这一处过滤：范围与排序不变，因此计数随之恢复（§6 场景一）。
+  const timelineContentMode = useAtomValue(timelineContentModeAtom)
   const entryIds = useMemo(() => {
     void processingRoleRevision
+
+    if (timelineContentMode === "original") return rawEntryIds
 
     return rawEntryIds.filter(
       (entryId) => !isEntryHiddenByProcessingRole(entryId, { localDedupe: semanticDedupeEnabled }),
     )
-  }, [rawEntryIds, semanticDedupeEnabled, processingRoleRevision])
+  }, [rawEntryIds, semanticDedupeEnabled, processingRoleRevision, timelineContentMode])
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

@@ -31,7 +31,7 @@ import { useRunCommandFn } from "~/modules/command/hooks/use-command"
 import { useCommandShortcut } from "~/modules/command/hooks/use-command-binding"
 import { EntryHeader } from "~/modules/entry-content/components/entry-header"
 import { FeedIcon } from "~/modules/feed/feed-icon"
-import { ProcessingReadingModeSwitch } from "~/modules/information/ProcessingReadingModeSwitch"
+import { smartReadingPath } from "~/modules/information/reading-mode-link"
 import { useRefreshFeedMutation } from "~/queries/feed"
 import { useFeedHeaderIcon, useFeedHeaderTitle } from "~/store/feed/hooks"
 
@@ -41,6 +41,7 @@ import { useIsPreviewFeed } from "../hooks/useIsPreviewFeed"
 import { useEntryRootState } from "../store/EntryColumnContext"
 import { AppendTaildingDivider } from "./AppendTaildingDivider"
 import { SwitchToMasonryButton } from "./buttons/SwitchToMasonryButton"
+import { ProcessingTimelineModeSwitch } from "./ProcessingTimelineModeSwitch"
 
 export const EntryListHeader: FC<{
   refetch: () => void
@@ -165,7 +166,17 @@ export const EntryListHeader: FC<{
             )}
             onClick={stopPropagation}
           >
-            {isLocalFoloHost() && <ProcessingReadingModeSwitch mode="original" />}
+            {isLocalFoloHost() && (
+              <div className="flex shrink-0 items-center gap-2">
+                <ProcessingTimelineModeSwitch />
+                <a
+                  className="whitespace-nowrap text-xs text-text-secondary hover:text-text"
+                  href={smartReadingPath(window.location.pathname + window.location.search)}
+                >
+                  {t("processing.reader.mode_smart")}
+                </a>
+              </div>
+            )}
             {isWideMode &&
               (showEntryHeader || showTimelineSummaryButton || showAiTimelineToggle) && (
                 <>

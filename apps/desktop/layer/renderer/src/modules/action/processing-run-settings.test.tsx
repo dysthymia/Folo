@@ -41,6 +41,7 @@ const source: ProcessingEditor["sources"][number] = {
 }
 
 const schedule: ProcessingScheduleConfig = {
+  scope: { mode: "fixed", sourceKeys: [source.key] },
   sourceKeys: [source.key],
   historySince: "2026-09-01T00:00:00.000Z",
   timeZone: "Asia/Shanghai",
@@ -210,7 +211,11 @@ describe("ProcessingRunSettings", () => {
   })
 
   it("没有选择来源时禁用保存", async () => {
-    await render({ sources: [], value: { ...schedule, sourceKeys: [] } })
+    // 范围描述符是权威来源：fixed 模式下名单与描述符一致，因此两处都要清空。
+    await render({
+      sources: [],
+      value: { ...schedule, scope: { mode: "fixed", sourceKeys: [] }, sourceKeys: [] },
+    })
 
     expect(findButton(container!, "processing.run.save_schedule")?.disabled).toBe(true)
   })

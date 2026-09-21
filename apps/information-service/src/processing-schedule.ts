@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
+import type { ScheduleScope } from "@follow/information-core"
+import { scheduleScopeSchema } from "@follow/information-core"
+
 export const defaultScheduleTimes = ["08:00", "12:00", "15:00", "20:00", "23:00"] as const
 
 export type ProcessingScheduleInput = {
+  /** 运行范围描述符（§2 D4）。旧调用方只传 sourceKeys 时退化为 fixed。 */
+  scope?: ScheduleScope
   sourceKeys: readonly string[]
   historySince: string
   timeZone: string
@@ -14,6 +19,9 @@ export type ProcessingScheduleInput = {
 }
 
 export type ProcessingScheduleConfig = {
+  /** 运行范围描述符（§2 D4）。旧记录读为 fixed。 */
+  scope: ScheduleScope
+  /** 已解析的实际范围名单；fixed 与描述符一致，all/category 由 client 落库。 */
   sourceKeys: string[]
   historySince: string
   timeZone: string
@@ -176,8 +184,29 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
         : (() => {
             throw new ProcessingScheduleError("invalid_schedule")
           })()
+  // 运行范围三态（§2 D4）：新格式显式带 mode 描述符；旧记录只有扁平 sourceKeys，等价 fixed。
+  const parsedScope = isRecord(input.scope) ? scheduleScopeSchema.safeParse(input.scope) : null
+  let scope: ScheduleScope
+  let resolvedKeys: string[]
+  if (parsedScope?.success) {
+    scope = parsedScope.data
+    if (scope.mode === "fixed") {
+      resolvedKeys = sourceKeys(scope.sourceKeys)
+      // 描述符是 fixed 的权威名单：顶层扁平字段与它不一致时以描述符为准，避免两份名单漂移。
+      scope = { mode: "fixed", sourceKeys: resolvedKeys }
+    } else {
+      // all / category 的已解析名单由 client 落库；服务端只校验 + 排序，不做独立分类解析。
+      resolvedKeys = sourceKeys(input.sourceKeys)
+    }
+  } else if (Array.isArray(input.sourceKeys)) {
+    resolvedKeys = sourceKeys(input.sourceKeys)
+    scope = { mode: "fixed", sourceKeys: resolvedKeys }
+  } else {
+    throw new ProcessingScheduleError("invalid_schedule")
+  }
   return {
-    sourceKeys: sourceKeys(input.sourceKeys),
+    scope,
+    sourceKeys: resolvedKeys,
     historySince: parseIso(input.historySince, "invalid_schedule"),
     timeZone: timeZone(input.timeZone),
     enabled: input.enabled,

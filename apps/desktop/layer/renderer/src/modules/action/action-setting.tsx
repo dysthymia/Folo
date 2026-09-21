@@ -1,20 +1,17 @@
 import { Button } from "@follow/components/ui/button/index.js"
-import { LoadingWithIcon } from "@follow/components/ui/loading/index.jsx"
-import * as ScrollArea from "@follow/components/ui/scroll-area/ScrollArea.js"
-import { SegmentGroup, SegmentItem } from "@follow/components/ui/segment/index.js"
-import { useLocalActionHydration } from "@follow/store/action/local-hooks"
-import type { ActionItem } from "@follow/store/action/store"
+import { useActionRules } from "@follow/store/action/hooks"
+import { useLocalActionHydration, useLocalActionRules } from "@follow/store/action/local-hooks"
+import { localActionActions } from "@follow/store/action/local-store"
+import { actionActions } from "@follow/store/action/store"
 import { useWhoami } from "@follow/store/user/hooks"
-import { nextFrame } from "@follow/utils"
 import { JsonObfuscatedCodec } from "@follow/utils/json-codec"
 import { cn } from "@follow/utils/utils"
 import { repository } from "@pkg"
 import { useQueryClient } from "@tanstack/react-query"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
-import { MenuItemText, useShowContextMenu } from "~/atoms/context-menu"
 import { HeaderActionButton, HeaderActionGroup } from "~/components/ui/button/HeaderActionButton"
 import {
   DropdownMenu,
@@ -23,18 +20,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu/dropdown-menu.js"
-import { useDialog } from "~/components/ui/modal/stacked/hooks"
-import { useContextMenu } from "~/hooks/common/useContextMenu"
 import { copyToClipboard, readFromClipboard } from "~/lib/clipboard"
 import { toastFetchError } from "~/lib/error-parser"
 import { downloadJsonFile, selectJsonFile } from "~/lib/export"
-import type { ActionScope } from "~/modules/action/action-scope"
 import {
   ActionScopeProvider,
   useScopedActionActions,
   useScopedActionDataDirty,
   useScopedActionRules,
-  useScopedPrefetchActions,
   useScopedUpdateActionsMutation,
 } from "~/modules/action/action-scope"
 import { RuleCard } from "~/modules/action/rule-card"
@@ -43,10 +36,17 @@ import {
   buildConditionSummary,
   getRuleDisplayName,
 } from "~/modules/action/rule-summary"
+import type { UnifiedRuleRow, UnifiedRuleScope } from "~/modules/action/unified-action-list"
+import {
+  buildProcessingActionSummary,
+  buildProcessingConditionSummary,
+  UnifiedActionList,
+} from "~/modules/action/unified-action-list"
 
 import { isLocalFoloHost } from "../ai-chat/local-provider"
 import { useSetSubViewRightView } from "../app-layout/subview/hooks"
-import { ProcessingSetting } from "./processing-setting"
+import { ProcessingServiceDetail } from "./processing-service-detail"
+import { useProcessingServiceRules } from "./use-processing-service-rules"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
 import { generateExportFilename } from "./utils"
 
@@ -89,8 +89,8 @@ const EmptyActionPlaceholder = ({ onCreateRule }: { onCreateRule: () => void }) 
   )
 }
 
-type EditorScope = ActionScope | "processing_service"
-const parseRequestedScope = (): EditorScope | null => {
+// 执行位置降为详情内的标识，不再作为主界面入口。?scope= 仅作初始定位，不强制先选执行位置。
+const parseRequestedScope = (): UnifiedRuleScope | null => {
   const requested = new URLSearchParams(window.location.search).get("scope")
 
   if (requested === "cloud" || requested === "local") return requested
@@ -100,170 +100,136 @@ const parseRequestedScope = (): EditorScope | null => {
   return null
 }
 
+const parseRowId = (id: string): { scope: UnifiedRuleScope; key: string } | null => {
+  const separator = id.indexOf(":")
+  if (separator < 0) return null
+  return { scope: id.slice(0, separator) as UnifiedRuleScope, key: id.slice(separator + 1) }
+}
+
 export const ActionSetting = () => {
-  // 以规则为中心：本机部署默认进入处理服务；旧位置仍可用 ?scope=cloud|local 直接访问。
-  const [scope, setScope] = useState<EditorScope>(
-    () => parseRequestedScope() ?? (isLocalFoloHost() ? "processing_service" : "cloud"),
-  )
-  const [serviceDirty, setServiceDirty] = useState(false)
-  const { ask } = useDialog()
-  const { t } = useTranslation("app")
+  const { t: tSettings } = useTranslation("settings")
+  const { t: tApp } = useTranslation("app")
   const user = useWhoami()
 
   useLocalActionHydration(user?.id)
 
-  const changeScope = (next: EditorScope) => {
-    if (next === scope) return
-    if (scope === "processing_service" && serviceDirty)
-      ask({
-        title: t("processing.unsaved"),
-        message: t("processing.discard"),
-        variant: "ask",
-        onConfirm: () => {
-          setServiceDirty(false)
-          setScope(next)
-        },
-      })
-    else setScope(next)
-  }
+  const initialScope = useMemo(() => parseRequestedScope(), [])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
-  // 自建服务不挂载旧 Actions 的查询和保存逻辑，避免把自有字段提交官方接口。
-  if (scope === "processing_service")
-    return (
-      <>
-        <div className="mb-4">
-          <ActionScopeSelector scope={scope} onScopeChange={changeScope} />
-        </div>
-        <ProcessingSetting key={user?.id ?? "anonymous"} onDirty={setServiceDirty} />
-      </>
-    )
+  const cloudRules = useActionRules()
+  const localRules = useLocalActionRules()
+  const { rules: processingRules, available: processingAvailable } = useProcessingServiceRules()
 
-  return (
-    <ActionScopeProvider value={scope}>
-      <ActionSettingContent scope={scope} onScopeChange={changeScope} />
-    </ActionScopeProvider>
+  const cloudRows: UnifiedRuleRow[] = cloudRules.map((rule, index) => ({
+    id: `cloud:${index}`,
+    scope: "cloud",
+    name: getRuleDisplayName(rule, index, tSettings),
+    conditionSummary: buildConditionSummary(rule, tSettings),
+    actionSummary: buildActionSummary(rule, tSettings),
+    enabled: !rule.result.disabled,
+  }))
+  const localRows: UnifiedRuleRow[] = localRules.map((rule, index) => ({
+    id: `local:${index}`,
+    scope: "local",
+    name: getRuleDisplayName(rule, index, tSettings),
+    conditionSummary: buildConditionSummary(rule, tSettings),
+    actionSummary: buildActionSummary(rule, tSettings),
+    enabled: !rule.result.disabled,
+  }))
+  // 摘要函数只依赖 (key) => string，收窄一次避免把命名空间的字面量键类型带进去。
+  const tSettingsKey = useCallback((key: string) => tSettings(key as never), [tSettings])
+  const tAppKey = useCallback((key: string) => tApp(key as never), [tApp])
+
+  const processingRows: UnifiedRuleRow[] = processingRules.map((rule) => ({
+    id: `processing_service:${rule.id}`,
+    scope: "processing_service",
+    name: rule.name,
+    conditionSummary: buildProcessingConditionSummary(rule.when, tSettingsKey),
+    actionSummary: buildProcessingActionSummary(rule.actions, tAppKey),
+    enabled: rule.enabled,
+    enableBlocked: !processingAvailable,
+  }))
+
+  const unifiedRows = useMemo(
+    () => [...cloudRows, ...localRows, ...processingRows],
+    [cloudRows, localRows, processingRows],
   )
-}
+  const hasRules = unifiedRows.length > 0
 
-const ActionScopeSelector = ({
-  scope,
-  onScopeChange,
-}: {
-  scope: EditorScope
-  onScopeChange: (scope: EditorScope) => void
-}) => {
-  const { t } = useTranslation(["settings", "app"])
-
-  return (
-    <div className="space-y-1">
-      <SegmentGroup value={scope} onValueChanged={(value) => onScopeChange(value as EditorScope)}>
-        <SegmentItem value="cloud" label={t("actions.scope.cloud")} />
-        <SegmentItem value="local" label={t("actions.scope.local")} />
-        {isLocalFoloHost() && (
-          <SegmentItem value="processing_service" label={t("processing.scope", { ns: "app" })} />
-        )}
-      </SegmentGroup>
-      {/* 执行位置是旧规则的划分方式，不再是新建规则的起点。 */}
-      {isLocalFoloHost() && (
-        <p className="max-w-xl text-xs leading-5 text-text-secondary">
-          {t("processing.scope_hint", { ns: "app" })}
-        </p>
-      )}
-    </div>
-  )
-}
-
-const ActionSettingContent = ({
-  onScopeChange,
-  scope,
-}: {
-  onScopeChange: (scope: EditorScope) => void
-  scope: ActionScope
-}) => {
-  const actions = useScopedActionRules()
-  const scopedActionActions = useScopedActionActions()
-  const { t } = useTranslation("settings")
-
-  const [selectedRuleIndex, setSelectedRuleIndex] = useState(0)
-  const actionQuery = useScopedPrefetchActions()
-
+  // 深链 ?scope= 仅作初始定位：选中该执行位置下的第一条规则，不强制先选执行位置。
   useEffect(() => {
-    if (actions.length === 0) {
-      setSelectedRuleIndex(0)
-      return
+    if (selectedId || !initialScope || unifiedRows.length === 0) return
+    const first = unifiedRows.find((rule) => rule.scope === initialScope)
+    if (first) setSelectedId(first.id)
+  }, [initialScope, selectedId, unifiedRows])
+
+  const selected = selectedId ? parseRowId(selectedId) : null
+
+  const handleCreateRule = useCallback(() => {
+    if (!selected || (selected.scope !== "cloud" && selected.scope !== "local")) return
+    const actions = selected.scope === "local" ? localActionActions : actionActions
+    const baseLength = selected.scope === "local" ? localRules.length : cloudRules.length
+    actions.addRule((number) => tSettings("actions.actionName", { number }))
+    setSelectedId(`${selected.scope}:${baseLength}`)
+  }, [selected, cloudRules.length, localRules.length, tSettings])
+
+  const handleCreateRuleTop = useCallback(() => {
+    actionActions.addRule((number) => tSettings("actions.actionName", { number }))
+    setSelectedId(`cloud:${cloudRules.length}`)
+  }, [cloudRules.length, tSettings])
+
+  let detail: React.ReactNode = null
+  if (selected) {
+    if (selected.scope === "processing_service") {
+      detail = <ProcessingServiceDetail available={!!processingAvailable} onDirty={() => {}} />
+    } else {
+      const index = Number(selected.key)
+      detail = (
+        <ActionScopeProvider value={selected.scope}>
+          <ActionButtonGroup onCreateRule={handleCreateRule} />
+          <div className="min-h-0 flex-1">
+            <RuleCard index={index} mode="detail" />
+          </div>
+        </ActionScopeProvider>
+      )
     }
-
-    if (selectedRuleIndex > actions.length - 1) {
-      setSelectedRuleIndex(actions.length - 1)
-    }
-  }, [actions.length, selectedRuleIndex])
-
-  if (actionQuery.isPending) {
-    return (
-      <LoadingWithIcon
-        className="flex h-64 items-center justify-center"
-        icon={<i className="i-mgc-magic-2-cute-re" />}
-        size="large"
-      />
-    )
-  }
-
-  const hasActions = actions.length > 0
-
-  const handleCreateRule = () => {
-    const nextIndex = actions.length
-    scopedActionActions.addRule((number) => t("actions.actionName", { number }))
-    setSelectedRuleIndex(nextIndex)
   }
 
   return (
     <>
-      <ActionButtonGroup onCreateRule={handleCreateRule} />
+      <ExecutionLocationNote />
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <ActionScopeSelector scope={scope} onScopeChange={onScopeChange} />
-        <ShareImportSection />
+        <ActionScopeProvider value={selected?.scope === "local" ? "local" : "cloud"}>
+          <ShareImportSection />
+        </ActionScopeProvider>
       </div>
-      {hasActions ? (
-        <div className="flex min-h-0 w-full flex-1 flex-col @[960px]:absolute @[960px]:inset-x-0 @[960px]:bottom-0 @[960px]:top-12">
-          <div className="hidden h-full flex-1 @[960px]:flex @[960px]:h-0 @[960px]:overflow-hidden @[960px]:rounded-lg @[960px]:border @[960px]:border-fill-secondary">
-            <RuleList
-              selectedIndex={selectedRuleIndex}
-              onSelect={setSelectedRuleIndex}
-              onDelete={(deletedIndex) => {
-                // Adjust selectedRuleIndex when a rule is deleted
-                if (deletedIndex === selectedRuleIndex) {
-                  // If deleting the selected rule, select the previous one or 0
-                  setSelectedRuleIndex(Math.max(0, deletedIndex - 1))
-                } else if (deletedIndex < selectedRuleIndex) {
-                  // If deleting a rule before the selected one, shift the index down
-                  setSelectedRuleIndex(selectedRuleIndex - 1)
-                }
-              }}
-            />
-            <div className="flex flex-1 border-l border-fill-secondary">
-              <RuleCard index={selectedRuleIndex} mode="detail" />
-            </div>
-          </div>
-          <div className="flex flex-col gap-3 @[960px]:hidden">
-            {actions.map((_, actionIdx) => (
-              <RuleCard
-                key={actionIdx}
-                index={actionIdx}
-                mode="compact"
-                defaultOpen={actionIdx === selectedRuleIndex}
-                onOpenChange={(open) => {
-                  if (open) {
-                    setSelectedRuleIndex(actionIdx)
-                  }
-                }}
-              />
-            ))}
+      {hasRules ? (
+        <div className="flex min-h-0 w-full flex-1">
+          <UnifiedActionList rules={unifiedRows} selectedId={selectedId} onSelect={setSelectedId} />
+          <div className="flex min-h-0 flex-1 border-l border-fill-secondary">
+            {detail ?? (
+              <div className="flex flex-1 items-center justify-center text-sm text-text-secondary">
+                {tApp("automation.select_rule_hint")}
+              </div>
+            )}
           </div>
         </div>
       ) : (
-        <EmptyActionPlaceholder onCreateRule={handleCreateRule} />
+        <EmptyActionPlaceholder onCreateRule={handleCreateRuleTop} />
       )}
     </>
+  )
+}
+
+// 自动化页顶部常驻说明（非 tooltip）：讲清各执行位置的可用性。
+const ExecutionLocationNote = () => {
+  const { t } = useTranslation("app")
+  const local = isLocalFoloHost()
+  return (
+    <p className="mb-4 max-w-2xl text-xs leading-5 text-text-secondary">
+      {t("automation.execution_location_note")}
+      {!local && <span> {t("automation.processing_only_local")}</span>}
+    </p>
   )
 }
 
@@ -384,125 +350,6 @@ const ShareImportSection = () => {
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
-  )
-}
-
-const RuleList = ({
-  selectedIndex,
-  onSelect,
-  onDelete,
-}: {
-  selectedIndex: number
-  onSelect: (index: number) => void
-  onDelete: (index: number) => void
-}) => {
-  const rules = useScopedActionRules()
-  const { t } = useTranslation("settings")
-  const ruleCount = useScopedActionRules((s) => s.length)
-  const scopedActionActions = useScopedActionActions()
-  const mutation = useScopedUpdateActionsMutation()
-  const { ask } = useDialog()
-  const showContextMenu = useShowContextMenu()
-
-  const handleDeleteRule = useCallback(
-    (index: number) => {
-      if (ruleCount === 1) {
-        ask({
-          title: t("actions.action_card.summary.delete_title"),
-          variant: "danger",
-          message: t("actions.action_card.summary.delete_message"),
-          onConfirm: () => {
-            scopedActionActions.deleteRule(index)
-            onDelete(index)
-            nextFrame(() => {
-              mutation.mutate()
-            })
-          },
-        })
-      } else {
-        scopedActionActions.deleteRule(index)
-        onDelete(index)
-      }
-    },
-    [ruleCount, ask, t, mutation, onDelete, scopedActionActions],
-  )
-
-  if (rules.length === 0) {
-    return null
-  }
-
-  return (
-    <div className="flex w-[260px] shrink-0 flex-col">
-      <ScrollArea.ScrollArea rootClassName="h-full" viewportClassName="h-full">
-        <div className="flex flex-col">
-          {rules.map((rule, index) => (
-            <RuleListItem
-              key={rule.index ?? index}
-              rule={rule}
-              index={index}
-              isActive={index === selectedIndex}
-              onSelect={onSelect}
-              handleDelete={handleDeleteRule}
-              showContextMenu={showContextMenu}
-            />
-          ))}
-        </div>
-      </ScrollArea.ScrollArea>
-    </div>
-  )
-}
-
-const RuleListItem = ({
-  rule,
-  index,
-  isActive,
-  onSelect,
-  handleDelete,
-  showContextMenu,
-}: {
-  rule: ActionItem
-  index: number
-  isActive: boolean
-  onSelect: (index: number) => void
-  handleDelete: (index: number) => void
-  showContextMenu: ReturnType<typeof useShowContextMenu>
-}) => {
-  const { t } = useTranslation("settings")
-  const displayName = getRuleDisplayName(rule, index, t)
-  const whenSummary = buildConditionSummary(rule, t)
-  const actionSummary = buildActionSummary(rule, t)
-
-  const contextMenuProps = useContextMenu({
-    onContextMenu: async (e) => {
-      e.preventDefault()
-      await showContextMenu(
-        [
-          new MenuItemText({
-            label: t("actions.action_card.summary.delete"),
-            icon: <i className="i-mgc-delete-2-cute-re" />,
-            click: () => handleDelete(index),
-            requiresLogin: true,
-          }),
-        ],
-        e,
-      )
-    },
-  })
-
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(index)}
-      {...contextMenuProps}
-      className={cn(
-        "flex flex-col gap-1 border-b border-fill-tertiary px-4 py-3 text-left transition-all last:border-b-0",
-        isActive ? "bg-fill-quaternary" : "hover:bg-fill-quinary",
-      )}
-    >
-      <span className="text-sm font-medium text-text">{displayName}</span>
-      <span className="line-clamp-2 text-xs text-text-secondary">{whenSummary}</span>
-      <span className="line-clamp-1 text-xs text-text-secondary">{actionSummary}</span>
-    </button>
   )
 }
 

@@ -21,8 +21,11 @@ import { getSemanticDuplicateRoleDetail, useSemanticDedupeRevision } from "./sem
  *
  * `hidden` is an explicit rule decision, `merged` means the content already
  * appears elsewhere (an entry kept by the local dedupe or a service story).
+ * `restored` is an entry the user brought back by hand: it outranks both
+ * hiding and merging, because a restore the timeline keeps suppressing would
+ * look broken.
  */
-export type EntryProcessingRoleKind = "hidden" | "merged" | "keeper" | "story"
+export type EntryProcessingRoleKind = "hidden" | "merged" | "keeper" | "story" | "restored"
 
 export type EntryProcessingRoleSource = "service" | "local-dedupe"
 
@@ -37,6 +40,11 @@ export interface EntryProcessingRole {
   reason: string | null
   source: EntryProcessingRoleSource
   storyId?: string
+  /**
+   * 服务端的输入序号。只有服务端角色有；渲染层用它按需取处理理由（命中规则），
+   * 不用再为时间线单独查一次映射表。
+   */
+  inputSeq?: number
   /**
    * Title of the service story this entry belongs to. Only the service side
    * produces stories, so it is absent for local dedupe roles.
@@ -55,6 +63,7 @@ export interface EntryProcessingServiceRole {
   relatedEntryIds?: string[]
   storyId?: string
   storyTitle?: string
+  inputSeq?: number
 }
 
 export interface EntryProcessingRelatedEntry {
@@ -144,6 +153,7 @@ export const resolveEntryProcessingRole = (
       source: "service",
       ...(serviceRole.storyId ? { storyId: serviceRole.storyId } : {}),
       ...(serviceRole.storyTitle ? { storyTitle: serviceRole.storyTitle } : {}),
+      ...(serviceRole.inputSeq ? { inputSeq: serviceRole.inputSeq } : {}),
     }
   }
 

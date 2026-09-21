@@ -11,6 +11,16 @@ describe("智能与原始阅读切换", () => {
       originalReadingPath(new URL(target, "http://local.folo.is").searchParams.get("returnTo")),
     ).toBe(path)
   })
+  it("带上 storyId 时深链到那一篇综述", () => {
+    const path = "/timeline/view-1/123/pending"
+    const target = smartReadingPath(path, "11111111-1111-4111-8111-111111111111")
+    expect(target).toBe(
+      `/information?returnTo=${encodeURIComponent(path)}&storyId=11111111-1111-4111-8111-111111111111#smart-reading`,
+    )
+    expect(
+      originalReadingPath(new URL(target, "http://local.folo.is").searchParams.get("returnTo")),
+    ).toBe(path)
+  })
   it.each([
     null,
     "https://example.com",
