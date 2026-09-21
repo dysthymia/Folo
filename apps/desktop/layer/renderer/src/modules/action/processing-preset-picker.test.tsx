@@ -6,6 +6,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { ProcessingPresetPicker } from "./processing-preset-picker"
 
+const { askMock } = vi.hoisted(() => ({ askMock: vi.fn() }))
+
+vi.mock("../../components/ui/modal/stacked/hooks", () => ({
+  useDialog: () => ({ ask: askMock }),
+}))
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     // 测试保留翻译 key，确保比较区域和错误提示可被稳定断言。
@@ -88,7 +94,57 @@ describe("ProcessingPresetPicker", () => {
     expect(onApply).toHaveBeenCalledWith(
       expect.objectContaining({
         presetRef: { id: "P01", version: 1 },
-        prompt: expect.stringContaining("120"),
+        prompt: expect.stringMatching(/^当前私人 Prompt\n\n/),
+        patch: expect.objectContaining({ prompt: expect.stringMatching(/^当前私人 Prompt\n\n/) }),
+      }),
+    )
+  })
+
+  it("替换非空 Prompt 时二次确认，并展示保存版本到目录版本的升级", async () => {
+    const onApply = vi.fn()
+    const catalog = [
+      {
+        id: "P01" as const,
+        version: 2,
+        name: "新版",
+        description: "新版说明",
+        suggestedConditions: "范围",
+        target: "ai_transform" as const,
+        parameters: [],
+        prompt: "新版模板",
+      },
+    ]
+    container = document.createElement("div")
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(
+        <ProcessingPresetPicker
+          targets={["ai_transform"]}
+          currentPrompt="私人 Prompt"
+          currentPreset={{ id: "P01", version: 1 }}
+          catalog={catalog}
+          onApply={onApply}
+        />,
+      )
+    })
+
+    expect(container.textContent).toContain("processing.preset_upgrade_available")
+    const mode = container.querySelectorAll("select")[2]!
+    await setValue(mode, "replace")
+    const applyButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("processing.preset_apply"),
+    )!
+    await act(async () => applyButton.click())
+    expect(onApply).not.toHaveBeenCalled()
+    expect(askMock).toHaveBeenCalledTimes(1)
+    await act(async () => askMock.mock.calls[0]![0].onConfirm())
+    expect(onApply).toHaveBeenCalledTimes(1)
+    expect(onApply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        presetRef: { id: "P01", version: 2 },
+        prompt: "新版模板",
+        patch: expect.objectContaining({ prompt: "新版模板" }),
       }),
     )
   })

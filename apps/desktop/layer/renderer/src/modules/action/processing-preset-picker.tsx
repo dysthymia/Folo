@@ -1,13 +1,22 @@
 import type {
   PresetApplication,
+  PresetApplicationMode,
   PresetId,
+  PresetRef,
   PresetTarget,
+  PromptPreset,
   PromptPresetParameter,
 } from "@follow/information-core"
-import { applyPreset, promptPresets } from "@follow/information-core"
+import {
+  applyPresetDefinition,
+  comparePresetVersion,
+  mergePresetApplication,
+  promptPresets,
+} from "@follow/information-core"
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { useDialog } from "../../components/ui/modal/stacked/hooks"
 import { processingButtonClass, processingInputClass } from "./processing-condition-editor"
 
 const allTargets = [
@@ -24,6 +33,8 @@ export type ProcessingPresetPickerProps = {
   initialTarget?: PresetTarget
   /** 当前文字非空时显示覆盖提示，但只有点击“应用”才会回传新 Prompt。 */
   currentPrompt?: string
+  currentPreset?: PresetRef
+  catalog?: readonly PromptPreset[]
   onApply: (application: PresetApplication) => void
 }
 
@@ -48,19 +59,26 @@ export function ProcessingPresetPicker({
   targets,
   initialTarget,
   currentPrompt,
+  currentPreset,
+  catalog = promptPresets,
   onApply,
 }: ProcessingPresetPickerProps) {
   const { t } = useTranslation("app")
+  const { ask } = useDialog()
   const targetOptions = targets?.length ? targets : allTargets
   const [target, setTarget] = useState<PresetTarget>(() =>
     getInitialTarget(targetOptions, initialTarget),
   )
-  const [presetId, setPresetId] = useState<PresetId | "">("")
+  const initialPreset = catalog.find(
+    (item) => item.id === currentPreset?.id && targetOptions.includes(item.target),
+  )
+  const [presetId, setPresetId] = useState<PresetId | "">(initialPreset?.id ?? "")
   const [values, setValues] = useState<Record<string, string>>({})
-  const presets = useMemo(() => promptPresets.filter((item) => item.target === target), [target])
+  const [applicationMode, setApplicationMode] = useState<PresetApplicationMode>("append")
+  const presets = useMemo(() => catalog.filter((item) => item.target === target), [catalog, target])
   const selected = presets.find((item) => item.id === presetId)
   const selectedId = selected?.id
-  const previewApplication = useMemo(() => {
+  const templateApplication = useMemo(() => {
     if (!selected) return null
     const resolvedValues: Record<string, string | number | undefined> = {}
     for (const parameter of selected.parameters) {
@@ -68,16 +86,38 @@ export function ProcessingPresetPicker({
       resolvedValues[parameter.key] = parameter.type === "integer" && value ? Number(value) : value
     }
     try {
-      return applyPreset(selected.id, resolvedValues)
+      return applyPresetDefinition(selected, resolvedValues)
     } catch {
       return null
     }
   }, [selected, values])
+  const previewApplication = useMemo(() => {
+    if (!templateApplication) return null
+    const merged = mergePresetApplication(
+      templateApplication,
+      currentPrompt ?? "",
+      currentPrompt?.trim() ? applicationMode : "replace",
+    )
+    const maximum = merged.target === "global" ? 60_000 : 30_000
+    return merged.prompt.length <= maximum ? merged : null
+  }, [applicationMode, currentPrompt, templateApplication])
+  const versionComparison = selected
+    ? comparePresetVersion(currentPreset, { id: selected.id, version: selected.version })
+    : "different"
 
   useEffect(() => {
     if (targetOptions.includes(target)) return
     setTarget(getInitialTarget(targetOptions, initialTarget))
   }, [initialTarget, target, targetOptions])
+
+  useEffect(() => {
+    const current = catalog.find(
+      (item) => item.id === currentPreset?.id && targetOptions.includes(item.target),
+    )
+    if (!current) return
+    setTarget(current.target)
+    setPresetId(current.id)
+  }, [catalog, currentPreset?.id, currentPreset?.version, targetOptions])
 
   useEffect(() => {
     if (!selectedId) {
@@ -93,19 +133,19 @@ export function ProcessingPresetPicker({
   }
 
   const apply = () => {
-    if (!selected) return
-    const resolvedValues: Record<string, string | number | undefined> = {}
-    for (const parameter of selected.parameters) {
-      const value = values[parameter.key] ?? ""
-      resolvedValues[parameter.key] = parameter.type === "integer" && value ? Number(value) : value
-    }
-    try {
-      const application = applyPreset(selected.id, resolvedValues)
-      onApply(application)
-    } catch {
-      // applyPreset 统一校验必填项、整数范围和字符串长度，界面只展示可理解的提示。
+    if (!previewApplication) return
+    const commit = () => onApply(previewApplication)
+    if (!currentPrompt?.trim() || applicationMode === "append") {
+      commit()
       return
     }
+    // 替换已有私人 Prompt 必须再次确认；取消不会改变草稿或保存的预设引用。
+    ask({
+      title: t("processing.preset_replace_confirm_title"),
+      message: t("processing.preset_replace_confirm_message"),
+      variant: "ask",
+      onConfirm: commit,
+    })
   }
 
   return (
@@ -177,8 +217,41 @@ export function ProcessingPresetPicker({
             </div>
           )}
           {currentPrompt?.trim() && (
-            <p role="note" className="text-sm text-orange">
-              {t("processing.preset_replace_notice")}
+            <div className="space-y-2">
+              <label className="space-y-1 text-sm">
+                <span>{t("processing.preset_apply_mode")}</span>
+                <select
+                  className={processingInputClass}
+                  value={applicationMode}
+                  onChange={(event) =>
+                    setApplicationMode(event.target.value as PresetApplicationMode)
+                  }
+                >
+                  <option value="append">{t("processing.preset_append")}</option>
+                  <option value="replace">{t("processing.preset_replace")}</option>
+                </select>
+              </label>
+              {applicationMode === "replace" && (
+                <p role="note" className="text-sm text-orange">
+                  {t("processing.preset_replace_notice")}
+                </p>
+              )}
+            </div>
+          )}
+          {versionComparison === "upgrade" && currentPreset && (
+            <p role="status" className="text-sm text-blue">
+              {t("processing.preset_upgrade_available", {
+                current: currentPreset.version,
+                latest: selected.version,
+              })}
+            </p>
+          )}
+          {versionComparison === "newer" && currentPreset && (
+            <p role="status" className="text-sm text-orange">
+              {t("processing.preset_newer_than_catalog", {
+                current: currentPreset.version,
+                latest: selected.version,
+              })}
             </p>
           )}
           {!previewApplication && (

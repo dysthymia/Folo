@@ -14,7 +14,7 @@ import {
 const ruleSet: RuleSet = {
   formatVersion: 4,
   ownerId: "owner-1",
-  global: { markdown: "global", version: 1 },
+  global: { markdown: "global", version: 1, preset: { id: "P00", version: 2 } },
   rules: [
     {
       id: "rule-1",

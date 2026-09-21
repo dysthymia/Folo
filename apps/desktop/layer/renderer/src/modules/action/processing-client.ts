@@ -152,7 +152,13 @@ export const processingPreviewWireSchema = z
     material: z.enum(["source_text", "missing"]),
     input: ruleInputSchema,
     metadataVersion: revisionSchema,
-    global: z.object({ markdown: z.string(), version: positiveIntegerSchema }).strict(),
+    global: z
+      .object({
+        markdown: z.string(),
+        version: positiveIntegerSchema,
+        preset: presetRefSchema.optional(),
+      })
+      .strict(),
     matched: z.array(ruleSchema),
     pendingRuleIds: z.array(identifierSchema),
     matches: z.array(

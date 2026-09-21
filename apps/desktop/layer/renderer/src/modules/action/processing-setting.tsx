@@ -412,11 +412,16 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                   targets={["global"]}
                   initialTarget="global"
                   currentPrompt={draft.global.markdown}
+                  currentPreset={draft.global.preset}
                   onApply={(application) => {
                     if (application.target === "global" && "markdown" in application.patch)
                       change({
                         ...draft,
-                        global: { ...draft.global, markdown: application.patch.markdown },
+                        global: {
+                          ...draft.global,
+                          markdown: application.patch.markdown,
+                          preset: application.presetRef,
+                        },
                       })
                   }}
                 />

@@ -96,13 +96,15 @@ export const presentationPolicySchema = z
     rewrite: z.enum(["allow", "deny"]).optional(),
   })
   .strict()
-const presetRef = z.object({ id: identifier, version: z.number().int().positive() }).strict()
+export const presetRefSchema = z
+  .object({ id: identifier, version: z.number().int().positive() })
+  .strict()
 export const actionSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("ai_transform"),
       prompt: z.string().min(1).max(30000),
-      preset: presetRef.optional(),
+      preset: presetRefSchema.optional(),
     })
     .strict(),
   z
@@ -113,7 +115,7 @@ export const actionSchema = z.discriminatedUnion("type", [
       scope: conditionSetSchema,
       mode: z.enum(["same_event", "topic"]),
       presets: z
-        .object({ create: presetRef.optional(), update: presetRef.optional() })
+        .object({ create: presetRefSchema.optional(), update: presetRefSchema.optional() })
         .strict()
         .optional(),
     })
@@ -180,7 +182,11 @@ export const ruleSetSchema = z
     formatVersion: z.literal(4),
     ownerId: identifier,
     global: z
-      .object({ markdown: z.string().max(60000), version: z.number().int().positive() })
+      .object({
+        markdown: z.string().max(60000),
+        version: z.number().int().positive(),
+        preset: presetRefSchema.optional(),
+      })
       .strict(),
     rules: z.array(ruleSchema).max(200),
   })

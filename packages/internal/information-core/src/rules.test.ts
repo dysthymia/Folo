@@ -80,6 +80,20 @@ describe("三值条件与原文身份", () => {
     ])
       expect(conditionSetSchema.safeParse(invalid).success).toBe(false)
   })
+  it("全局 Prompt 可保存正整数预设来源版本", () => {
+    expect(
+      ruleSetSchema.safeParse({
+        ...rules(),
+        global: { version: 1, markdown: "说明", preset: { id: "P00", version: 2 } },
+      }).success,
+    ).toBe(true)
+    expect(
+      ruleSetSchema.safeParse({
+        ...rules(),
+        global: { version: 1, markdown: "说明", preset: { id: "P00", version: 0 } },
+      }).success,
+    ).toBe(false)
+  })
   it("标签未加载不能命中否定条件；已加载空集可以", () => {
     const condition = when({
       field: "subscription_tag",

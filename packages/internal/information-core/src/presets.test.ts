@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
 
-import { applyPreset, preset, presetIds, promptPresets } from "./presets"
+import {
+  applyPreset,
+  comparePresetVersion,
+  mergePresetApplication,
+  preset,
+  presetIds,
+  promptPresets,
+} from "./presets"
 
 describe("共享 Prompt 预设目录", () => {
   it("完整提供 P00 至 P15 的稳定 ID、版本和中文元数据", () => {
@@ -79,5 +86,15 @@ describe("共享 Prompt 预设目录", () => {
     expect(second.prompt).toContain("少于200")
     expect(privatePrompt.prompt).toBe("用户自己修改后的 Prompt")
     expect(preset("P01").prompt).toContain("少于{N}")
+  })
+
+  it("按正整数版本识别升级，并让追加预览与最终 patch 保持一致", () => {
+    expect(comparePresetVersion({ id: "P01", version: 1 }, { id: "P01", version: 2 })).toBe(
+      "upgrade",
+    )
+    expect(comparePresetVersion({ id: "P01", version: 3 }, { id: "P01", version: 2 })).toBe("newer")
+    const merged = mergePresetApplication(applyPreset("P01", { N: 80 }), "私人要求", "append")
+    expect(merged.prompt).toMatch(/^私人要求\n\n/)
+    expect(merged.patch).toMatchObject({ type: "ai_transform", prompt: merged.prompt })
   })
 })

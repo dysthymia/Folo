@@ -41,7 +41,7 @@ export type PromptPresetParameter =
     }
 export type PromptPreset = {
   id: PresetId
-  version: 1
+  version: number
   name: string
   description: string
   suggestedConditions: string
@@ -50,7 +50,8 @@ export type PromptPreset = {
   prompt: string
   presentation?: { standalone: "always" }
 }
-export type PresetRef = { id: PresetId; version: 1 }
+export type PresetRef = { id: string; version: number }
+export type PresetApplicationMode = "append" | "replace"
 export type PresetApplication = {
   target: PresetTarget
   presetRef: PresetRef
@@ -68,6 +69,42 @@ export type PresetApplication = {
       }
   presentation?: { type: "presentation"; policy: { standalone: "always" } }
   display?: { type: "display"; summaryMaxGraphemes: number }
+}
+
+export type PresetVersionComparison = "current" | "upgrade" | "newer" | "different"
+
+export function comparePresetVersion(
+  current: PresetRef | undefined,
+  candidate: PresetRef,
+): PresetVersionComparison {
+  if (!Number.isInteger(candidate.version) || candidate.version < 1)
+    throw new Error("invalid_preset_version")
+  if (!current || current.id !== candidate.id) return "different"
+  if (current.version < candidate.version) return "upgrade"
+  if (current.version > candidate.version) return "newer"
+  return "current"
+}
+
+export function mergePresetApplication(
+  application: PresetApplication,
+  currentPrompt: string,
+  mode: PresetApplicationMode,
+): PresetApplication {
+  const prompt =
+    mode === "append" && currentPrompt.trim()
+      ? `${currentPrompt.trimEnd()}\n\n${application.prompt}`
+      : application.prompt
+  const patch = application.patch
+  // 预览与最终写入共用同一个合并函数，避免界面展示追加、实际却覆盖私人 Prompt。
+  const mergedPatch =
+    "markdown" in patch
+      ? { ...patch, markdown: prompt }
+      : "type" in patch
+        ? { ...patch, prompt }
+        : "updatePrompt" in patch
+          ? { ...patch, updatePrompt: prompt }
+          : { ...patch, createPrompt: prompt }
+  return { ...application, prompt, patch: mergedPatch } as PresetApplication
 }
 
 // 预设是只读目录；应用时总是复制 Prompt 和 presetRef，目录升级不会改写用户已经保存的规则。
@@ -292,7 +329,9 @@ export const promptPresets: readonly PromptPreset[] = [
       stringParameter("topicScope", "主题范围说明", "", 1, 2000, true),
       stringParameter("cutoff", "截至时点", "", 1, 100, true),
     ],
-    prompt: `将指定范围和时间窗口内允许使用的内容整理为主题综述，而不是把它们误认为同一事件。
+    prompt: `主题范围：{topicScope}
+截至时点：{cutoff}
+将指定范围和时间窗口内允许使用的内容整理为主题综述，而不是把它们误认为同一事件。
 按不同事件或论点分组，突出相较上次新增的事实、分歧和值得深入阅读的材料。
 每组保留关键来源引用；没有上次版本时只描述本次材料，不编造“变化”。
 不为了凑数量保留无价值重复内容，也不因为栏目限额让其他应保留条目永久消失。
@@ -312,7 +351,15 @@ export function applyPreset(
   id: PresetId,
   values: Record<string, string | number | undefined> = {},
 ): PresetApplication {
-  const definition = preset(id)
+  return applyPresetDefinition(preset(id), values)
+}
+
+export function applyPresetDefinition(
+  definition: PromptPreset,
+  values: Record<string, string | number | undefined> = {},
+): PresetApplication {
+  if (!Number.isInteger(definition.version) || definition.version < 1)
+    throw new Error("invalid_preset_version")
   const parameters = resolveParameters(definition, values)
   const prompt = expandPrompt(definition.prompt, parameters)
   const presetRef = { id: definition.id, version: definition.version } as const
