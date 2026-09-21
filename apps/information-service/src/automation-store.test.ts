@@ -139,6 +139,33 @@ describe("发布范围与输入版本", () => {
     expect(repository.releases()).toHaveLength(2)
   })
 
+  it("发布预览与真实发布共用目标，并区分新分配、重算、旧队列和历史", () => {
+    const { repository } = fixture()
+    const queued = repository.capture({ ...entry, id: "queued" })
+    const historical = repository.capture({ ...entry, id: "historical" })
+    const recalculate = repository.capture({ ...entry, id: "recalculate" })
+    repository.publish(0, { mode: "future" }, randomUUID())
+    repository.complete(repository.assign(historical), decision("h".repeat(64)))
+    const unassigned = repository.capture({ ...entry, id: "unassigned" })
+    const scope = { mode: "selected" as const, inputIds: [recalculate, recalculate] }
+
+    const preview = repository.previewPublication(scope)
+    expect(preview).toEqual({
+      scope: { mode: "selected", inputIds: [recalculate] },
+      targetInputIds: [recalculate, unassigned],
+      impact: {
+        newAssignments: 1,
+        recalculated: 1,
+        queuedUnchanged: 1,
+        historicalUnchanged: 1,
+      },
+    })
+    expect(repository.publish(0, scope, randomUUID()).targetInputIds).toEqual(
+      preview.targetInputIds,
+    )
+    expect(repository.assign(queued).releaseVersion).toBe(1)
+  })
+
   it("原文变化产生新输入，阅读变化不会；旧内容决策只留历史", () => {
     const { repository, db } = fixture()
     const seq = repository.capture(entry)
@@ -431,5 +458,35 @@ describe("规则编辑接口", () => {
     automationApi(store, "DELETE", `/rules/${ids[0]}`, { expectedRevision: 3 })
     expect(store.automation.draft().config.rules).toHaveLength(1)
     expect(store.automation.releases()).toEqual([])
+  })
+
+  it("发布预览和历史版本接口只读返回影响与不可变配置", () => {
+    const store = new Store(":memory:")
+    close.push(() => store.close())
+    store.bindOwner("owner")
+    const seq = store.automation.capture(entry)
+    expect(
+      automationApi(store, "POST", "/rule-set-releases/preview", {
+        scope: { mode: "future" },
+      }),
+    ).toEqual({
+      scope: { mode: "future" },
+      targetInputIds: [seq],
+      impact: {
+        newAssignments: 1,
+        recalculated: 0,
+        queuedUnchanged: 0,
+        historicalUnchanged: 0,
+      },
+    })
+    store.automation.saveDraft(config, 0)
+    const release = store.automation.publish(1, { mode: "future" }, randomUUID())
+    const publishedConfig = store.automation.draft().config
+    store.automation.saveDraft({ ...config, global: { version: 2, markdown: "后来修改的草稿" } }, 1)
+
+    expect(automationApi(store, "GET", `/rule-set-releases/${release.version}`, undefined)).toEqual(
+      { release, config: publishedConfig },
+    )
+    expect(store.automation.draft().config.global.markdown).toBe("后来修改的草稿")
   })
 })

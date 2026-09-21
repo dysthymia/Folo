@@ -25,7 +25,11 @@ const { clientMock, ProcessingRequestErrorMock } = vi.hoisted(() => {
       loadInputs: vi.fn(),
       loadRuns: vi.fn(),
       startRun: vi.fn(),
+      releaseRuleSet: vi.fn(),
+      previewRelease: vi.fn(),
+      loadRelease: vi.fn(),
     },
+    disablePublishedMigrationTargetsMock: vi.fn(),
     ProcessingRequestErrorMock,
   }
 })
@@ -179,6 +183,18 @@ describe("ProcessingSetting", () => {
     clientMock.loadInputs.mockResolvedValue({ inputs: [] })
     clientMock.loadRuns.mockResolvedValue({ runs: [] })
     clientMock.startRun.mockResolvedValue({ id: "run-1" })
+    clientMock.releaseRuleSet.mockResolvedValue({ version: 2, targetInputIds: [] })
+    disablePublishedMigrationTargetsMock.mockReturnValue({ switched: true, count: 1 })
+    clientMock.previewRelease.mockResolvedValue({
+      scope: { mode: "future" },
+      targetInputIds: [],
+      impact: {
+        newAssignments: 0,
+        recalculated: 0,
+        queuedUnchanged: 0,
+        historicalUnchanged: 0,
+      },
+    })
     clientMock.load.mockClear()
     clientMock.save.mockClear()
     clientMock.preview.mockClear()
@@ -186,6 +202,10 @@ describe("ProcessingSetting", () => {
     clientMock.loadInputs.mockClear()
     clientMock.loadRuns.mockClear()
     clientMock.startRun.mockClear()
+    clientMock.releaseRuleSet.mockClear()
+    clientMock.previewRelease.mockClear()
+    clientMock.loadRelease.mockClear()
+    disablePublishedMigrationTargetsMock.mockClear()
     container = document.createElement("div")
     document.body.append(container)
     root = createRoot(container)

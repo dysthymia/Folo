@@ -1,3 +1,4 @@
+import type { RuleSet } from "@follow/information-core"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -10,6 +11,7 @@ import type {
   ProcessingScheduleConfig,
 } from "./processing-client"
 import { processingButtonClass, processingInputClass } from "./processing-condition-editor"
+import { ProcessingReleasePanel } from "./processing-release-panel"
 
 // 默认时点与服务端计划保持一致；用户仍可在草稿中调整并显式保存。
 const defaultTimes = ["08:00", "12:00", "15:00", "20:00", "23:00"]
@@ -24,6 +26,8 @@ export type ProcessingRunSettingsProps = {
   recentSince: string
   selectedInputIds: number[]
   release: ProcessingRelease | null
+  ruleConfig: RuleSet
+  releases: ProcessingEditor["releases"]
   draftDirty: boolean
   saving: boolean
   releasing: boolean
@@ -37,6 +41,7 @@ export type ProcessingRunSettingsProps = {
   onSave: () => void
   onRelease: () => void
   onRun: () => void
+  onRestoreRelease?: (config: RuleSet) => void
 }
 
 export const defaultProcessingSchedule = (): ProcessingScheduleConfig => ({
@@ -143,6 +148,8 @@ export function ProcessingRunSettings({
   recentSince,
   selectedInputIds,
   release,
+  ruleConfig,
+  releases,
   draftDirty,
   saving,
   releasing,
@@ -156,6 +163,7 @@ export function ProcessingRunSettings({
   onSave,
   onRelease,
   onRun,
+  onRestoreRelease,
 }: ProcessingRunSettingsProps) {
   const { t } = useTranslation("app")
   const config = value ?? defaultProcessingSchedule()
@@ -165,9 +173,14 @@ export function ProcessingRunSettings({
     () => [...new Set([...config.times, ...defaultTimes])].slice(0, 5),
     [config.times],
   )
+  // 服务端按创建时间升序返回；展示前倒序截取，确保运行中的最新批次也可见。
+  const recentRuns = useMemo(
+    () =>
+      [...runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 5),
+    [runs],
+  )
   const allSourcesSelected =
     sources.length > 0 && sources.every((source) => selectedSources.has(source.key))
-  const selectedCount = scope.mode === "selected" ? selectedInputIds.length : inputs.length
   // 没有来源时保存没有可执行范围，避免把空范围写成有效计划。
   const canSave = config.sourceKeys.length > 0 && scheduleValid && !saving
   const change = (next: Partial<ProcessingScheduleConfig>) => onChange({ ...config, ...next })
@@ -383,11 +396,18 @@ export function ProcessingRunSettings({
             ))}
           </div>
         )}
-        <p className="text-sm text-text-secondary">
-          {t("processing.run.release_target_count", {
-            count: release?.targetInputIds.length ?? selectedCount,
-          })}
-        </p>
+        {/* 未发布时只显示服务端影响预览，不把全部输入数量误称为已冻结目标。 */}
+        {release && (
+          <p className="text-sm text-text-secondary">
+            {t("processing.run.release_target_count", { count: release.targetInputIds.length })}
+          </p>
+        )}
+        <ProcessingReleasePanel
+          config={ruleConfig}
+          releases={releases}
+          scope={scope}
+          onRestore={onRestoreRelease}
+        />
         {draftDirty && (
           <p className="text-sm text-orange">{t("processing.run.release_save_first")}</p>
         )}
@@ -428,7 +448,7 @@ export function ProcessingRunSettings({
         {runs.length > 0 && (
           <div className="space-y-1 text-sm">
             <h5 className="font-medium">{t("processing.run.history")}</h5>
-            {runs.slice(0, 5).map((run) => (
+            {recentRuns.map((run) => (
               <p key={run.id} className="text-text-secondary">
                 {run.status} · {run.createdAt}
                 {run.error ? ` · ${run.error}` : ""}

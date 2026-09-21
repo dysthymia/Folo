@@ -686,6 +686,8 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
               recentSince={recentSince}
               selectedInputIds={selectedInputIds}
               release={release}
+              ruleConfig={draft}
+              releases={editor.releases}
               draftDirty={dirty}
               saving={scheduleBusy}
               releasing={releaseBusy}
@@ -699,6 +701,15 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
               onSave={() => void saveSchedule()}
               onRelease={() => void releaseRuleSet()}
               onRun={() => void runNow()}
+              onRestoreRelease={(config) =>
+                ask({
+                  title: t("processing.release_history.restore"),
+                  message: t("processing.release_history.restore_hint"),
+                  variant: "ask",
+                  // 历史版本只复制到未保存草稿，回退仍生成新发布与新的生效范围。
+                  onConfirm: () => change(config),
+                })
+              }
             />
           </>
         )}

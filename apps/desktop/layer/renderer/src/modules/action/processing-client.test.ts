@@ -6,6 +6,8 @@ import {
   processingEditorSchema,
   processingInputWireSchema,
   processingPreviewWireSchema,
+  processingReleaseDetailSchema,
+  processingReleasePreviewSchema,
   processingReleaseWireSchema,
   ProcessingRequestError,
   processingRunSchema,
@@ -244,6 +246,42 @@ describe("createProcessingClient", () => {
     expect(processingPreviewWireSchema.safeParse(previewResponse).success).toBe(true)
     expect(
       processingPreviewWireSchema.safeParse({ ...previewResponse, unexpected: true }).success,
+    ).toBe(false)
+  })
+
+  it("严格解析发布影响预览与只读历史配置", async () => {
+    const releasePreview = {
+      scope: { mode: "recent" as const, since: "2026-09-10T00:00:00.000Z" },
+      targetInputIds: [1, 2],
+      impact: {
+        newAssignments: 1,
+        recalculated: 1,
+        queuedUnchanged: 2,
+        historicalUnchanged: 3,
+      },
+    }
+    const releaseDetail = { release: releaseResponse, config: ruleSet }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(releasePreview))
+      .mockResolvedValueOnce(Response.json(releaseDetail))
+    const client = createProcessingClient(async () => "token", fetcher)
+
+    await expect(
+      client.previewRelease(releasePreview.scope, new AbortController().signal),
+    ).resolves.toEqual(releasePreview)
+    await expect(client.loadRelease(2, new AbortController().signal)).resolves.toEqual(
+      releaseDetail,
+    )
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/information/v1/rule-set-releases/preview")
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/information/v1/rule-set-releases/2")
+    expect(processingReleasePreviewSchema.safeParse(releasePreview).success).toBe(true)
+    expect(processingReleaseDetailSchema.safeParse(releaseDetail).success).toBe(true)
+    expect(
+      processingReleasePreviewSchema.safeParse({
+        ...releasePreview,
+        impact: { ...releasePreview.impact, unknown: 1 },
+      }).success,
     ).toBe(false)
   })
 

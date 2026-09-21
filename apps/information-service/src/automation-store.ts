@@ -30,6 +30,17 @@ export const publicationScopeSchema = z.discriminatedUnion("mode", [
     .strict(),
 ])
 export type PublicationScope = z.infer<typeof publicationScopeSchema>
+export type PublicationImpact = {
+  newAssignments: number
+  recalculated: number
+  queuedUnchanged: number
+  historicalUnchanged: number
+}
+export type PublicationPreview = {
+  scope: PublicationScope
+  targetInputIds: number[]
+  impact: PublicationImpact
+}
 export type ProcessingInput = {
   seq: number
   sourceKey: string
@@ -260,14 +271,20 @@ export class AutomationStore {
     return row ? ruleSetSchema.parse(JSON.parse(String(row.body))) : null
   }
 
+  releaseSnapshot(version: number) {
+    const release = this.releases().find((item) => item.version === version)
+    const config = this.release(version)
+    return release && config ? { release, config } : null
+  }
+
+  previewPublication(rawScope: unknown): PublicationPreview {
+    return this.publicationPlan(this.normalizePublicationScope(rawScope))
+  }
+
   publish(expectedRevision: number, rawScope: unknown, requestId: string) {
-    const parsed = publicationScopeSchema.safeParse(rawScope)
-    if (!parsed.success || !z.uuid().safeParse(requestId).success)
-      throw new AutomationError("invalid_target")
+    const scope = this.normalizePublicationScope(rawScope)
+    if (!z.uuid().safeParse(requestId).success) throw new AutomationError("invalid_target")
     return this.transaction(() => {
-      const scope = parsed.data
-      if (scope.mode === "selected")
-        scope.inputIds = [...new Set(scope.inputIds)].sort((a, b) => a - b)
       // HTTP 响应丢失后重发同一请求，返回原来的冻结范围，不再次发布或扩大目标集。
       const previous = this.db
         .prepare("SELECT * FROM publication_requests WHERE id=?")
@@ -297,7 +314,7 @@ export class AutomationStore {
       const activationSeq = Number(
         this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM processing_inputs").get()!.seq,
       )
-      const targetInputIds = targets.map((input) => input.seq)
+      const targetInputIds = plan.targetInputIds
       const createdAt = new Date().toISOString()
       const result = this.db
         .prepare(
@@ -318,7 +335,7 @@ export class AutomationStore {
       const update = this.db.prepare(
         "UPDATE processing_inputs SET release_version=?,generation=generation+1,status='pending' WHERE seq=? AND current=1",
       )
-      for (const input of targets) update.run(version, input.seq)
+      for (const input of this.inputs()) if (targets.has(input.seq)) update.run(version, input.seq)
       return {
         version,
         draftRevision: draft.revision,
@@ -328,6 +345,46 @@ export class AutomationStore {
         createdAt,
       }
     })
+  }
+
+  private normalizePublicationScope(rawScope: unknown): PublicationScope {
+    const parsed = publicationScopeSchema.safeParse(rawScope)
+    if (!parsed.success) throw new AutomationError("invalid_target")
+    if (parsed.data.mode !== "selected") return parsed.data
+    return {
+      mode: "selected",
+      inputIds: [...new Set(parsed.data.inputIds)].sort((left, right) => left - right),
+    }
+  }
+
+  private publicationPlan(scope: PublicationScope): PublicationPreview {
+    const inputs = this.inputs()
+    const selected = scope.mode === "selected" ? new Set(scope.inputIds) : null
+    if (selected && [...selected].some((id) => !inputs.some((input) => input.seq === id)))
+      throw new AutomationError("invalid_target")
+    const targets = inputs.filter(
+      (input) =>
+        input.releaseVersion === null ||
+        (scope.mode === "selected" && selected!.has(input.seq)) ||
+        (scope.mode === "recent" && Date.parse(input.receivedAt) >= Date.parse(scope.since)),
+    )
+    const targetIds = new Set(targets.map((input) => input.seq))
+    const unchanged = inputs.filter(
+      (input) => input.releaseVersion !== null && !targetIds.has(input.seq),
+    )
+    return {
+      scope,
+      targetInputIds: targets.map((input) => input.seq),
+      impact: {
+        newAssignments: targets.filter((input) => input.releaseVersion === null).length,
+        recalculated: targets.filter((input) => input.releaseVersion !== null).length,
+        queuedUnchanged: unchanged.filter((input) => ["pending", "running"].includes(input.status))
+          .length,
+        historicalUnchanged: unchanged.filter(
+          (input) => !["pending", "running"].includes(input.status),
+        ).length,
+      },
+    }
   }
 
   assign(seq: number) {

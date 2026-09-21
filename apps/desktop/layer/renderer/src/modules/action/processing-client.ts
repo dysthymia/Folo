@@ -45,6 +45,27 @@ export const processingReleaseWireSchema = z
   })
   .strict()
 
+export const processingReleaseImpactSchema = z
+  .object({
+    newAssignments: revisionSchema,
+    recalculated: revisionSchema,
+    queuedUnchanged: revisionSchema,
+    historicalUnchanged: revisionSchema,
+  })
+  .strict()
+
+export const processingReleasePreviewSchema = z
+  .object({
+    scope: releaseScopeSchema,
+    targetInputIds: z.array(positiveIntegerSchema),
+    impact: processingReleaseImpactSchema,
+  })
+  .strict()
+
+export const processingReleaseDetailSchema = z
+  .object({ release: processingReleaseWireSchema, config: ruleSetSchema })
+  .strict()
+
 const releaseResultSchema = processingReleaseWireSchema.transform(
   ({ version, targetInputIds }) => ({
     version,
@@ -305,6 +326,9 @@ export type ProcessingScheduleConfig = z.infer<typeof scheduleConfigSchema>
 export type ProcessingRun = z.infer<typeof processingRunSchema>
 export type ProcessingRelease = z.infer<typeof releaseResultSchema>
 export type ProcessingReleaseScope = z.infer<typeof releaseScopeSchema>
+export type ProcessingReleaseImpact = z.infer<typeof processingReleaseImpactSchema>
+export type ProcessingReleasePreview = z.infer<typeof processingReleasePreviewSchema>
+export type ProcessingReleaseDetail = z.infer<typeof processingReleaseDetailSchema>
 export type ProcessingInput = z.infer<typeof inputsSchema>["inputs"][number]
 export class ProcessingRequestError extends Error {
   constructor(
@@ -426,6 +450,12 @@ export function createProcessingClient(
         scope,
         requestId,
       }),
+    previewRelease: (scope: ProcessingReleaseScope, signal: AbortSignal) =>
+      request("rule-set-releases/preview", "POST", processingReleasePreviewSchema, signal, {
+        scope,
+      }),
+    loadRelease: (version: number, signal: AbortSignal) =>
+      request(`rule-set-releases/${version}`, "GET", processingReleaseDetailSchema, signal),
     loadInputs: (signal: AbortSignal) => request("inputs", "GET", inputsSchema, signal),
   }
 }

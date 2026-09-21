@@ -31,9 +31,12 @@ export function automationApi(store: Store, method: string, path: string, body: 
         releases: repository.releases(),
         // 编辑器一次授权读取真实来源和样本标题，不把正文装入配置响应。
         sources: store.sources(),
+        sourceInventoryKnown: store.sourceInventoryKnown(),
         items: store.snapshot().items,
         subscriptionTags: store.subscriptionTags.snapshot(),
         sourceTags: store.subscriptionTags.sourceTagBindings().bindings,
+        // List 成员只能读取已持久化的同步事实；配置 GET 不触发新的官方 API 请求。
+        listMemberships: store.sourceSync.listMemberships(),
         capabilities: { automaticProcessing: true },
       }
     if (method === "PUT") {
@@ -81,6 +84,10 @@ export function automationApi(store: Store, method: string, path: string, body: 
           .filter((source) => source.kind !== "list")
           .map((source) => source.key),
       )
+      for (const membership of store.sourceSync.listMemberships()) {
+        if (membership.status !== "complete" || !membership.complete) continue
+        for (const feedId of membership.feedIds) sources.add(`feed/${feedId}`)
+      }
       if (input.sourceKeys.some((key) => !sources.has(key)))
         throw new AutomationError("invalid_target")
       const changed = store.subscriptionTags.updateBindings(input)
@@ -175,6 +182,11 @@ export function automationApi(store: Store, method: string, path: string, body: 
       ...compileInstructions(config, input),
     }
   }
+  if (path === "/rule-set-releases/preview" && method === "POST") {
+    const input = z.object({ scope: z.unknown() }).strict().parse(body)
+    // 预览与发布共用 Store 的目标选择器，只读返回当前时点的影响口径。
+    return repository.previewPublication(input.scope)
+  }
   if (path === "/rule-set-releases") {
     if (method === "GET") return { releases: repository.releases() }
     if (method === "POST") {
@@ -186,6 +198,14 @@ export function automationApi(store: Store, method: string, path: string, body: 
       store.stories.invalidateInputs(release.targetInputIds)
       return release
     }
+  }
+  const releaseVersion = /^\/rule-set-releases\/(\d+)$/.exec(path)?.[1]
+  if (releaseVersion && method === "GET") {
+    const snapshot = repository.releaseSnapshot(
+      z.number().int().positive().parse(Number(releaseVersion)),
+    )
+    if (!snapshot) throw new AutomationError("invalid_target")
+    return snapshot
   }
   const ruleId = /^\/rules\/([^/]+)$/.exec(path)?.[1]
   if (ruleId) {

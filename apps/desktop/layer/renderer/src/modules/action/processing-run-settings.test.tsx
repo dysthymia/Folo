@@ -8,6 +8,7 @@ import type {
   ProcessingEditor,
   ProcessingInput,
   ProcessingRelease,
+  ProcessingRun,
   ProcessingScheduleConfig,
 } from "./processing-client"
 import { defaultProcessingSchedule, ProcessingRunSettings } from "./processing-run-settings"
@@ -18,6 +19,10 @@ vi.mock("react-i18next", () => ({
     t: (key: string, options?: { count?: number }) =>
       options?.count === undefined ? key : `${key}:${options.count}`,
   }),
+}))
+
+vi.mock("./processing-release-panel", () => ({
+  ProcessingReleasePanel: () => React.createElement("div", null, "processing.release_panel"),
 }))
 
 const clientMock = {
@@ -45,6 +50,13 @@ const schedule: ProcessingScheduleConfig = {
   readyBy: null,
 }
 
+const ruleConfig: ProcessingEditor["config"] = {
+  formatVersion: 4,
+  ownerId: "owner",
+  global: { version: 1, markdown: "" },
+  rules: [],
+}
+
 const input: ProcessingInput = {
   seq: 1,
   sourceKey: source.key,
@@ -56,6 +68,27 @@ const release: ProcessingRelease = {
   version: 4,
   targetInputIds: [1, 2, 3],
 }
+
+const processingRun = (index: number, status: ProcessingRun["status"]): ProcessingRun => ({
+  id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  kind: "scheduled",
+  dedupeKey: `scheduled:${index}`,
+  configRevision: 1,
+  sourceKeys: [source.key],
+  historySince: schedule.historySince,
+  timeZone: schedule.timeZone,
+  scheduledFor: `2026-09-${String(index).padStart(2, "0")}T23:00`,
+  cutoffAt: `2026-09-${String(index).padStart(2, "0")}T15:00:00.000Z`,
+  status,
+  leaseToken: status === "running" ? `lease-${index}` : null,
+  leaseUntil:
+    status === "running" ? `2026-09-${String(index).padStart(2, "0")}T15:30:00.000Z` : null,
+  createdAt: `2026-09-${String(index).padStart(2, "0")}T15:00:00.000Z`,
+  startedAt: `2026-09-${String(index).padStart(2, "0")}T15:00:01.000Z`,
+  finishedAt:
+    status === "running" ? null : `2026-09-${String(index).padStart(2, "0")}T15:05:00.000Z`,
+  error: null,
+})
 
 const findButton = (container: HTMLElement, label: string) =>
   Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
@@ -121,6 +154,8 @@ describe("ProcessingRunSettings", () => {
       recentSince: "2026-09-01",
       selectedInputIds: [],
       release: null,
+      ruleConfig,
+      releases: [],
       draftDirty: false,
       saving: false,
       releasing: false,
@@ -201,6 +236,8 @@ describe("ProcessingRunSettings", () => {
           recentSince="2026-09-01"
           selectedInputIds={[input.seq]}
           release={null}
+          ruleConfig={ruleConfig}
+          releases={[]}
           draftDirty={false}
           saving={false}
           releasing={false}
@@ -264,6 +301,34 @@ describe("ProcessingRunSettings", () => {
     expect(callbacks.onRelease).toHaveBeenCalledTimes(1)
     expect(clientMock.releaseRuleSet).toHaveBeenCalledTimes(1)
     expect(callbacks.onRun).not.toHaveBeenCalled()
+  })
+
+  it("最近运行按创建时间倒序展示最新五条并包含运行中批次", async () => {
+    const runs = [
+      processingRun(12, "deferred_budget"),
+      processingRun(13, "deferred_budget"),
+      processingRun(14, "retry_wait"),
+      processingRun(15, "deferred_budget"),
+      processingRun(16, "deferred_budget"),
+      processingRun(18, "deferred_budget"),
+      processingRun(19, "running"),
+    ]
+
+    await render({ runs })
+
+    const history = Array.from(container!.querySelectorAll("h5")).find(
+      (heading) => heading.textContent === "processing.run.history",
+    )?.parentElement
+    const rows = Array.from(history?.querySelectorAll("p") ?? []).map((row) => row.textContent)
+
+    expect(rows).toHaveLength(5)
+    expect(rows).toEqual([
+      "running · 2026-09-19T15:00:00.000Z",
+      "deferred_budget · 2026-09-18T15:00:00.000Z",
+      "deferred_budget · 2026-09-16T15:00:00.000Z",
+      "deferred_budget · 2026-09-15T15:00:00.000Z",
+      "retry_wait · 2026-09-14T15:00:00.000Z",
+    ])
   })
 
   it("保存请求失败时不显示成功状态", async () => {
