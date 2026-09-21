@@ -84,6 +84,15 @@ describe("稳定阅读快照", () => {
     store.saveEntry(input)
     const target = store.automation.inputs()[0]!
     const snapshot = store.reading.snapshot()
+    expect(store.reading.page({ snapshotId: snapshot.id })).toMatchObject({
+      view: "smart",
+      total: 0,
+      items: [],
+    })
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "pending" })).toMatchObject({
+      total: 1,
+      items: [{ ordinal: 0, inputSeq: target.seq, state: "pending" }],
+    })
     expect(store.reading.page({ snapshotId: snapshot.id, view: "all" })).toMatchObject({
       total: 1,
       items: [
@@ -102,7 +111,18 @@ describe("稳定阅读快照", () => {
       snapshot: { latestAvailable: true },
       items: [{ kind: "entry", state: "pending", decision: null }],
     })
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "pending" })).toMatchObject({
+      snapshot: { latestAvailable: true },
+      total: 1,
+      items: [{ ordinal: 0, inputSeq: target.seq, state: "pending" }],
+    })
+    expect(store.reading.page({ snapshotId: snapshot.id })).toMatchObject({ total: 0, items: [] })
     const refreshed = store.reading.refresh()
+    expect(store.reading.page({ snapshotId: refreshed.id })).toMatchObject({
+      view: "smart",
+      total: 1,
+      items: [{ kind: "entry", state: "ready", inputSeq: target.seq }],
+    })
     expect(store.reading.page({ snapshotId: refreshed.id, view: "all" }).items).toEqual([
       expect.objectContaining({ kind: "entry", state: "ready", inputSeq: target.seq }),
     ])
@@ -270,6 +290,14 @@ describe("稳定阅读快照", () => {
     // 明确保留原始公告时，即使已生成 Story，也继续提供独立入口。
     expect(store.reading.page({ snapshotId: snapshot.id, view: "standalone" }).items).toEqual([
       expect.objectContaining({ kind: "entry", inputSeq: first.seq }),
+    ])
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "smart" }).items).toEqual([
+      expect.objectContaining({
+        kind: "story",
+        state: "ready",
+        story: expect.objectContaining({ id: storyId }),
+      }),
+      expect.objectContaining({ kind: "entry", state: "ready", inputSeq: first.seq }),
     ])
     const researchPack = processingApi(store, "GET", `/research-pack/${storyId}`, {}) as {
       references: unknown[]

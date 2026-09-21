@@ -115,7 +115,7 @@ export const readingSnapshotResponseSchema = z.object({ snapshot: readingSnapsho
 export const readingSnapshotPageSchema = z
   .object({
     snapshot: readingSnapshotSchema,
-    view: z.enum(["standalone", "all", "hidden", "stories"]),
+    view: z.enum(["smart", "standalone", "all", "hidden", "pending", "failed", "stories"]),
     offset: z.number().int().nonnegative(),
     limit: z.number().int().positive().max(50),
     total: z.number().int().nonnegative(),

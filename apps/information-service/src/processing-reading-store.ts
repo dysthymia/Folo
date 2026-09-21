@@ -8,7 +8,8 @@ import type { ProcessingScheduleConfig } from "./processing-schedule"
 import type { ProcessingStateStore } from "./processing-state"
 import type { Story, StoryRevision, StoryStore } from "./story-store"
 
-export type ReadingView = "standalone" | "all" | "hidden" | "stories"
+export type ReadingView =
+  "smart" | "standalone" | "all" | "hidden" | "pending" | "failed" | "stories"
 export type ReadingSnapshotAudit = {
   cutoffAt: string
   maxSeq: number
@@ -339,7 +340,7 @@ export class ProcessingReadingStore {
   }): ReadingSnapshotPage {
     const offset = input.offset ?? 0
     const limit = input.limit ?? 50
-    const view = input.view ?? "standalone"
+    const view = input.view ?? "smart"
     if (
       !Number.isInteger(offset) ||
       offset < 0 ||
@@ -348,7 +349,7 @@ export class ProcessingReadingStore {
       limit > 50
     )
       throw new ProcessingReadingError("invalid_pagination")
-    if (!["standalone", "all", "hidden", "stories"].includes(view))
+    if (!["smart", "standalone", "all", "hidden", "pending", "failed", "stories"].includes(view))
       throw new ProcessingReadingError("invalid_snapshot")
     const snapshot = input.snapshotId ? this.snapshotById(input.snapshotId) : this.snapshot()
     const where = this.viewWhere(view)
@@ -560,10 +561,17 @@ export class ProcessingReadingStore {
 
   private viewWhere(view: ReadingView): string {
     switch (view) {
+      case "smart":
+        // 智能主列表统一保留已完成的独立项与 Story；待处理和失败通过独立视图查看。
+        return "kind='story' OR (kind='entry' AND hidden=0 AND represented=0 AND decision_id IS NOT NULL)"
       case "standalone":
         return "kind='entry' AND hidden=0 AND represented=0"
       case "hidden":
         return "kind='entry' AND hidden=1"
+      case "pending":
+        return "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'')!='failed'"
+      case "failed":
+        return "kind='entry' AND decision_id IS NULL AND entry_status='failed'"
       case "stories":
         return "kind='story'"
       case "all":

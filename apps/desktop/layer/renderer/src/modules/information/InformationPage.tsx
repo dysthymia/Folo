@@ -169,8 +169,8 @@ export function InformationPage() {
 
         {snapshot && (
           <>
-            <XSearchPanel />
             <ProcessingReader key={snapshot.ownerId ?? "unknown"} />
+            <XSearchPanel />
             <InformationIntegration />
             <ProcessingDiagnostics />
             <section

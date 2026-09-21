@@ -181,7 +181,9 @@ export function processingApi(
           snapshotId: z.uuid().optional(),
           offset: z.number().int().min(0).optional(),
           limit: z.number().int().min(1).max(50).optional(),
-          view: z.enum(["standalone", "all", "hidden", "stories"]).optional(),
+          view: z
+            .enum(["smart", "standalone", "all", "hidden", "pending", "failed", "stories"])
+            .optional(),
         })
         .strict()
         .parse(body)

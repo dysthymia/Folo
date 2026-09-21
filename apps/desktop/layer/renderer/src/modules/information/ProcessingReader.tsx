@@ -25,6 +25,7 @@ import {
   refreshReadingSnapshot,
 } from "./processing-reader-client"
 import { ProcessingFeedbackPanel } from "./ProcessingFeedbackPanel"
+import { ProcessingReadingModeSwitch } from "./ProcessingReadingModeSwitch"
 import { ResearchPanel } from "./ResearchPanel"
 
 type ReaderItem = ReadingSnapshotItem & {
@@ -53,7 +54,7 @@ export function ProcessingReader() {
     Awaited<ReturnType<typeof loadReadingSnapshot>>["snapshot"] | null
   >(null)
   const [items, setItems] = useState<ReaderItem[]>([])
-  const [view, setView] = useState<ReadingView>("standalone")
+  const [view, setView] = useState<ReadingView>("smart")
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState<ReadingStory | null>(null)
@@ -130,7 +131,7 @@ export function ProcessingReader() {
   )
 
   useEffect(() => {
-    void load("initial", "standalone", 0)
+    void load("initial", "smart", 0)
     const visibility = () => {
       if (document.visibilityState === "hidden") {
         controllerRef.current?.abort()
@@ -436,9 +437,11 @@ export function ProcessingReader() {
 
   return (
     <section
+      id="smart-reading"
       className="space-y-4 rounded-2xl border border-fill-secondary p-5"
       aria-label={t("processing.reader.title")}
     >
+      <ProcessingReadingModeSwitch mode="smart" />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-semibold">{t("processing.reader.title")}</h2>
@@ -463,7 +466,7 @@ export function ProcessingReader() {
         </p>
       )}
       <div className="flex flex-wrap gap-2" role="group" aria-label={t("processing.reader.views")}>
-        {(["standalone", "stories", "hidden", "all"] as const).map((value) => (
+        {(["smart", "hidden", "pending", "failed"] as const).map((value) => (
           <button
             type="button"
             key={value}
@@ -475,7 +478,7 @@ export function ProcessingReader() {
           </button>
         ))}
       </div>
-      {(view === "stories" || view === "all") && (
+      {(view === "smart" || view === "stories" || view === "all") && (
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -733,6 +736,11 @@ export function ProcessingReader() {
                 {t("processing.reader.open")}
               </button>
             ))}
+          {selected.kind === "split" && selected.independentInputSeqs.length > 0 && (
+            <p className="text-sm text-text-secondary">
+              {t("processing.reader.split_unassigned")}: {selected.independentInputSeqs.join(", ")}
+            </p>
+          )}
         </div>
       )}
     </section>

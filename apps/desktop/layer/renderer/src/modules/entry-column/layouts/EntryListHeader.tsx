@@ -25,11 +25,13 @@ import { useFollow } from "~/hooks/biz/useFollow"
 import { getRouteParams, useRouteParams } from "~/hooks/biz/useRouteParams"
 import { useLoginModal } from "~/hooks/common"
 import { useSendAIShortcut } from "~/modules/ai-chat/hooks/useSendAIShortcut"
+import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { COMMAND_ID } from "~/modules/command/commands/id"
 import { useRunCommandFn } from "~/modules/command/hooks/use-command"
 import { useCommandShortcut } from "~/modules/command/hooks/use-command-binding"
 import { EntryHeader } from "~/modules/entry-content/components/entry-header"
 import { FeedIcon } from "~/modules/feed/feed-icon"
+import { ProcessingReadingModeSwitch } from "~/modules/information/ProcessingReadingModeSwitch"
 import { useRefreshFeedMutation } from "~/queries/feed"
 import { useFeedHeaderIcon, useFeedHeaderTitle } from "~/store/feed/hooks"
 
@@ -163,6 +165,7 @@ export const EntryListHeader: FC<{
             )}
             onClick={stopPropagation}
           >
+            {isLocalFoloHost() && <ProcessingReadingModeSwitch mode="original" />}
             {isWideMode &&
               (showEntryHeader || showTimelineSummaryButton || showAiTimelineToggle) && (
                 <>
