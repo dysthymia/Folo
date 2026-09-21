@@ -1,3 +1,4 @@
+import "./lib/random-uuid-polyfill"
 import "./styles/information.css"
 
 import { createInstance } from "i18next"

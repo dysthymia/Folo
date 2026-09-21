@@ -1,3 +1,7 @@
+// crypto.randomUUID() is a secure-context API, so it is missing on plain-HTTP origins such as
+// http://local.folo.is. Our code and bundled dependencies both call it unguarded, so the shim has
+// to be installed before any other module is evaluated.
+import "./lib/random-uuid-polyfill"
 import "./wdyr"
 import "./styles/main.css"
 
