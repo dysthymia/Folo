@@ -105,6 +105,70 @@ describe("处理服务 API", () => {
     })
   })
 
+  it("规则解释使用条目实际发布版本，拒绝旧正文版本和范围外材料", () => {
+    const store = fixture()
+    const config = store.automation.draft().config
+    config.global.markdown = "原发布指令"
+    config.rules = [
+      {
+        id: "rule-1",
+        ownerId: "owner",
+        name: "原规则",
+        order: 0,
+        version: 1,
+        enabled: true,
+        executionLocation: "processing_service",
+        when: { all: true },
+        actions: [{ type: "presentation", policy: { standalone: "always" } }],
+      },
+    ]
+    store.automation.saveDraft(config, 0)
+    store.automation.publish(1, { mode: "future" }, randomUUID())
+    store.saveEntry(entry)
+    const input = store.automation.assign(store.automation.inputs()[0]!.seq)
+    store.automation.complete(input, {
+      schemaVersion: 1,
+      fingerprint: "explanation",
+      provider: "codex",
+      model: "test",
+      generatedAt: entry.publishedAt,
+      durationMs: 1,
+      usage: null,
+      status: "keep",
+      title: "标题",
+      summary: "摘要",
+      reason: "原因",
+      labels: [],
+      policy: { standalone: "always", aggregation: "allow", rewrite: "allow" },
+      sourceRole: "reporting",
+      context: { source_id: "f1", contextId: source.key },
+      facts: [],
+      semantic: null,
+      reused: false,
+    } satisfies ProcessingDecision)
+    // 新草稿及未来发布均不能改写旧决定的规则解释。
+    const next = store.automation.draft()
+    next.config.global.markdown = "新发布指令"
+    next.config.rules[0]!.name = "新规则"
+    store.automation.saveDraft(next.config, next.revision)
+    store.automation.publish(next.revision + 1, { mode: "future" }, randomUUID())
+    const path = `/processing/entries/${input.seq}/explanation`
+    expect(processingApi(store, "GET", path, {})).toMatchObject({
+      sourceId: "f1",
+      releaseVersion: 1,
+      globalInstructions: "原发布指令",
+      pending: false,
+      rules: [{ id: "rule-1", name: "原规则", state: "match" }],
+    })
+    store.saveEntry({ ...entry, content: "更新后的正文" })
+    expect(() => processingApi(store, "GET", path, {})).toThrow("invalid_target")
+    const current = store.automation.current(source.key, entry.id)!
+    store.replaceSources([])
+    expect(() =>
+      processingApi(store, "GET", `/processing/entries/${current.seq}/explanation`, {}),
+    ).toThrow("invalid_target")
+  })
+
   it("读写计划检查来源范围与 revision", () => {
     const store = fixture()
     expect(schedule(store)).toMatchObject({ revision: 1 })

@@ -34,6 +34,7 @@ import { useBatchUpdateSubscription } from "~/hooks/biz/useSubscriptionActions"
 import { useContextMenu } from "~/hooks/common/useContextMenu"
 import { getNewIssueUrl } from "~/lib/issues"
 import { UrlBuilder } from "~/lib/url-builder"
+import { openProcessingRuleEditor } from "~/modules/action/processing-rule-link"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
@@ -199,6 +200,17 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
                     requiresLogin: true,
                   }),
               ),
+            requiresLogin: true,
+          }),
+        )
+      }
+
+      if (subscription) {
+        nextItems.push(
+          MenuItemSeparator.default,
+          new MenuItemText({
+            label: t("sidebar.feed_column.context_menu.set_ai_rule" as never),
+            click: () => openProcessingRuleEditor({ kind: "source", sourceId: `feed/${feedId}` }),
             requiresLogin: true,
           }),
         )

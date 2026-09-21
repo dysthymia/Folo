@@ -24,6 +24,7 @@ import {
   readingStorySchema,
   refreshReadingSnapshot,
 } from "./processing-reader-client"
+import { ProcessingEntryExplanation } from "./ProcessingEntryExplanation"
 import { ProcessingFeedbackPanel } from "./ProcessingFeedbackPanel"
 import { ProcessingReadingModeSwitch } from "./ProcessingReadingModeSwitch"
 import { ResearchPanel } from "./ResearchPanel"
@@ -346,6 +347,8 @@ export function ProcessingReader() {
             {t("processing.reader.snapshot_cutoff")}: {item.audit.cutoffAt}
           </p>
           {item.metadata && <p>{JSON.stringify(item.metadata)}</p>}
+          {item.state === "ready" && <p>{item.decision.reason}</p>}
+          <ProcessingEntryExplanation inputSeq={item.inputSeq} />
         </details>
         {override && (
           <div className="flex flex-wrap gap-2">

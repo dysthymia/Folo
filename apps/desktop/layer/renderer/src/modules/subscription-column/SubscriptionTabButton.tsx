@@ -14,6 +14,7 @@ import { useNavigateEntry } from "~/hooks/biz/useNavigateEntry"
 import { parseView, useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
 import { useTimelineList } from "~/hooks/biz/useTimelineList"
 import { useContextMenu } from "~/hooks/common/useContextMenu"
+import { openProcessingRuleEditor } from "~/modules/action/processing-rule-link"
 
 import { resetSelectedFeedIds } from "./atom"
 import { useShowTimelineTabsSettingsModal } from "./TimelineTabsSettingsModal"
@@ -87,6 +88,7 @@ const useSubscriptionTabContextMenu = ({
   const showTimelineTabsSettingsModal = useShowTimelineTabsSettingsModal()
   const visibleTimelineList = useTimelineList({ withAll: true, visible: true })
   const hiddenTimelineList = useTimelineList({ withAll: true, hidden: true })
+  const contextView = parseView(timelineId)
 
   const canHide = visibleTimelineList.filter((id) => id !== timelineId).length > 0
 
@@ -126,6 +128,25 @@ const useSubscriptionTabContextMenu = ({
           new MenuItemText({
             label: t("sidebar.timeline_tabs.customize"),
             click: showTimelineTabsSettingsModal,
+            requiresLogin: true,
+          }),
+          new MenuItemText({
+            label: t("sidebar.feed_column.context_menu.set_ai_rule" as never),
+            hide:
+              typeof contextView !== "number" ||
+              contextView === FeedViewType.All ||
+              contextView < 0 ||
+              contextView > 5,
+            click: () => {
+              if (
+                typeof contextView !== "number" ||
+                contextView === FeedViewType.All ||
+                contextView < 0 ||
+                contextView > 5
+              )
+                return
+              openProcessingRuleEditor({ kind: "view", view: contextView })
+            },
             requiresLogin: true,
           }),
         ],

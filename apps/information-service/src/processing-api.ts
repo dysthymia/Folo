@@ -1,7 +1,9 @@
+import { compileInstructions } from "@follow/information-core"
 import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
 import type { SourceEntry } from "./folo"
+import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingFeedbackApi } from "./processing-feedback-api"
 import type {
@@ -16,6 +18,7 @@ import type {
   ProcessingTriggerStatus,
 } from "./processing-schedule"
 import { researchApi } from "./research-api"
+import { sourceText } from "./service"
 import type { Store } from "./store"
 import { StoryCorrectionService } from "./story-corrections"
 import type { Story, StoryLink } from "./story-store"
@@ -289,6 +292,41 @@ export function processingApi(
     return {
       entry: { ...item, input: input.body, decision: published?.decision ?? null },
     } satisfies ProcessingEntryDetailResponse
+  }
+
+  const explanationPath = /^\/processing\/entries\/(\d+)\/explanation$/.exec(path)
+  if (explanationPath && method === "GET") {
+    const seq = positiveInteger.parse(Number(explanationPath[1]))
+    const input = store.automation.inputs().find((item) => item.seq === seq && item.current)
+    if (!input || !store.sources().some((source) => source.key === input.sourceKey))
+      throw new AutomationError("invalid_target")
+    const published = store.processingState.published().find((item) => item.input.seq === seq)
+    const release =
+      input.releaseVersion === null ? null : store.automation.release(input.releaseVersion)
+    // 已完成结果使用执行当时的上下文和发布版本解释，避免把新草稿伪装成旧决定的原因。
+    const context =
+      published?.decision.context ??
+      processingRuleInput(
+        store,
+        input.sourceKey,
+        input.body,
+        sourceText(input.body.content ?? ""),
+        store.processingState.material(input) === "complete",
+      )
+    const instructions = release ? compileInstructions(release, context) : null
+    return {
+      sourceId: context.source_id,
+      releaseVersion: input.releaseVersion,
+      globalInstructions: instructions?.global.markdown ?? null,
+      rules:
+        instructions?.matches.map((match) => ({
+          id: match.ruleId,
+          name: release!.rules.find((rule) => rule.id === match.ruleId)!.name,
+          state: match.state,
+        })) ?? [],
+      shadowed: instructions?.shadowed ?? [],
+      pending: !published,
+    }
   }
 
   const entryPath = /^\/processing\/entries\/(\d+)\/(override|undo|retry)$/.exec(path)

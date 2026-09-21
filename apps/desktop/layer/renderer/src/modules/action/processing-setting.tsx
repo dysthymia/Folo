@@ -33,6 +33,7 @@ import {
   savePendingLocalMigrationSwitches,
 } from "./processing-migration-switch"
 import { ProcessingPresetPicker } from "./processing-preset-picker"
+import { parseProcessingRuleContext, prepareProcessingRuleContext } from "./processing-rule-link"
 import { defaultProcessingSchedule, ProcessingRunSettings } from "./processing-run-settings"
 import { ProcessingTags } from "./processing-tags"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
@@ -75,9 +76,12 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
   const [migrationSwitchStatus, setMigrationSwitchStatus] = useState<MigrationSwitchStatus | null>(
     null,
   )
+  const [targetRuleId, setTargetRuleId] = useState<string | null>(null)
   const requestRef = useRef<AbortController | null>(null)
   const draftRef = useRef<RuleSet | null>(null)
   const editorRef = useRef<ProcessingEditor | null>(null)
+  const contextRef = useRef(parseProcessingRuleContext(window.location.search))
+  const contextHandledRef = useRef(false)
   const dirty = !!draft && !!editor && JSON.stringify(draft) !== JSON.stringify(editor.config)
   const scheduleDirty =
     !!scheduleDraft && JSON.stringify(scheduleDraft) !== JSON.stringify(schedule?.config ?? null)
@@ -107,6 +111,31 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
     onDirty(dirty || scheduleDirty || busy || scheduleBusy || releaseBusy || runBusy)
     return () => onDirty(false)
   }, [dirty, scheduleDirty, busy, scheduleBusy, releaseBusy, runBusy, onDirty])
+
+  useEffect(() => {
+    const context = contextRef.current
+    if (!verified || !editor || !draft || !context || contextHandledRef.current) return
+    contextHandledRef.current = true
+    const prepared = prepareProcessingRuleContext(draft, context, {
+      id: crypto.randomUUID(),
+      name: t("processing.context_rule_name" as never),
+    })
+    if (prepared.created) {
+      draftRef.current = prepared.ruleSet
+      setDraft(prepared.ruleSet)
+    }
+    setTargetRuleId(prepared.ruleId)
+  }, [draft, editor, t, verified])
+
+  useEffect(() => {
+    if (!targetRuleId) return
+    const frame = requestAnimationFrame(() => {
+      const element = document.getElementById(`processing-rule-${targetRuleId}`)
+      element?.scrollIntoView({ behavior: "smooth", block: "center" })
+      element?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [targetRuleId])
 
   const reportError = (cause: unknown) => {
     const kind = cause instanceof ProcessingRequestError ? cause.kind : "request"
@@ -519,7 +548,14 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
               {draft.rules.map((rule, index) => (
                 <article
                   key={rule.id}
-                  className="space-y-4 rounded-xl border border-fill-secondary p-4"
+                  id={`processing-rule-${rule.id}`}
+                  tabIndex={-1}
+                  aria-current={targetRuleId === rule.id ? "true" : undefined}
+                  className={`space-y-4 rounded-xl border p-4 outline-none transition-colors ${
+                    targetRuleId === rule.id
+                      ? "border-accent bg-fill-quinary"
+                      : "border-fill-secondary"
+                  }`}
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <input

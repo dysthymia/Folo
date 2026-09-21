@@ -31,6 +31,7 @@ import { useAddFeedToFeedList } from "~/hooks/biz/useFeedActions"
 import { useNavigateEntry } from "~/hooks/biz/useNavigateEntry"
 import { getRouteParams, useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
 import { useContextMenu } from "~/hooks/common/useContextMenu"
+import { openProcessingRuleEditor } from "~/modules/action/processing-rule-link"
 
 import { useModalStack } from "../../components/ui/modal/stacked/hooks"
 import { ListCreationModalContent } from "../settings/tabs/lists/modals"
@@ -248,6 +249,15 @@ function FeedCategoryImpl({
                     requiresLogin: true,
                   }),
               ),
+            requiresLogin: true,
+          }),
+          new MenuItemText({
+            label: t("sidebar.feed_column.context_menu.set_ai_rule" as never),
+            hide: !folderName || typeof view !== "number",
+            click: () => {
+              if (!folderName || typeof view !== "number") return
+              openProcessingRuleEditor({ kind: "category", view, name: folderName })
+            },
             requiresLogin: true,
           }),
           new MenuItemText({
