@@ -94,6 +94,24 @@ describe("处理计划", () => {
     )
   })
 
+  it("阅读状态分别报告真实提前启动时点和轮询时点", () => {
+    const { schedule } = fixture()
+    configure(schedule, {
+      times: ["08:00"],
+      readyBy: { leadMinutes: 15 },
+      pollIntervalMinutes: 30,
+    })
+    expect(schedule.readingStatus("2026-04-01T23:30:00.000Z")).toMatchObject({
+      enabled: true,
+      timeZone: "Asia/Shanghai",
+      nextScheduledStartLocal: "2026-04-02T07:45",
+      nextScheduledReadyLocal: "2026-04-02T08:00",
+      readyByLeadMinutes: 15,
+      pollIntervalMinutes: 30,
+      nextPollAt: "2026-04-01T23:30:00.000Z",
+    })
+  })
+
   it("相同手动键去重，过期租约可恢复并拒绝旧租约完成", () => {
     const { schedule } = fixture()
     configure(schedule)

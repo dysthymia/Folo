@@ -12,7 +12,7 @@ const usageSchema = z.object({
   finishedAt: z.iso.datetime(),
   model: z.string(),
   provider: z.string(),
-  purpose: z.enum(["entry", "story", "chat", "unknown"]).default("unknown"),
+  purpose: z.enum(["entry", "story", "chat", "preview", "unknown"]).default("unknown"),
   status: z.string(),
   usage: z
     .object({
@@ -36,14 +36,16 @@ export async function processingDiagnostics(store: Store, ledgerPath: string, no
   const published = store.processingState.published()
   // 大批输入按序号索引完成状态，避免每条输入重新扫描所有决定。
   const completedSeqs = new Set(published.map((decision) => decision.input.seq))
-  const pending = inputs.filter((input) => !completedSeqs.has(input.seq))
   const schedule = store.schedule.snapshot().config
   const configured = inputs.filter(
     (input) =>
       schedule?.sourceKeys.includes(input.sourceKey) &&
       input.body.publishedAt &&
-      Date.parse(input.body.publishedAt) >= Date.parse(schedule.historySince),
+      Date.parse(input.body.publishedAt) >= Date.parse(schedule.historySince) &&
+      Date.parse(input.body.publishedAt) <= now.getTime(),
   )
+  // 积压只统计当前计划会处理的材料；范围外历史和未来发布时间不能伪装成待办。
+  const pending = configured.filter((input) => !completedSeqs.has(input.seq))
   const days = new Map<
     string,
     { day: string; currentContextsReceived: number; completedContexts: number }
@@ -56,10 +58,11 @@ export async function processingDiagnostics(store: Store, ledgerPath: string, no
     days.set(day, row)
   }
   const tokens = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 }
-  const durations: Record<"entry" | "story" | "chat" | "unknown", number[]> = {
+  const durations: Record<"entry" | "story" | "chat" | "preview" | "unknown", number[]> = {
     entry: [],
     story: [],
     chat: [],
+    preview: [],
     unknown: [],
   }
   let ledgerAvailable = true,
@@ -133,9 +136,9 @@ export async function processingDiagnostics(store: Store, ledgerPath: string, no
             ...pending.map((input) => (now.getTime() - Date.parse(input.receivedAt)) / 1000),
           )
         : null,
-      bySource: [...new Set(inputs.map((input) => input.sourceKey))].map((sourceKey) => ({
+      bySource: [...new Set(configured.map((input) => input.sourceKey))].map((sourceKey) => ({
         sourceKey,
-        contexts: inputs.filter((input) => input.sourceKey === sourceKey).length,
+        contexts: configured.filter((input) => input.sourceKey === sourceKey).length,
         pending: pending.filter((input) => input.sourceKey === sourceKey).length,
       })),
     },

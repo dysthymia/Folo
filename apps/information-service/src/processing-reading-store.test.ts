@@ -77,6 +77,64 @@ function publishRelease(store: Store) {
 afterEach(() => stores.splice(0).forEach((store) => store.close()))
 
 describe("稳定阅读快照", () => {
+  it("从固定成员汇总独立项、隐藏、待处理和失败，并单列当前来源状态", () => {
+    const store = fixture()
+    publishRelease(store)
+    const readyTarget = publishInput(store, entry("ready", "2026-01-01T00:00:00.000Z"))
+    const hidden = entry("hidden", "2026-01-02T00:00:00.000Z")
+    store.saveEntry(hidden)
+    const hiddenTarget = store.automation.assign(store.automation.inputs().at(-1)!.seq)
+    store.automation.complete(hiddenTarget, {
+      ...decision(hidden, hiddenTarget.seq),
+      status: "hide",
+    })
+    store.saveEntry(entry("pending", "2026-01-03T00:00:00.000Z"))
+    const pendingTarget = store.automation.inputs().at(-1)!
+    store.saveEntry(entry("failed", "2026-01-04T00:00:00.000Z"))
+    const failedTarget = store.automation.assign(store.automation.inputs().at(-1)!.seq)
+    store.processingState.fail(failedTarget, "model_failed")
+    store.schedule.save(
+      {
+        sourceKeys: [source.key],
+        historySince: "2026-01-01T00:00:00.000Z",
+        timeZone: "Asia/Shanghai",
+        enabled: true,
+        times: ["08:00"],
+      },
+      0,
+    )
+    const trigger = store.schedule.manual(randomUUID(), "2026-01-04T00:00:00.000Z")
+    store.processingState.report(trigger.id, {
+      sources: [{ sourceKey: source.key, pages: 1, entries: 4, coverage: "budget", failure: null }],
+      finishedAt: "2026-01-04T00:01:00.000Z",
+    })
+
+    expect(processingApi(store, "GET", "/reading-snapshot", {})).toMatchObject({
+      counts: { standalone: 3, stories: 0, hidden: 1, pending: 1, failed: 1 },
+      processing: {
+        runStatus: "pending",
+        sourceTotal: 1,
+        incompleteSources: 1,
+        sourceStatusAt: "2026-01-04T00:01:00.000Z",
+      },
+      schedule: { enabled: true, timeZone: "Asia/Shanghai" },
+    })
+    const snapshot = store.reading.snapshot()
+    expect(store.reading.page({ snapshotId: snapshot.id })).toMatchObject({
+      view: "smart",
+      total: 1,
+      items: [{ kind: "entry", state: "ready", inputSeq: readyTarget.seq }],
+    })
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "pending" })).toMatchObject({
+      total: 1,
+      items: [{ kind: "entry", state: "pending", inputSeq: pendingTarget.seq }],
+    })
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "failed" })).toMatchObject({
+      total: 1,
+      items: [{ kind: "entry", state: "pending", inputSeq: failedTarget.seq, status: "failed" }],
+    })
+  })
+
   it("待处理输入占位并计入总数，晚到决定只能在刷新后进入可读状态", () => {
     const store = fixture()
     publishRelease(store)

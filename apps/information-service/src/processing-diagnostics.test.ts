@@ -25,6 +25,8 @@ it("按真实时刻计算历史范围，同一原帖的多个查询不扩大唯�
       ["original", "feed/a", "2026-09-01T07:00:00+08:00", "https://x.com/a/status/123"],
       ["x:123", "x/search/b", "2026-09-01T07:00:00+08:00", "https://twitter.com/a/status/123"],
       ["new", "feed/a", "2026-08-31T20:00:00-05:00", "https://example.com/new"],
+      ["unselected", "feed/c", "2026-09-01T01:00:00Z", "https://example.com/unselected"],
+      ["future", "feed/a", "2026-09-03T00:00:00Z", "https://example.com/future"],
     ] as const) {
       store.saveEntry({
         id,
@@ -37,13 +39,25 @@ it("按真实时刻计算历史范围，同一原帖的多个查询不扩大唯�
         read: false,
       })
     }
-    const result = await processingDiagnostics(store, join(dir, "missing.jsonl"))
+    const result = await processingDiagnostics(
+      store,
+      join(dir, "missing.jsonl"),
+      new Date("2026-09-02T00:00:00Z"),
+    )
     expect(result.scope).toMatchObject({
-      currentInputContexts: 3,
+      currentInputContexts: 5,
       configuredInputContexts: 1,
-      uniqueCurrentItems: 2,
+      uniqueCurrentItems: 4,
     })
-    expect(result.backlog.contexts).toBe(3)
+    // 总存量仍保留五个上下文，但只有计划内且已到发布时间的一条属于积压。
+    expect(result.backlog.contexts).toBe(1)
+    expect(result.backlog.bySource).toEqual([{ sourceKey: "feed/a", contexts: 1, pending: 1 }])
+    const later = await processingDiagnostics(
+      store,
+      join(dir, "missing.jsonl"),
+      new Date("2026-09-03T00:00:00Z"),
+    )
+    expect(later.backlog.contexts).toBe(2)
   } finally {
     store.close()
     await rm(dir, { recursive: true, force: true })
@@ -59,6 +73,7 @@ it("区分未知用量、失败调用和真实计数，不推测尚未测量的�
     const missing = await processingDiagnostics(store, path)
     expect(missing.modelCalls.ledgerAvailable).toBe(false)
     expect(missing.modelCalls.completeUsage).toBe(false)
+    expect(missing.backlog).toEqual({ contexts: 0, oldestAgeSeconds: null, bySource: [] })
     const base = {
       startedAt: "2026-09-01T00:00:00.000Z",
       finishedAt: "2026-09-01T00:00:01.000Z",

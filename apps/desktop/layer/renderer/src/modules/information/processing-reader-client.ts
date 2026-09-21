@@ -111,7 +111,61 @@ export const readingSnapshotSchema = z
     latestAvailable: z.boolean(),
   })
   .strict()
-export const readingSnapshotResponseSchema = z.object({ snapshot: readingSnapshotSchema }).strict()
+const readingSnapshotCountsSchema = z
+  .object({
+    standalone: z.number().int().nonnegative(),
+    stories: z.number().int().nonnegative(),
+    hidden: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  })
+  .strict()
+const readingProcessingStatusSchema = z
+  .object({
+    runStatus: z
+      .enum([
+        "pending",
+        "running",
+        "succeeded",
+        "retry_wait",
+        "needs_context",
+        "deferred_budget",
+        "failed",
+        "cancelled",
+      ])
+      .nullable(),
+    sourceTotal: z.number().int().nonnegative(),
+    incompleteSources: z.number().int().nonnegative().nullable(),
+    sourceStatusAt: isoDateTime.nullable(),
+  })
+  .strict()
+const readingScheduleStatusSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    enabled: z.boolean(),
+    timeZone: z.string().min(1).nullable(),
+    nextScheduledStartLocal: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u)
+      .nullable(),
+    nextScheduledReadyLocal: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u)
+      .nullable(),
+    readyByLeadMinutes: z.number().int().positive().nullable(),
+    pollIntervalMinutes: z.number().int().positive().nullable(),
+    nextPollAt: isoDateTime.nullable(),
+  })
+  .strict()
+export const readingSnapshotResponseSchema = z
+  .object({
+    snapshot: readingSnapshotSchema,
+    // 兼容升级期间的旧服务和测试 fixture；新服务会完整返回三组状态。
+    counts: readingSnapshotCountsSchema.optional(),
+    processing: readingProcessingStatusSchema.optional(),
+    schedule: readingScheduleStatusSchema.optional(),
+  })
+  .strict()
 export const readingSnapshotPageSchema = z
   .object({
     snapshot: readingSnapshotSchema,

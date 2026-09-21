@@ -4,8 +4,17 @@ import { AutomationError } from "./automation-store"
 import type { SourceEntry } from "./folo"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingFeedbackApi } from "./processing-feedback-api"
-import type { ReadingSnapshot, ReadingSnapshotPage, ResearchPack } from "./processing-reading-store"
-import type { ProcessingScheduleInput } from "./processing-schedule"
+import type {
+  ReadingSnapshot,
+  ReadingSnapshotCounts,
+  ReadingSnapshotPage,
+  ResearchPack,
+} from "./processing-reading-store"
+import type {
+  ProcessingScheduleInput,
+  ProcessingScheduleReadingStatus,
+  ProcessingTriggerStatus,
+} from "./processing-schedule"
 import { researchApi } from "./research-api"
 import type { Store } from "./store"
 import { StoryCorrectionService } from "./story-corrections"
@@ -77,13 +86,82 @@ export type StoriesListResponse = {
   }>
 }
 export type StoryLinkResponse = StoryLink
-export type ReadingSnapshotResponse = { snapshot: ReadingSnapshot }
+export type ReadingCurrentProcessingStatus = {
+  runStatus: ProcessingTriggerStatus | null
+  sourceTotal: number
+  incompleteSources: number | null
+  sourceStatusAt: string | null
+}
+export type ReadingSnapshotResponse = {
+  snapshot: ReadingSnapshot
+  counts: ReadingSnapshotCounts
+  processing: ReadingCurrentProcessingStatus
+  schedule: ProcessingScheduleReadingStatus
+}
 export type ReadingSnapshotPageResponse = ReadingSnapshotPage
 export type ResearchPackResponse = ResearchPack
 
 function owner(store: Store): string {
   if (!store.ownerId) throw new AutomationError("owner_required")
   return store.ownerId
+}
+
+function readingSnapshotResponse(store: Store, snapshot: ReadingSnapshot): ReadingSnapshotResponse {
+  const schedule = store.schedule.readingStatus()
+  const triggers = store.schedule
+    .triggers()
+    .filter((trigger) => trigger.configRevision === schedule.revision)
+  const currentRun = triggers.at(-1) ?? null
+  const reports = new Map(
+    store.processingState.reports().map((item) => [item.triggerId, item.report]),
+  )
+  const reportedTrigger = [...triggers].reverse().find((trigger) => reports.has(trigger.id)) ?? null
+  const report = reportedTrigger ? reports.get(reportedTrigger.id) : null
+  const reportRecord = report !== null && typeof report === "object" ? report : null
+  const reportedSources =
+    reportRecord && "sources" in reportRecord && Array.isArray(reportRecord.sources)
+      ? reportRecord.sources
+      : null
+  const sourceCoverage = reportedSources
+    ? new Map(
+        reportedSources.flatMap((source) => {
+          if (
+            source === null ||
+            typeof source !== "object" ||
+            !("sourceKey" in source) ||
+            typeof source.sourceKey !== "string" ||
+            !("coverage" in source) ||
+            typeof source.coverage !== "string"
+          )
+            return []
+          return [[source.sourceKey, source.coverage] as const]
+        }),
+      )
+    : null
+  const finishedAt =
+    reportRecord &&
+    "finishedAt" in reportRecord &&
+    typeof reportRecord.finishedAt === "string" &&
+    Number.isFinite(Date.parse(reportRecord.finishedAt))
+      ? new Date(reportRecord.finishedAt).toISOString()
+      : null
+  const sourceKeys = store.schedule.snapshot().config?.sourceKeys ?? []
+  return {
+    snapshot,
+    counts: store.reading.counts(snapshot.id),
+    processing: {
+      runStatus: currentRun?.status ?? null,
+      sourceTotal: sourceKeys.length,
+      incompleteSources: sourceCoverage
+        ? sourceKeys.filter(
+            (sourceKey) =>
+              !["end", "history_boundary"].includes(sourceCoverage.get(sourceKey) ?? ""),
+          ).length
+        : null,
+      sourceStatusAt: finishedAt,
+    },
+    schedule,
+  }
 }
 
 function entryView(store: Store): ProcessingEntryListItem[] {
@@ -173,8 +251,7 @@ export function processingApi(
     }
   }
   if (path === "/reading-snapshot") {
-    if (method === "GET")
-      return { snapshot: store.reading.snapshot() } satisfies ReadingSnapshotResponse
+    if (method === "GET") return readingSnapshotResponse(store, store.reading.snapshot())
     if (method === "POST") {
       const input = z
         .object({
@@ -192,7 +269,7 @@ export function processingApi(
   }
   if (path === "/reading-snapshot/refresh" && method === "POST") {
     z.object({}).strict().parse(body)
-    return { snapshot: store.reading.refresh() } satisfies ReadingSnapshotResponse
+    return readingSnapshotResponse(store, store.reading.refresh())
   }
   const researchPackPath = /^\/research-pack\/([^/]+)$/.exec(path)
   if (researchPackPath && method === "GET")

@@ -24,6 +24,13 @@ export type ReadingSnapshot = {
   createdAt: string
   latestAvailable: boolean
 }
+export type ReadingSnapshotCounts = {
+  standalone: number
+  stories: number
+  hidden: number
+  pending: number
+  failed: number
+}
 export type ReadingEntry = {
   kind: "entry"
   state: "ready"
@@ -374,6 +381,28 @@ export class ProcessingReadingStore {
       limit,
       total,
       items: rows.map((row) => this.readMember(row, snapshot)),
+    }
+  }
+
+  counts(snapshotId?: string): ReadingSnapshotCounts {
+    const snapshot = snapshotId ? this.snapshotById(snapshotId) : this.snapshot()
+    const count = (where: string) =>
+      Number(
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM processing_reading_snapshot_members WHERE snapshot_id=? AND ${where}`,
+          )
+          .get(snapshot.id)!.count,
+      )
+    // 汇总只读取固定快照成员，刷新前不会被后台新输入或新决定改变。
+    return {
+      standalone: count(this.viewWhere("standalone")),
+      stories: count(this.viewWhere("stories")),
+      hidden: count(this.viewWhere("hidden")),
+      pending: count(
+        "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'')!='failed'",
+      ),
+      failed: count("kind='entry' AND decision_id IS NULL AND entry_status='failed'"),
     }
   }
 

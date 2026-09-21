@@ -68,6 +68,51 @@ const revision = {
 }
 
 describe("稳定阅读快照 client", () => {
+  it.each(["smart", "pending", "failed"])("接受阅读视图 %s", (view) => {
+    expect(
+      readingSnapshotPageSchema.parse({
+        snapshot,
+        view,
+        offset: 0,
+        limit: 50,
+        total: 0,
+        items: [],
+      }).view,
+    ).toBe(view)
+  })
+
+  it("解析快照汇总、当前来源状态和分离的固定计划与轮询状态", () => {
+    expect(
+      readingSnapshotResponseSchema.parse({
+        snapshot,
+        counts: { standalone: 3, stories: 1, hidden: 2, pending: 1, failed: 1 },
+        processing: {
+          runStatus: "running",
+          sourceTotal: 4,
+          incompleteSources: 1,
+          sourceStatusAt: "2026-09-12T00:01:00.000Z",
+        },
+        schedule: {
+          revision: 2,
+          enabled: true,
+          timeZone: "Asia/Shanghai",
+          nextScheduledStartLocal: "2026-09-12T07:30",
+          nextScheduledReadyLocal: "2026-09-12T08:00",
+          readyByLeadMinutes: 30,
+          pollIntervalMinutes: 15,
+          nextPollAt: "2026-09-12T00:15:00.000Z",
+        },
+      }),
+    ).toMatchObject({
+      counts: { standalone: 3, failed: 1 },
+      processing: { incompleteSources: 1 },
+      schedule: {
+        nextScheduledStartLocal: "2026-09-12T07:30",
+        pollIntervalMinutes: 15,
+      },
+    })
+  })
+
   it("引用待核对时展示原文标题并收起 AI 摘要，且忽略旧 decision 反馈", () => {
     const item = {
       title: "原文标题",

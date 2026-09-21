@@ -34,7 +34,16 @@ type ReaderItem = ReadingSnapshotItem & {
   metadata?: ReadingEntryOverride["metadata"]
   review?: Pick<ReadingEntryOverride, "decision" | "reviewNeeded" | "issueCount">
 }
+type ReadingStatus = Omit<Awaited<ReturnType<typeof loadReadingSnapshot>>, "snapshot">
 const pageLimit = 50
+
+function formatStatusInstant(value: string, timeZone: string | null) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(value))
+}
 
 function originalEntryUrl(sourceKey: string, itemId: string) {
   // X 的条目 ID 本身就是稳定状态 ID，直接生成 canonical 地址，避免伪造 Folo 时间线链接。
@@ -53,6 +62,7 @@ export function ProcessingReader() {
   const [snapshot, setSnapshot] = useState<
     Awaited<ReturnType<typeof loadReadingSnapshot>>["snapshot"] | null
   >(null)
+  const [readingStatus, setReadingStatus] = useState<ReadingStatus | null>(null)
   const [items, setItems] = useState<ReaderItem[]>([])
   const [view, setView] = useState<ReadingView>("smart")
   const [offset, setOffset] = useState(0)
@@ -101,6 +111,10 @@ export function ProcessingReader() {
         const overrides = await loadEntryOverrides(request.signal)
         if (request.signal.aborted) return
         snapshotRef.current = page.snapshot
+        if ("counts" in snapshotResponse) {
+          const { counts, processing, schedule } = snapshotResponse
+          setReadingStatus({ counts, processing, schedule })
+        }
         viewRef.current = page.view
         setSnapshot(page.snapshot)
         setView(page.view)
@@ -139,6 +153,7 @@ export function ProcessingReader() {
         setSelected(null)
         setSelectedSnapshotRevision(null)
         setSnapshot(null)
+        setReadingStatus(null)
         snapshotRef.current = null
       } else {
         // 回到页面只读取当前固定快照，不自动吸收后台新结果。
@@ -460,6 +475,98 @@ export function ProcessingReader() {
           {t("processing.reader.refresh")}
         </button>
       </div>
+      {readingStatus?.counts && (
+        <div
+          className="flex flex-wrap gap-2 text-sm"
+          aria-label={t("processing.reader.status.counts")}
+        >
+          {(["standalone", "stories", "hidden", "pending", "failed"] as const).map((key) => (
+            <span key={key} className="rounded-full bg-fill px-3 py-1 text-text-secondary">
+              {t(`processing.reader.status.count.${key}`)} {readingStatus.counts?.[key]}
+            </span>
+          ))}
+        </div>
+      )}
+      {(readingStatus?.processing || readingStatus?.schedule) && (
+        <div className="grid gap-2 text-sm text-text-secondary sm:grid-cols-2">
+          {readingStatus.processing && (
+            <div className="rounded-lg border border-fill-secondary p-3">
+              <p className="font-medium text-text">{t("processing.reader.status.sources")}</p>
+              <p>
+                {readingStatus.processing.incompleteSources === null
+                  ? t("processing.reader.status.sources_unknown", {
+                      total: readingStatus.processing.sourceTotal,
+                    })
+                  : t("processing.reader.status.sources_incomplete", {
+                      incomplete: readingStatus.processing.incompleteSources,
+                      total: readingStatus.processing.sourceTotal,
+                    })}
+              </p>
+              <p>
+                {t("processing.reader.status.run", {
+                  status: readingStatus.processing.runStatus
+                    ? t(`processing.reader.status.run_status.${readingStatus.processing.runStatus}`)
+                    : t("processing.reader.status.run_status.none"),
+                })}
+              </p>
+              {readingStatus.processing.sourceStatusAt && (
+                <p>
+                  {t("processing.reader.status.source_updated", {
+                    time: formatStatusInstant(
+                      readingStatus.processing.sourceStatusAt,
+                      readingStatus.schedule?.timeZone ?? null,
+                    ),
+                  })}
+                </p>
+              )}
+            </div>
+          )}
+          {readingStatus.schedule && (
+            <div className="rounded-lg border border-fill-secondary p-3">
+              <p className="font-medium text-text">{t("processing.reader.status.schedule")}</p>
+              <p>
+                {readingStatus.schedule.timeZone
+                  ? t("processing.reader.status.time_zone", {
+                      timeZone: readingStatus.schedule.timeZone,
+                    })
+                  : t("processing.reader.status.schedule_missing")}
+              </p>
+              {readingStatus.schedule.timeZone && !readingStatus.schedule.enabled && (
+                <p>{t("processing.reader.status.schedule_paused")}</p>
+              )}
+              {readingStatus.schedule.nextScheduledStartLocal && (
+                <p>
+                  {t("processing.reader.status.next_scheduled", {
+                    time: readingStatus.schedule.nextScheduledStartLocal.replace("T", " "),
+                  })}
+                </p>
+              )}
+              {readingStatus.schedule.readyByLeadMinutes &&
+                readingStatus.schedule.nextScheduledReadyLocal && (
+                  <p>
+                    {t("processing.reader.status.ready_by", {
+                      minutes: readingStatus.schedule.readyByLeadMinutes,
+                      time: readingStatus.schedule.nextScheduledReadyLocal.replace("T", " "),
+                    })}
+                  </p>
+                )}
+              {readingStatus.schedule.pollIntervalMinutes && (
+                <p>
+                  {t("processing.reader.status.poll", {
+                    minutes: readingStatus.schedule.pollIntervalMinutes,
+                    next: readingStatus.schedule.nextPollAt
+                      ? formatStatusInstant(
+                          readingStatus.schedule.nextPollAt,
+                          readingStatus.schedule.timeZone,
+                        )
+                      : t("processing.reader.status.poll_paused"),
+                  })}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {error && (
         <p role="alert" className="text-red">
           {t(`processing.reader.error.${error}`)}

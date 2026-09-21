@@ -28,6 +28,17 @@ export type ProcessingScheduleSnapshot = {
   config: ProcessingScheduleConfig | null
 }
 
+export type ProcessingScheduleReadingStatus = {
+  revision: number
+  enabled: boolean
+  timeZone: string | null
+  nextScheduledStartLocal: string | null
+  nextScheduledReadyLocal: string | null
+  readyByLeadMinutes: number | null
+  pollIntervalMinutes: number | null
+  nextPollAt: string | null
+}
+
 export type ProcessingTriggerKind = "scheduled" | "catchup" | "poll" | "manual"
 export type ProcessingTriggerStatus =
   | "pending"
@@ -209,6 +220,18 @@ function slotId(date: string, time: string): string {
   return `${date}T${time}`
 }
 
+function addLocalDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00.000Z`) + days * 86_400_000)
+    .toISOString()
+    .slice(0, 10)
+}
+
+function localMinute(date: string, minute: number): string {
+  const hour = String(Math.floor(minute / 60)).padStart(2, "0")
+  const minutePart = String(minute % 60).padStart(2, "0")
+  return `${date}T${hour}:${minutePart}`
+}
+
 // 计划时点按本地钟表比较：春季跳过的时刻会在下一次 tick 触发，秋季重复时刻共用同一个 slot ID。
 function dueSlots(
   previous: string | null,
@@ -303,6 +326,58 @@ export class ProcessingScheduleStore {
     if (!row) return { revision: 0, config: null }
     if (String(row.owner_id) !== ownerId) throw new ProcessingScheduleError("owner_mismatch")
     return { revision: Number(row.revision), config: normalizeConfig(JSON.parse(String(row.body))) }
+  }
+
+  readingStatus(now: Date | string = new Date()): ProcessingScheduleReadingStatus {
+    const snapshot = this.snapshot()
+    const config = snapshot.config
+    if (!config)
+      return {
+        revision: snapshot.revision,
+        enabled: false,
+        timeZone: null,
+        nextScheduledStartLocal: null,
+        nextScheduledReadyLocal: null,
+        readyByLeadMinutes: null,
+        pollIntervalMinutes: null,
+        nextPollAt: null,
+      }
+    const at = instant(now)
+    const current = localTime(at, config.timeZone)
+    const lead = config.readyBy?.leadMinutes ?? 0
+    const scheduled = config.times.map((time) => ({
+      readyMinute: parseTime(time).minute,
+      startMinute: parseTime(time).minute - lead,
+    }))
+    const nextToday = scheduled.find(({ startMinute }) => startMinute > current.minute)
+    const next = nextToday ?? scheduled[0]!
+    const nextDate = nextToday ? current.date : addLocalDays(current.date, 1)
+    const state = this.db
+      .prepare("SELECT last_poll_at FROM processing_schedule_state WHERE id=1")
+      .get()
+    const lastPollAt = state?.last_poll_at == null ? null : String(state.last_poll_at)
+    const nextPollAt =
+      config.enabled && config.pollIntervalMinutes !== null
+        ? lastPollAt
+          ? new Date(
+              Math.max(
+                Date.parse(at),
+                Date.parse(lastPollAt) + config.pollIntervalMinutes * 60_000,
+              ),
+            ).toISOString()
+          : at
+        : null
+    return {
+      revision: snapshot.revision,
+      enabled: config.enabled,
+      timeZone: config.timeZone,
+      // 固定计划展示 ready_by 后的真实启动钟点，同时保留目标就绪钟点供界面解释。
+      nextScheduledStartLocal: config.enabled ? localMinute(nextDate, next.startMinute) : null,
+      nextScheduledReadyLocal: config.enabled ? localMinute(nextDate, next.readyMinute) : null,
+      readyByLeadMinutes: config.readyBy?.leadMinutes ?? null,
+      pollIntervalMinutes: config.pollIntervalMinutes,
+      nextPollAt,
+    }
   }
 
   save(input: ProcessingScheduleInput, expectedRevision: number): ProcessingScheduleSnapshot {
