@@ -6,6 +6,8 @@ import type { PresentationPolicy } from "@follow/information-core"
 import type { AutomationStore } from "./automation-store"
 import { contentIdentity } from "./content-identity"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
+import type { ProcessingDedupeStore } from "./processing-dedupe"
+import { activeDedupeActions } from "./processing-dedupe"
 import type { ProcessingScheduleConfig } from "./processing-schedule"
 import type { ProcessingStateStore } from "./processing-state"
 import type { Story, StoryRevision, StoryStore } from "./story-store"
@@ -98,17 +100,18 @@ export type ReadingSnapshotPage = {
  * 阅读快照只覆盖计划的 `sourceKeys + historySince`，而时间线要覆盖全部订阅，
  * 因此角色单独投影一次：判定口径与快照一致（同一个 `entryHidden`），但范围取全部
  * current input。`hidden` 是显式隐藏，`story` 代表整篇综述、`merged` 表示内容已在
- * 别处呈现（综述的其他成员，或与成员同内容的转载）。
+ * 别处呈现（综述的其他成员、语义去重判定的重复条目，或与成员同内容的转载），
+ * `keeper` 是语义去重里保留了内容的那一条。
  */
-export type ProcessingEntryRoleKind = "hidden" | "story" | "merged"
+export type ProcessingEntryRoleKind = "hidden" | "story" | "merged" | "keeper"
 export type ProcessingEntryRole = {
   /** Folo 条目 id，渲染层用它作为角色层的键。 */
   itemId: string
   inputSeq: number
   kind: ProcessingEntryRoleKind
-  /** 隐藏原因取决定自身的 reason；综述角色取综述标题。 */
+  /** 隐藏原因取决定自身的 reason；合并角色取综述标题或判重理由。 */
   reason: string | null
-  /** `story` 指向被并入的成员，`merged` 指向代表整篇综述的那一条。 */
+  /** `story`/`keeper` 指向被并入的成员，`merged` 指向保留了内容的那一条。 */
   relatedEntryIds: string[]
   storyId: string | null
   storyTitle: string | null
@@ -176,6 +179,7 @@ export class ProcessingReadingStore {
     private readonly automation: AutomationStore,
     private readonly processingState: ProcessingStateStore,
     private readonly stories: StoryStore,
+    private readonly dedupe: ProcessingDedupeStore,
     private readonly processingScope?: () => Pick<
       ProcessingScheduleConfig,
       "sourceKeys" | "historySince"
@@ -255,6 +259,10 @@ export class ProcessingReadingStore {
         .filter((item) => represented.has(item.input.seq))
         .map((item) => contentIdentity(item.input.body)),
     )
+    // 语义去重合成的条目在阅读页同样不单独占位，与时间线角色保持同一口径。
+    const semanticallyMerged = new Set(
+      this.dedupe.merges(this.activeDedupeFingerprints()).map((merge) => merge.hide.seq),
+    )
     const standaloneContent = new Set<string>()
     const members: Array<{
       member: Omit<SnapshotMember, "snapshotId" | "ordinal">
@@ -290,7 +298,7 @@ export class ProcessingReadingStore {
           hidden,
           represented:
             (published?.decision.policy.standalone !== "always" &&
-              representedContent.has(identity)) ||
+              (representedContent.has(identity) || semanticallyMerged.has(input.seq))) ||
             duplicate,
         },
         sortAt: input.receivedAt,
@@ -601,7 +609,61 @@ export class ProcessingReadingStore {
       })
     }
 
+    // 语义去重与综述互不覆盖：已有综述角色（成员或代表）的条目不再参与判重合并，
+    // 只有两侧都还没有角色、也没有被隐藏的判定才会落地。
+    const fingerprints = this.activeDedupeFingerprints()
+    const keeperMergedIds = new Map<number, string[]>()
+    for (const merge of this.dedupe.merges(fingerprints)) {
+      const keepSeq = merge.keep.seq
+      const hideSeq = merge.hide.seq
+      if (hideSeq === keepSeq) continue
+      if (roles.has(hideSeq) || mergedInto.has(hideSeq)) continue
+      if (roles.has(keepSeq) || mergedInto.has(keepSeq)) continue
+      if (hiddenBySeq.get(hideSeq) || hiddenBySeq.get(keepSeq)) continue
+      const hideInput = inputBySeq.get(hideSeq)
+      const keepInput = inputBySeq.get(keepSeq)
+      if (!hideInput || !keepInput) continue
+      // `always` 是用户显式要求保留的例外，优先级高于语义判定。
+      if (publishedBySeq.get(hideSeq)?.decision.policy.standalone === "always") continue
+      roles.set(hideSeq, {
+        itemId: hideInput.itemId,
+        inputSeq: hideSeq,
+        kind: "merged",
+        reason: merge.reason,
+        relatedEntryIds: [keepInput.itemId],
+        storyId: null,
+        storyTitle: null,
+      })
+      keeperMergedIds.set(keepSeq, [...(keeperMergedIds.get(keepSeq) ?? []), hideInput.itemId])
+    }
+    for (const [keepSeq, relatedEntryIds] of keeperMergedIds) {
+      const keepInput = inputBySeq.get(keepSeq)
+      if (!keepInput) continue
+      roles.set(keepSeq, {
+        itemId: keepInput.itemId,
+        inputSeq: keepSeq,
+        kind: "keeper",
+        reason: null,
+        relatedEntryIds: [...new Set(relatedEntryIds)],
+        storyId: null,
+        storyTitle: null,
+      })
+    }
+
     return [...roles.values()].sort((left, right) => left.inputSeq - right.inputSeq)
+  }
+
+  /**
+   * 当前生效的去重规则指纹。只取最新一次发布：用户删掉 `ai_dedupe` 动作即等于关闭语义
+   * 去重，旧判定随后不再参与角色投影。
+   */
+  private activeDedupeFingerprints(): ReadonlySet<string> {
+    const latest = this.automation.releases()[0]
+    if (!latest) return new Set()
+    const fingerprints = activeDedupeActions(this.automation.release(latest.version)).map(
+      (action) => action.fingerprint,
+    )
+    return new Set(fingerprints)
   }
 
   private requireOwner(): string {

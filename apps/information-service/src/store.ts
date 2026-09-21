@@ -8,6 +8,7 @@ import { dirname } from "pathe"
 import { AutomationStore } from "./automation-store"
 import { ExportStore } from "./export-store"
 import type { Source, SourceEntry } from "./folo"
+import { ProcessingDedupeStore } from "./processing-dedupe"
 import { ProcessingFeedbackStore } from "./processing-feedback"
 import { ProcessingReadingStore } from "./processing-reading-store"
 import { ProcessingScheduleStore } from "./processing-schedule"
@@ -62,7 +63,9 @@ function ruleSetCategoryReferences(config: RuleSet) {
   return config.rules.flatMap((rule) => [
     ...categoryReferences(rule.when),
     ...rule.actions.flatMap((action) =>
-      action.type === "ai_aggregate" ? categoryReferences(action.scope) : [],
+      action.type === "ai_aggregate" || action.type === "ai_dedupe"
+        ? categoryReferences(action.scope)
+        : [],
     ),
   ])
 }
@@ -77,6 +80,7 @@ export class Store {
   readonly exports: ExportStore
   readonly research: ResearchStore
   readonly reading: ProcessingReadingStore
+  readonly dedupe: ProcessingDedupeStore
   readonly schedule: ProcessingScheduleStore
   readonly sourceSync: SourceSyncStore
   readonly stories: StoryStore
@@ -112,12 +116,14 @@ export class Store {
     )
     this.stories = new StoryStore(this.db)
     this.xQueries = new XQueryStore(this.db, () => this.ownerId)
+    this.dedupe = new ProcessingDedupeStore(this.db, () => this.automation.inputs())
     this.reading = new ProcessingReadingStore(
       this.db,
       () => this.ownerId,
       this.automation,
       this.processingState,
       this.stories,
+      this.dedupe,
       () => this.schedule.snapshot().config,
     )
     // 首次增加版本层时迁入已有材料；新增表失败会保留旧库，不重建或清空数据。

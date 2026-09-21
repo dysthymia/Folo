@@ -243,6 +243,38 @@ describe("有效指令与字段优先级", () => {
       updatePrompt: "同事件整合",
     })
   })
+  it("语义去重动作只暴露参与范围，且与聚合动作共存而不互相顶替", () => {
+    const scope = when({ field: "category_ref", operator: "eq", value: { view: 0, name: "AI" } })
+    const bundle = compileInstructions(
+      rules(
+        rule("dedupe", 0, [
+          { type: "ai_dedupe", scope },
+          {
+            type: "ai_aggregate",
+            createPrompt: "同事件整合",
+            updatePrompt: "",
+            mode: "same_event",
+            scope: { all: true },
+          },
+        ]),
+      ),
+      input,
+    )
+    expect(bundle.dedupes).toEqual([{ ruleId: "dedupe", version: 1, order: 0, scope }])
+    expect(bundle.aggregates).toHaveLength(1)
+  })
+  it("同规则里两个去重动作会被拒绝，不会悄悄取其一", () => {
+    expect(
+      ruleSetSchema.safeParse(
+        rules(
+          rule("dedupe", 0, [
+            { type: "ai_dedupe", scope: { all: true } },
+            { type: "ai_dedupe", scope: { all: true } },
+          ]),
+        ),
+      ).success,
+    ).toBe(false)
+  })
   it("同规则重复字段、重复顺序、跨账号规则均拒绝，而不是末项获胜", () => {
     expect(
       ruleSetSchema.safeParse(

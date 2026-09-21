@@ -3,6 +3,7 @@ import type { ConditionSet } from "@follow/information-core"
 import type { AIConfigStore } from "./ai-config"
 import { expandXContexts } from "./content-identity"
 import type { FoloReader } from "./folo"
+import { runSemanticDedupe } from "./processing-dedupe"
 import { runEntryProcessing } from "./processing-engine"
 import type { ProcessingTriggerStatus } from "./processing-schedule"
 import { acquireSources } from "./processing-source-sync"
@@ -20,6 +21,7 @@ export type ProcessingWorkerOptions = {
   processEntries?: typeof runEntryProcessing
   aggregate?: typeof runStoryAggregation
   repair?: typeof runStoryRepair
+  dedupe?: typeof runSemanticDedupe
 }
 
 // 调度只领取明确保存的范围；尚未选择来源或发布规则时不会生成模型请求。
@@ -139,6 +141,14 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         }),
       )
     }
+    // 语义去重在单篇决定与综述都落定之后执行：它只处理仍然独立显示的条目，综述成员
+    // 由角色层优先接管，不需要在这里重复排除。
+    const dedupe = await (options.dedupe ?? runSemanticDedupe)({
+      store,
+      aiConfig: options.aiConfig,
+      runtimeDir: options.runtimeDir,
+      signal,
+    })
     const failure =
       repair.failures.length > 0 ||
       sources.some((source) => source.failure) ||
@@ -151,6 +161,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         ["pending", "budget", "timestamp_boundary"].includes(source.coverage),
       ) ||
       entries.pending > 0 ||
+      dedupe.pending > 0 ||
       stories.some((story) =>
         story.pending.some((item) =>
           ["material_too_large", "scope_unknown", "invalid_model_group"].includes(item.reason),
@@ -169,6 +180,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       entries,
       stories,
       repair,
+      dedupe,
       finishedAt: new Date().toISOString(),
     })
     store.schedule.finish(
@@ -267,7 +279,8 @@ function referencedListKeys(store: Store) {
     const ruleSet = store.automation.release(version)
     for (const rule of ruleSet?.rules ?? []) {
       collect(rule.when)
-      for (const action of rule.actions) if (action.type === "ai_aggregate") collect(action.scope)
+      for (const action of rule.actions)
+        if (action.type === "ai_aggregate" || action.type === "ai_dedupe") collect(action.scope)
     }
   }
   return [...ids].sort()

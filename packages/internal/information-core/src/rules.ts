@@ -120,6 +120,13 @@ export const actionSchema = z.discriminatedUnion("type", [
         .optional(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("ai_dedupe"),
+      // 判重标准是固定的保守分类器，用户只决定参与范围，不撰写 Prompt。
+      scope: conditionSetSchema,
+    })
+    .strict(),
   z.object({ type: z.literal("presentation"), policy: presentationPolicySchema }).strict(),
   z
     .object({
@@ -150,8 +157,8 @@ export const ruleSchema = z
           ? Object.keys(action.policy)
           : action.type === "display"
             ? Object.keys(action).filter((key) => key !== "type")
-            : action.type === "ai_aggregate"
-              ? ["ai_aggregate"]
+            : action.type === "ai_aggregate" || action.type === "ai_dedupe"
+              ? [action.type]
               : []
       // 空的显式动作属于未完成编辑，不能发布为貌似有效的规则。
       if ((action.type === "presentation" || action.type === "display") && fields.length === 0)
@@ -397,6 +404,16 @@ export function compileInstructions(ruleSet: RuleSet, input: RuleInput) {
           order: rule.order,
           ...action,
           updatePrompt: action.updatePrompt || action.createPrompt,
+        })),
+    ),
+    dedupes: matched.flatMap((rule) =>
+      rule.actions
+        .filter((action) => action.type === "ai_dedupe")
+        .map((action) => ({
+          ruleId: rule.id,
+          version: rule.version,
+          order: rule.order,
+          scope: action.scope,
         })),
     ),
   }

@@ -78,7 +78,7 @@ export interface CodexJsonOptions<T> {
   timeoutMs?: number
   signal?: AbortSignal
   command?: string
-  purpose?: "entry" | "story" | "chat" | "preview" | "unknown"
+  purpose?: "entry" | "story" | "dedupe" | "chat" | "preview" | "unknown"
   // 自定义模型只影响这个 CLI 任务；上游密钥只留在本机协议转换器内存中。
   qianwen?: { apiKey: string }
 }
