@@ -71,6 +71,10 @@ describe("ProcessingMigrationPreview", () => {
     expect(container.textContent).toContain("processing.migration.status.supported")
     expect(container.textContent).toContain("processing.migration.status.unsupported")
     expect(container.textContent).toContain("processing.migration.issue.external_side_effect")
+    expect(container.textContent).toContain("processing.migration.new_condition")
+    expect(container.textContent).toContain("processing.migration.new_action")
+    expect(container.textContent).toContain("processing.migration.cloud_readonly")
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
     expect(onImport).not.toHaveBeenCalled()
 
     const importButton = Array.from(container.querySelectorAll("button")).find((button) =>
@@ -78,14 +82,64 @@ describe("ProcessingMigrationPreview", () => {
     )!
     await act(async () => importButton.click())
     expect(onImport).toHaveBeenCalledTimes(1)
-    expect(onImport.mock.calls[0]?.[0]).toHaveLength(1)
-    expect(onImport.mock.calls[0]?.[0][0]).toMatchObject({
-      name: "保留条件",
-      when: { anyOf: [{ allOf: [{ field: "entry_title" }] }] },
+    expect(onImport.mock.calls[0]?.[0]).toMatchObject({
+      entries: [
+        {
+          rule: {
+            name: "保留条件",
+            when: { anyOf: [{ allOf: [{ field: "entry_title" }] }] },
+          },
+        },
+      ],
     })
     expect(importButton.disabled).toBe(true)
     await act(async () => importButton.click())
     expect(onImport).toHaveBeenCalledTimes(1)
+  })
+
+  it("local 默认仅复制，用户勾选后才携带发布后停用目标", async () => {
+    vi.mocked(selectJsonFile).mockResolvedValue(
+      JSON.stringify({
+        version: "1.0",
+        type: "folo-local-actions",
+        rules: [
+          {
+            index: 0,
+            name: "本地规则",
+            condition: [],
+            result: { actions: [{ type: "ai_transform", prompt: "提取事实" }] },
+          },
+        ],
+      }),
+    )
+    const onImport = vi.fn()
+    container = document.createElement("div")
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<ProcessingMigrationPreview onImport={onImport} />))
+    await act(async () => container!.querySelector<HTMLButtonElement>("button")!.click())
+
+    expect(container.textContent).toContain("processing.migration.location.local")
+    const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(checkbox.checked).toBe(false)
+    await act(async () => checkbox.click())
+    const importButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("processing.migration.import"),
+    )!
+    await act(async () => importButton.click())
+
+    expect(onImport.mock.calls[0]?.[0]).toMatchObject({
+      entries: [
+        {
+          localSwitchTarget: {
+            index: 0,
+            name: "本地规则",
+            condition: [],
+            result: { actions: [{ type: "ai_transform", prompt: "提取事实" }] },
+          },
+        },
+      ],
+    })
   })
 
   it("文件解析失败时显示错误且不声称已导入", async () => {

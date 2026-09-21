@@ -1,5 +1,6 @@
-import type { AutomationRule, MigratedActionRule, RuleSet } from "@follow/information-core"
+import type { AutomationRule, RuleSet } from "@follow/information-core"
 import { ruleSetSchema } from "@follow/information-core"
+import { localActionSyncService } from "@follow/store/action/local-store"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -24,6 +25,11 @@ import {
   processingInputClass,
 } from "./processing-condition-editor"
 import { ProcessingMigrationPreview } from "./processing-migration-preview"
+import type { PendingLocalMigrationSwitch } from "./processing-migration-switch"
+import {
+  loadPendingLocalMigrationSwitches,
+  savePendingLocalMigrationSwitches,
+} from "./processing-migration-switch"
 import { ProcessingPresetPicker } from "./processing-preset-picker"
 import { defaultProcessingSchedule, ProcessingRunSettings } from "./processing-run-settings"
 import { ProcessingTags } from "./processing-tags"
@@ -36,6 +42,7 @@ type TransferStatus =
   | "processing.transfer_exported"
   | "processing.transfer_imported"
   | "processing.transfer_invalid"
+type MigrationSwitchStatus = "switched" | "changed" | "failed"
 export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
   const { t } = useTranslation("app")
   const { ask } = useDialog()
@@ -59,6 +66,12 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
   const [releaseBusy, setReleaseBusy] = useState(false)
   const [runBusy, setRunBusy] = useState(false)
   const [transferStatus, setTransferStatus] = useState<TransferStatus | null>(null)
+  const [pendingLocalSwitches, setPendingLocalSwitches] = useState<PendingLocalMigrationSwitch[]>(
+    [],
+  )
+  const [migrationSwitchStatus, setMigrationSwitchStatus] = useState<MigrationSwitchStatus | null>(
+    null,
+  )
   const requestRef = useRef<AbortController | null>(null)
   const draftRef = useRef<RuleSet | null>(null)
   const editorRef = useRef<ProcessingEditor | null>(null)
@@ -158,6 +171,12 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
         if (!keep) {
           draftRef.current = data.config
           setDraft(data.config)
+          const pending = loadPendingLocalMigrationSwitches(data.config.ownerId).filter((target) =>
+            data.config.rules.some((rule) => rule.id === target.migratedRuleId),
+          )
+          savePendingLocalMigrationSwitches(data.config.ownerId, pending)
+          setPendingLocalSwitches(pending)
+          setMigrationSwitchStatus(null)
         }
         setVerified(true)
         void loadRunData()
@@ -194,18 +213,29 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
     setSaved(false)
     setRelease(null)
   }
-  const importMigratedRules = (rules: readonly MigratedActionRule[]) => {
+  const importMigratedRules = (selection: ProcessingMigrationImport) => {
     if (!draft) return
     const firstOrder = Math.max(-1, ...draft.rules.map((rule) => rule.order)) + 1
-    const imported = rules.map((rule, index) => ({
-      ...rule,
-      id: crypto.randomUUID(),
-      ownerId: draft.ownerId,
-      order: firstOrder + index,
-      version: 1,
-    }))
-    // 迁移只追加到当前草稿并标记未保存，旧云端／本地规则和发布记录保持不变。
+    const nextSwitches: PendingLocalMigrationSwitch[] = []
+    const imported = selection.entries.map(({ rule, localSwitchTarget }, index) => {
+      const id = crypto.randomUUID()
+      if (localSwitchTarget) nextSwitches.push({ ...localSwitchTarget, migratedRuleId: id })
+      return {
+        ...rule,
+        id,
+        ownerId: draft.ownerId,
+        order: firstOrder + index,
+        version: 1,
+      }
+    })
+    if (nextSwitches.length > 0) {
+      const next = [...pendingLocalSwitches, ...nextSwitches]
+      savePendingLocalMigrationSwitches(draft.ownerId, next)
+      setPendingLocalSwitches(next)
+    }
+    // 迁移先只追加草稿；勾选的本地旧规则也必须等此草稿成功发布后才停用。
     change({ ...draft, rules: [...draft.rules, ...imported] })
+    setMigrationSwitchStatus(null)
   }
   const editRule = (id: string, next: AutomationRule) => {
     if (draft)
@@ -280,7 +310,48 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
         crypto.randomUUID(),
         controller.signal,
       )
-      if (!controller.signal.aborted) setRelease(result)
+      if (!controller.signal.aborted) {
+        setRelease(result)
+        const releasedOwnerId = draft?.ownerId
+        const currentDraft = draftRef.current
+        if (
+          pendingLocalSwitches.length > 0 &&
+          (!releasedOwnerId ||
+            currentDraft?.ownerId !== releasedOwnerId ||
+            editorRef.current?.config.ownerId !== releasedOwnerId)
+        ) {
+          // 发布等待期间账号或草稿所有者变化时，绝不能停用当前账号的本地规则。
+          setMigrationSwitchStatus("failed")
+          return
+        }
+        const activePending = pendingLocalSwitches.filter((target) =>
+          currentDraft?.rules.some((rule) => rule.id === target.migratedRuleId),
+        )
+        if (releasedOwnerId && activePending.length !== pendingLocalSwitches.length) {
+          savePendingLocalMigrationSwitches(releasedOwnerId, activePending)
+          setPendingLocalSwitches(activePending)
+        }
+        const activeTargets = activePending.map(
+          ({ migratedRuleId: _migratedRuleId, ...target }) => target,
+        )
+        if (activeTargets.length > 0 && releasedOwnerId) {
+          try {
+            const switched = localActionSyncService.disablePublishedMigrationTargets(
+              releasedOwnerId,
+              activeTargets,
+            )
+            setMigrationSwitchStatus(
+              switched.switched ? "switched" : switched.reason === "changed" ? "changed" : "failed",
+            )
+            if (switched.switched) {
+              savePendingLocalMigrationSwitches(releasedOwnerId, [])
+              setPendingLocalSwitches([])
+            }
+          } catch {
+            setMigrationSwitchStatus("failed")
+          }
+        }
+      }
     } catch (cause) {
       if (!controller.signal.aborted) reportError(cause)
     } finally {
@@ -588,6 +659,18 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
                 )}
               </div>
               <ProcessingMigrationPreview onImport={importMigratedRules} />
+              {migrationSwitchStatus && (
+                <p
+                  role="status"
+                  className={
+                    migrationSwitchStatus === "switched"
+                      ? "text-sm text-green"
+                      : "text-sm text-orange"
+                  }
+                >
+                  {t(`processing.migration.switch_status.${migrationSwitchStatus}`)}
+                </p>
+              )}
               <section className="space-y-3 rounded-xl border border-fill-secondary p-4">
                 <h3 className="font-medium">{t("processing.preview")}</h3>
                 <p className="text-sm text-text-secondary">{t("processing.preview_hint")}</p>

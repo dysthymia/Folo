@@ -7,32 +7,34 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 import { ProcessingSetting } from "./processing-setting"
 
-const { clientMock, ProcessingRequestErrorMock } = vi.hoisted(() => {
-  class ProcessingRequestErrorMock extends Error {
-    constructor(
-      public readonly kind: "authorization" | "conflict" | "referenced" | "invalid" | "request",
-    ) {
-      super(kind)
+const { clientMock, disablePublishedMigrationTargetsMock, ProcessingRequestErrorMock } = vi.hoisted(
+  () => {
+    class ProcessingRequestErrorMock extends Error {
+      constructor(
+        public readonly kind: "authorization" | "conflict" | "referenced" | "invalid" | "request",
+      ) {
+        super(kind)
+      }
     }
-  }
 
-  return {
-    clientMock: {
-      load: vi.fn(),
-      save: vi.fn(),
-      preview: vi.fn(),
-      loadSchedule: vi.fn(),
-      loadInputs: vi.fn(),
-      loadRuns: vi.fn(),
-      startRun: vi.fn(),
-      releaseRuleSet: vi.fn(),
-      previewRelease: vi.fn(),
-      loadRelease: vi.fn(),
-    },
-    disablePublishedMigrationTargetsMock: vi.fn(),
-    ProcessingRequestErrorMock,
-  }
-})
+    return {
+      clientMock: {
+        load: vi.fn(),
+        save: vi.fn(),
+        preview: vi.fn(),
+        loadSchedule: vi.fn(),
+        loadInputs: vi.fn(),
+        loadRuns: vi.fn(),
+        startRun: vi.fn(),
+        releaseRuleSet: vi.fn(),
+        previewRelease: vi.fn(),
+        loadRelease: vi.fn(),
+      },
+      disablePublishedMigrationTargetsMock: vi.fn(),
+      ProcessingRequestErrorMock,
+    }
+  },
+)
 
 vi.mock("./processing-client", () => ({
   createProcessingClient: () => clientMock,
@@ -45,6 +47,43 @@ vi.mock("~/lib/auth", () => ({
 
 vi.mock("../ai-chat/local-provider", () => ({
   getOneTimeToken: vi.fn(async () => "one-time-token"),
+}))
+
+vi.mock("@follow/store/action/local-store", () => ({
+  localActionSyncService: {
+    disablePublishedMigrationTargets: disablePublishedMigrationTargetsMock,
+  },
+}))
+
+vi.mock("./processing-migration-preview", () => ({
+  ProcessingMigrationPreview: ({ onImport }: { onImport: (selection: unknown) => void }) =>
+    React.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () =>
+          onImport({
+            entries: [
+              {
+                rule: {
+                  name: "Migrated local rule",
+                  enabled: true,
+                  executionLocation: "processing_service",
+                  when: { all: true },
+                  actions: [{ type: "ai_transform", prompt: "migrated" }],
+                },
+                localSwitchTarget: {
+                  index: 0,
+                  name: "Legacy local rule",
+                  condition: [],
+                  result: { actions: [{ type: "ai_transform", prompt: "migrated" }] },
+                },
+              },
+            ],
+          }),
+      },
+      "test.import_migration",
+    ),
 }))
 
 vi.mock("~/components/ui/modal/stacked/hooks", () => ({
@@ -277,6 +316,34 @@ describe("ProcessingSetting", () => {
     )
     expect(clientMock.save).not.toHaveBeenCalled()
     expect(container!.querySelector("[aria-live='polite']")).not.toBeNull()
+  })
+
+  it("迁移切换只在新草稿发布成功后停用精确匹配的 local 旧规则", async () => {
+    clientMock.loadInputs.mockResolvedValue({
+      inputs: [{ seq: 1, sourceKey: "feed:1", itemId: "entry-1", status: "pending" }],
+    })
+    await render()
+    clientMock.save.mockImplementationOnce(async (config: RuleSet) => ({ revision: 12, config }))
+    await act(async () => findButton(container!, "test.import_migration")?.click())
+    await act(async () => findButton(container!, "processing.save")?.click())
+
+    clientMock.releaseRuleSet.mockRejectedValueOnce(new Error("publish failed"))
+    await act(async () => findButton(container!, "processing.run.release_action")?.click())
+    expect(clientMock.releaseRuleSet).toHaveBeenCalledTimes(1)
+    expect(disablePublishedMigrationTargetsMock).not.toHaveBeenCalled()
+
+    clientMock.releaseRuleSet.mockResolvedValueOnce({ version: 2, targetInputIds: [] })
+    await act(async () => findButton(container!, "processing.run.release_action")?.click())
+    expect(clientMock.releaseRuleSet).toHaveBeenCalledTimes(2)
+    expect(disablePublishedMigrationTargetsMock).toHaveBeenCalledWith("owner-1", [
+      {
+        index: 0,
+        name: "Legacy local rule",
+        condition: [],
+        result: { actions: [{ type: "ai_transform", prompt: "migrated" }] },
+      },
+    ])
+    expect(container!.textContent).toContain("processing.migration.switch_status.switched")
   })
 
   it("刷新后使用当前 revision 的持久化发布记录恢复立即运行资格", async () => {

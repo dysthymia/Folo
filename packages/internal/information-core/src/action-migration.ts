@@ -31,6 +31,7 @@ export type ActionMigrationRow = {
 
 export type ActionMigrationPreview = {
   valid: boolean
+  sourceLocation: "cloud" | "local" | "unknown"
   rows: ActionMigrationRow[]
   supported: MigratedActionRule[]
   fatalIssues: ActionMigrationIssue[]
@@ -243,12 +244,20 @@ const migrateActions = (value: unknown, path: string) => {
   return { actions: issues.length === 0 ? actions : null, issues }
 }
 
-const migrateRule = (value: unknown, index: number): ActionMigrationRow => {
+const migrateRule = (
+  value: unknown,
+  index: number,
+  sourceLocation: ActionMigrationPreview["sourceLocation"],
+): ActionMigrationRow => {
   const rawName = isRecord(value) && typeof value.name === "string" ? value.name : `#${index + 1}`
   const legacyCondition = isRecord(value) ? value.condition : undefined
   const legacyResult = isRecord(value) ? value.result : undefined
   const issues: ActionMigrationIssue[] = []
-  if (!isRecord(value) || !hasOnlyKeys(value, ["name", "condition", "result"])) {
+  const allowedKeys =
+    sourceLocation === "local"
+      ? ["name", "condition", "result", "index"]
+      : ["name", "condition", "result"]
+  if (!isRecord(value) || !hasOnlyKeys(value, allowedKeys)) {
     issues.push(issue(isRecord(value) ? "unknown_field" : "invalid_rule", `rules[${index}]`))
     return { index, name: rawName, status: "unsupported", legacyCondition, legacyResult, issues }
   }
@@ -279,19 +288,30 @@ const migrateRule = (value: unknown, index: number): ActionMigrationRow => {
 
 export const previewActionMigration = (input: unknown): ActionMigrationPreview => {
   const fatalIssues: ActionMigrationIssue[] = []
-  if (!isRecord(input) || !hasOnlyKeys(input, ["version", "exportDate", "rules"])) {
+  const sourceLocation =
+    isRecord(input) && input.type === "folo-local-actions"
+      ? "local"
+      : isRecord(input) && input.type === undefined
+        ? "cloud"
+        : "unknown"
+  if (
+    !isRecord(input) ||
+    sourceLocation === "unknown" ||
+    !hasOnlyKeys(input, ["version", "exportDate", "rules", "type"])
+  ) {
     fatalIssues.push(issue("invalid_export", "export"))
-    return { valid: false, rows: [], supported: [], fatalIssues }
+    return { valid: false, sourceLocation, rows: [], supported: [], fatalIssues }
   }
   if (input.version !== "1.0" || !Array.isArray(input.rules)) {
     fatalIssues.push(issue("invalid_export", "export"))
-    return { valid: false, rows: [], supported: [], fatalIssues }
+    return { valid: false, sourceLocation, rows: [], supported: [], fatalIssues }
   }
   if (input.exportDate !== undefined && typeof input.exportDate !== "string")
     fatalIssues.push(issue("invalid_export", "export.exportDate"))
-  const rows = input.rules.map(migrateRule)
+  const rows = input.rules.map((rule, index) => migrateRule(rule, index, sourceLocation))
   return {
     valid: fatalIssues.length === 0,
+    sourceLocation,
     rows,
     supported: rows.flatMap((row) => (row.rule ? [row.rule] : [])),
     fatalIssues,

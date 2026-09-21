@@ -18,6 +18,13 @@ interface LocalActionStore {
   revision: number
 }
 
+export type LocalActionMigrationTarget = {
+  index: number
+  name: string
+  condition: unknown
+  result: unknown
+}
+
 const STORAGE_PREFIX = "follow:local-actions:v1"
 
 const getStorageKey = (ownerKey: string) => `${STORAGE_PREFIX}:${ownerKey}`
@@ -353,5 +360,41 @@ export const localActionSyncService = {
   },
   saveRules: async () => {
     localActionActions.saveRules()
+  },
+  disablePublishedMigrationTargets: (
+    expectedOwnerKey: string,
+    targets: readonly LocalActionMigrationTarget[],
+  ) => {
+    const state = useLocalActionStore.getState()
+    if (
+      !state.isHydrated ||
+      !state.ownerKey ||
+      state.ownerKey === "anonymous" ||
+      state.ownerKey !== expectedOwnerKey
+    )
+      return { switched: false as const, reason: "owner" as const }
+    const matches = targets.every((target) => {
+      const rule = state.rules[target.index]
+      return (
+        rule?.name === target.name &&
+        JSON.stringify(rule.condition) === JSON.stringify(target.condition) &&
+        JSON.stringify(rule.result) === JSON.stringify(target.result)
+      )
+    })
+    if (!matches) return { switched: false as const, reason: "changed" as const }
+
+    const nextRules = state.rules.map((rule, index) =>
+      targets.some((target) => target.index === index)
+        ? { ...rule, result: { ...rule.result, disabled: true } }
+        : rule,
+    )
+    // 先写持久化副本，再更新运行态；存储失败时旧规则仍保持启用。
+    writeRulesToStorage(state.ownerKey || "anonymous", nextRules)
+    set((draft) => {
+      draft.rules = normalizeRules(nextRules)
+      draft.isDirty = false
+      bumpLocalActionRevision(draft)
+    })
+    return { switched: true as const, count: targets.length }
   },
 }

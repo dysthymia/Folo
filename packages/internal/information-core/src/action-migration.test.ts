@@ -19,12 +19,28 @@ describe("previewActionMigration", () => {
     )
 
     expect(result.valid).toBe(true)
+    expect(result.sourceLocation).toBe("cloud")
     expect(result.supported).toHaveLength(1)
     expect(result.supported[0]).toMatchObject({
       when: { all: true },
       actions: [{ type: "ai_transform", prompt: "保留事实" }],
       executionLocation: "processing_service",
     })
+  })
+
+  it("识别真实 local 导出并接受其持久化 index 元数据", () => {
+    const result = previewActionMigration({
+      ...exportData({
+        index: 0,
+        name: "Local AI",
+        condition: [],
+        result: { actions: [{ type: "ai_transform", prompt: "保留事实" }] },
+      }),
+      type: "folo-local-actions",
+    })
+
+    expect(result.sourceLocation).toBe("local")
+    expect(result.supported).toHaveLength(1)
   })
 
   it("保留旧条件语义并转换旧表单的数值和集合值", () => {
