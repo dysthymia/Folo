@@ -29,7 +29,8 @@ export const getOneTimeToken = async () => {
 
 export const requestLocalAISettings = async (
   generate = getOneTimeToken,
-  fetcher = fetch,
+  // 仅依赖 HTTP 调用签名，避免把宿主 fetch 的额外静态属性要求传给测试注入。
+  fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch,
 ): Promise<LocalAISettings> => {
   const token = await generate()
   const response = await fetcher("/information/api/settings", {
