@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import type { SourceEntry } from "./folo"
 import { processingApi } from "./processing-api"
+import type { ProcessingEntryRole } from "./processing-reading-store"
 import { Store } from "./store"
 import { sourceSpanFragmentId } from "./story-store"
 
@@ -74,7 +75,213 @@ function publishRelease(store: Store) {
   store.automation.publish(0, { mode: "future" }, randomUUID())
 }
 
+function publishDecision(
+  store: Store,
+  input: SourceEntry,
+  options: {
+    status?: "keep" | "hide" | "needs_context"
+    standalone?: "auto" | "always" | "never"
+    reason?: string
+  } = {},
+) {
+  store.saveEntry(input)
+  const target = store.automation.assign(store.automation.inputs().at(-1)!.seq)
+  const base = decision(input, target.seq)
+  store.automation.complete(target, {
+    ...base,
+    status: options.status ?? base.status,
+    reason: options.reason ?? base.reason,
+    policy: { ...base.policy, standalone: options.standalone ?? base.policy.standalone },
+  })
+  return target
+}
+
+function createAggregateStory(
+  store: Store,
+  members: Array<{ seq: number; itemId: string; contentVersion: string }>,
+  title: string,
+) {
+  const spans = members.map((target) => ({
+    id: `span-${target.seq}`,
+    inputSeq: target.seq,
+    sourceItemId: target.itemId,
+    contentVersion: target.contentVersion,
+    fragmentId: sourceSpanFragmentId(
+      target.itemId,
+      target.contentVersion,
+      `来源 ${target.itemId} 的可核查事实。`,
+    ),
+    quote: `来源 ${target.itemId} 的可核查事实。`,
+    sourceRole: "reporting",
+  }))
+  const storyId = randomUUID()
+  store.stories.create(
+    {
+      title,
+      body: `${title}的综述正文`,
+      aggregationRuleId: "rule",
+      aggregationScopeVersion: "scope",
+      appliedRuleSetVersion: 1,
+      instructionFingerprint: "instruction",
+      members: members.map((target) => ({
+        inputSeq: target.seq,
+        decisionId: store.processingState
+          .published()
+          .find((value) => value.input.seq === target.seq)!.decisionId,
+      })),
+      sourceSpans: spans,
+      citations: spans.map((span) => ({
+        id: `citation-${span.inputSeq}`,
+        sourceSpanId: span.id,
+        sentenceId: `sentence-${span.inputSeq}`,
+      })),
+      sentences: spans.map((span) => ({
+        id: `sentence-${span.inputSeq}`,
+        text: `事实 ${span.inputSeq}`,
+        citationIds: [`citation-${span.inputSeq}`],
+      })),
+      facts: [
+        {
+          id: "fact",
+          kind: "fact",
+          text: "来源支持的事实",
+          citationIds: spans.map((span) => `citation-${span.inputSeq}`),
+          dependsOnFactIds: [],
+        },
+      ],
+    },
+    storyId,
+  )
+  return storyId
+}
+
+function rolesOf(store: Store) {
+  return (processingApi(store, "GET", "/processing/roles", {}) as { roles: ProcessingEntryRole[] })
+    .roles
+}
+
 afterEach(() => stores.splice(0).forEach((store) => store.close()))
+
+describe("时间线角色投影", () => {
+  it("隐藏决定落成 hidden，always 例外与未处理输入都不产生角色", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishDecision(store, entry("kept", "2026-01-01T00:00:00.000Z"))
+    const hidden = publishDecision(store, entry("hidden", "2026-01-02T00:00:00.000Z"), {
+      status: "hide",
+      reason: "娱乐内容",
+    })
+    const pinned = publishDecision(store, entry("pinned", "2026-01-03T00:00:00.000Z"), {
+      status: "hide",
+      standalone: "always",
+    })
+    publishDecision(store, entry("never", "2026-01-04T00:00:00.000Z"), { standalone: "never" })
+    store.saveEntry(entry("pending", "2026-01-05T00:00:00.000Z"))
+    expect(pinned.seq).toBeGreaterThan(hidden.seq)
+
+    expect(rolesOf(store)).toEqual([
+      {
+        itemId: "hidden",
+        inputSeq: hidden.seq,
+        kind: "hidden",
+        reason: "娱乐内容",
+        relatedEntryIds: [],
+        storyId: null,
+        storyTitle: null,
+      },
+      {
+        itemId: "never",
+        inputSeq: 4,
+        kind: "hidden",
+        reason: "测试决定",
+        relatedEntryIds: [],
+        storyId: null,
+        storyTitle: null,
+      },
+    ])
+  })
+
+  it("恢复覆盖让隐藏条目回到时间线，手动隐藏无需重新处理", () => {
+    const store = fixture()
+    publishRelease(store)
+    const restored = publishDecision(store, entry("restored", "2026-01-01T00:00:00.000Z"), {
+      status: "hide",
+    })
+    const forced = publishDecision(store, entry("forced", "2026-01-02T00:00:00.000Z"))
+    store.processingState.setOverride(restored.seq, "restore", 0)
+    store.processingState.setOverride(forced.seq, "hide", 0)
+
+    expect(rolesOf(store)).toEqual([expect.objectContaining({ itemId: "forced", kind: "hidden" })])
+  })
+
+  it("综述按最新成员代表整篇，其余成员与同内容转载都并入它", () => {
+    const store = fixture()
+    const otherSource = { ...source, key: "feed/f2", id: "f2", title: "其他来源" }
+    store.replaceSources([source, otherSource])
+    publishRelease(store)
+    const post = "1900000000000000001"
+    const first = publishDecision(store, {
+      ...entry(`x:${post}`, "2026-01-01T00:00:00.000Z"),
+      url: `https://x.com/u/status/${post}`,
+    })
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const repost = publishDecision(store, {
+      ...entry(`x:${post}`, "2026-01-03T00:00:00.000Z"),
+      sourceKey: otherSource.key,
+      url: `https://x.com/u/status/${post}`,
+    })
+    const storyId = createAggregateStory(store, [first, second], "同事件综述")
+
+    expect(rolesOf(store)).toEqual([
+      {
+        itemId: `x:${post}`,
+        inputSeq: first.seq,
+        kind: "merged",
+        reason: "同事件综述",
+        relatedEntryIds: ["two"],
+        storyId,
+        storyTitle: "同事件综述",
+      },
+      {
+        itemId: "two",
+        inputSeq: second.seq,
+        kind: "story",
+        reason: "同事件综述",
+        relatedEntryIds: [`x:${post}`],
+        storyId,
+        storyTitle: "同事件综述",
+      },
+      {
+        itemId: `x:${post}`,
+        inputSeq: repost.seq,
+        kind: "merged",
+        reason: "同事件综述",
+        relatedEntryIds: ["two"],
+        storyId,
+        storyTitle: "同事件综述",
+      },
+    ])
+  })
+
+  it("成员全部被隐藏时不再产生综述角色", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const storyId = createAggregateStory(store, [first, second], "同事件综述")
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "one", kind: "merged", storyId }),
+      expect.objectContaining({ itemId: "two", kind: "story", storyId }),
+    ])
+
+    store.processingState.setOverride(first.seq, "hide", 0)
+    store.processingState.setOverride(second.seq, "hide", 0)
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "one", kind: "hidden", storyId: null }),
+      expect.objectContaining({ itemId: "two", kind: "hidden", storyId: null }),
+    ])
+  })
+})
 
 describe("稳定阅读快照", () => {
   it("从固定成员汇总独立项、隐藏、待处理和失败，并单列当前来源状态", () => {

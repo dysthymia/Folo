@@ -7,6 +7,7 @@ import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingFeedbackApi } from "./processing-feedback-api"
 import type {
+  ProcessingEntryRole,
   ReadingSnapshot,
   ReadingSnapshotCounts,
   ReadingSnapshotPage,
@@ -74,6 +75,7 @@ export type ProcessingEntryListItem = {
   metadata: ProcessingEntryMetadataView
 }
 export type ProcessingEntryListResponse = { entries: ProcessingEntryListItem[] }
+export type ProcessingEntryRolesResponse = { roles: ProcessingEntryRole[] }
 export type ProcessingEntryDetailResponse = {
   // 详情页可读取原文和完整决策，供证据追溯；列表只能读取摘要级决策字段。
   entry: Omit<ProcessingEntryListItem, "decision"> & {
@@ -277,6 +279,9 @@ export function processingApi(
   const researchPackPath = /^\/research-pack\/([^/]+)$/.exec(path)
   if (researchPackPath && method === "GET")
     return store.reading.researchPack(researchPackPath[1]!) satisfies ResearchPackResponse
+  if (path === "/processing/roles" && method === "GET")
+    // 时间线角色投影不受计划范围限制：时间线覆盖全部订阅，只取当前 input。
+    return { roles: store.reading.roles() } satisfies ProcessingEntryRolesResponse
   if (path === "/processing/entries" && method === "GET")
     return { entries: entryView(store) } satisfies ProcessingEntryListResponse
 

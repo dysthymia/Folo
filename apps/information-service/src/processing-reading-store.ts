@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
+import type { PresentationPolicy } from "@follow/information-core"
+
 import type { AutomationStore } from "./automation-store"
 import { contentIdentity } from "./content-identity"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
@@ -89,6 +91,27 @@ export type ReadingSnapshotPage = {
   limit: number
   total: number
   items: ReadingSnapshotItem[]
+}
+/**
+ * 时间线角色投影。
+ *
+ * 阅读快照只覆盖计划的 `sourceKeys + historySince`，而时间线要覆盖全部订阅，
+ * 因此角色单独投影一次：判定口径与快照一致（同一个 `entryHidden`），但范围取全部
+ * current input。`hidden` 是显式隐藏，`story` 代表整篇综述、`merged` 表示内容已在
+ * 别处呈现（综述的其他成员，或与成员同内容的转载）。
+ */
+export type ProcessingEntryRoleKind = "hidden" | "story" | "merged"
+export type ProcessingEntryRole = {
+  /** Folo 条目 id，渲染层用它作为角色层的键。 */
+  itemId: string
+  inputSeq: number
+  kind: ProcessingEntryRoleKind
+  /** 隐藏原因取决定自身的 reason；综述角色取综述标题。 */
+  reason: string | null
+  /** `story` 指向被并入的成员，`merged` 指向代表整篇综述的那一条。 */
+  relatedEntryIds: string[]
+  storyId: string | null
+  storyTitle: string | null
 }
 export type ResearchPackReference = {
   inputSeq: number
@@ -251,12 +274,7 @@ export class ProcessingReadingStore {
     for (const input of inputs) {
       const published = publishedBySeq.get(input.seq)
       const override = overrides.get(input.seq)
-      const hidden =
-        override?.mode === "hide" ||
-        (override?.mode !== "restore" &&
-          published?.decision.policy.standalone !== "always" &&
-          (published?.decision.policy.standalone === "never" ||
-            published?.decision.status === "hide"))
+      const hidden = this.entryHidden(override, published?.decision)
       const identity = contentIdentity(input.body)
       const duplicate = !hidden && standaloneContent.has(identity)
       if (!hidden) standaloneContent.add(identity)
@@ -476,10 +494,136 @@ export class ProcessingReadingStore {
     }
   }
 
+  /**
+   * 时间线角色投影；与阅读快照无关，只共用隐藏判定。
+   * 未拿到发布的 input 不产生角色，时间线在服务端给出结论前保持原样。
+   */
+  roles(): ProcessingEntryRole[] {
+    if (!this.ownerId()) return []
+
+    const inputs = this.automation.inputs()
+    const inputBySeq = new Map(inputs.map((input) => [input.seq, input]))
+    const publishedBySeq = new Map(
+      this.processingState.published().map((value) => [value.input.seq, value]),
+    )
+    const overrides = new Map(
+      this.processingState.overrides().map((override) => [override.inputSeq, override]),
+    )
+    const hiddenBySeq = new Map(
+      inputs.map((input) => [
+        input.seq,
+        this.entryHidden(overrides.get(input.seq), publishedBySeq.get(input.seq)?.decision),
+      ]),
+    )
+    const roles = new Map<number, ProcessingEntryRole>()
+    // 显式隐藏优先：它是用户能看见、也能用覆盖改回来的结果。
+    for (const input of inputs) {
+      const published = publishedBySeq.get(input.seq)
+      if (!published || !hiddenBySeq.get(input.seq)) continue
+      roles.set(input.seq, {
+        itemId: input.itemId,
+        inputSeq: input.seq,
+        kind: "hidden",
+        reason: published.decision.reason,
+        relatedEntryIds: [],
+        storyId: null,
+        storyTitle: null,
+      })
+    }
+
+    // 每条可用 Story：成员按输入序号排序，最新的一条代表整篇综述。
+    type RoleStory = { storyId: string; title: string; memberSeqs: number[] }
+    const stories: RoleStory[] = this.currentStories(publishedBySeq)
+      .map(({ story, revision }) => ({
+        storyId: story.id,
+        title: revision.title,
+        memberSeqs: revision.members
+          .map((member) => member.inputSeq)
+          .filter((seq) => inputBySeq.has(seq) && !hiddenBySeq.get(seq))
+          .sort((left, right) => left - right),
+      }))
+      .filter((story) => story.memberSeqs.length > 0)
+    const storyByRepresentative = new Map<number, RoleStory>()
+    const mergedInto = new Map<number, number>()
+    for (const story of stories) {
+      const representativeSeq = story.memberSeqs.at(-1)!
+      storyByRepresentative.set(representativeSeq, story)
+      for (const seq of story.memberSeqs) {
+        if (seq !== representativeSeq) mergedInto.set(seq, representativeSeq)
+      }
+    }
+
+    // 与成员同内容的转载不再单独占位；`always` 例外优先级更高。
+    const storyByContent = new Map<string, number>()
+    for (const story of stories) {
+      const representativeSeq = story.memberSeqs.at(-1)!
+      for (const seq of story.memberSeqs) {
+        const input = inputBySeq.get(seq)
+        if (input) storyByContent.set(contentIdentity(input.body), representativeSeq)
+      }
+    }
+    for (const input of inputs) {
+      const published = publishedBySeq.get(input.seq)
+      if (!published || published.decision.policy.standalone === "always") continue
+      if (roles.has(input.seq) || mergedInto.has(input.seq)) continue
+      const representativeSeq = storyByContent.get(contentIdentity(input.body))
+      if (representativeSeq === undefined || representativeSeq === input.seq) continue
+      mergedInto.set(input.seq, representativeSeq)
+    }
+
+    const mergedEntryIds = new Map<number, string[]>()
+    for (const [seq, representativeSeq] of mergedInto) {
+      const story = storyByRepresentative.get(representativeSeq)!
+      roles.set(seq, {
+        itemId: inputBySeq.get(seq)!.itemId,
+        inputSeq: seq,
+        kind: "merged",
+        reason: story.title,
+        relatedEntryIds: [inputBySeq.get(representativeSeq)!.itemId],
+        storyId: story.storyId,
+        storyTitle: story.title,
+      })
+      mergedEntryIds.set(representativeSeq, [
+        ...(mergedEntryIds.get(representativeSeq) ?? []),
+        inputBySeq.get(seq)!.itemId,
+      ])
+    }
+    for (const [representativeSeq, story] of storyByRepresentative) {
+      roles.set(representativeSeq, {
+        itemId: inputBySeq.get(representativeSeq)!.itemId,
+        inputSeq: representativeSeq,
+        kind: "story",
+        reason: story.title,
+        // 同一原帖可能来自多个来源，条目级去重后再交给角标。
+        relatedEntryIds: [...new Set(mergedEntryIds.get(representativeSeq) ?? [])],
+        storyId: story.storyId,
+        storyTitle: story.title,
+      })
+    }
+
+    return [...roles.values()].sort((left, right) => left.inputSeq - right.inputSeq)
+  }
+
   private requireOwner(): string {
     const ownerId = this.ownerId()
     if (!ownerId) throw new ProcessingReadingError("owner_required")
     return ownerId
+  }
+
+  /**
+   * 条目级隐藏判定。快照成员与时间线角色共用，避免两处口径漂移。
+   * `always` 是显式例外，优先级高于决定与覆盖；`restore` 只豁免隐藏。
+   */
+  private entryHidden(
+    override: { mode: string } | undefined,
+    decision: { status: string; policy: PresentationPolicy } | undefined,
+  ): boolean {
+    return (
+      override?.mode === "hide" ||
+      (override?.mode !== "restore" &&
+        decision?.policy.standalone !== "always" &&
+        (decision?.policy.standalone === "never" || decision?.status === "hide"))
+    )
   }
 
   private snapshotById(snapshotId: string): ReadingSnapshot {
