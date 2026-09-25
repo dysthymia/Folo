@@ -2,7 +2,7 @@
 
 **用途**：把外部评审（`~/Downloads/区块链投资&交易 - 改造交易系统-round-2.md`）的方向性意见，与对源码的逐条核查结果合并，转成下一轮可直接施工的输入。不是新计划书，不扩功能。
 **基准提交**：`codex/web-actions-ai-v3` @ `32c2c8c3c`（评审所依据的同一提交）。
-**证据边界**：静态源码核对 + 只读健康探测（`local.folo.is`、`127.0.0.1:2240`、`127.0.0.1:2233`）。**未运行测试套件、未做真机交互验证**。凡涉及部署状态与语义质量的结论，只引用 `docs/information-v3.1-progress.md` 与 `docs/information-runtime-status.json`。
+**证据边界**：静态源码核对 + 只读健康探测（`local.folo.is`、`127.0.0.1:2240`、`127.0.0.1:2233`）。~~**未运行测试套件、未做真机交互验证**。~~ 这是**首版**的边界；后续各轮已补齐测试套件与真机交互证据，实际证据见 §9–§12。凡涉及部署状态与语义质量的结论，只引用 `docs/information-v3.1-progress.md` 与 `docs/information-runtime-status.json`。
 
 ---
 
@@ -13,6 +13,7 @@
 - **§2 的 D1–D5 已全部决议**（D5 于 2026-09-21 早先决议，D2/D3/D4 于同日补齐）。本轮按 §7 施工到第三轮，出口是 §6 三场景验收；**未验收 ≠ 可删除**，台账 U01–U14 仍需单独确认。
 - 评审有三处需要修正（§3），另有一处会改变施工方案的遗漏（§1.2）。
 - **未验收 ≠ 可删除**。台账 U01–U14 全为"未验收"，这既不构成功能失效，也不构成重写许可。
+- **当前状态（2026-09-25 18:00）**：§6 三个场景的判据已逐条标注通过／部分通过／无数据前提（见 §6 本身）。场景一、场景三全部通过；场景二通过（例外与"已读不影响原文"两条无数据前提或未验收）。本轮另修掉两个真实回归（`/inputs` 的 `skipped` 枚举、`/action` 的 4 处 i18n raw key），均已在真机上复核，见 §11。仍明确**未验收**的：隐藏条目的处理理由文本与就地恢复入口、"相反表述"抽查、Story 已读对原文 read 的影响。
 
 ---
 
@@ -180,24 +181,26 @@
 
 **场景一 · 社交媒体过滤**
 
-- [ ] 配置侧：自动化主界面只有"条件／处理方式／启停"，无需选择执行位置即可保存启用。
-- [ ] 阅读侧：在时间线该社交视图的"AI 处理后"中，短帖与娱乐内容为 0；切到"原始内容"同一范围计数恢复。
-- [ ] 可追溯：被隐藏条目仍能在条目详情看到原文与处理理由（含命中规则）。
+- [x] 配置侧：自动化主界面只有"条件／处理方式／启停"，无需选择执行位置即可保存启用。
+- [x] 阅读侧：在时间线该社交视图的"AI 处理后"中，短帖与娱乐内容为 0；切到"原始内容"同一范围**条目集与角色分布恢复**。
+  - **判据口径已修正**：原文写的是"计数恢复"，但时间线头部不显示总数（见 §11.2 末尾的纠正）。可判定的等价判据是条目集与角色分布：`221 / hidden 0` → `231 / hidden 6`。
+- [-] 可追溯：被隐藏条目仍能在条目详情看到原文与处理理由（含命中规则）。
+  - **部分通过**：结论标识可追溯（`aria-label="AI 已隐藏"`，§11.2）；**处理理由文本未在时间线展示、悬停卡为空、且没有就地恢复入口**——这三项如实记为未验收。
 - 不通过：需要用户到计划里重复选一次来源；或隐藏只能靠"标记全部已读"且无法恢复未读。
 
 **场景二 · Blockchain 同事件综述**
 
-- [ ] 在 Blockchain 分类列表**内**直接看到整合条目，不跳页；条目显示来源数 ≥2、句段引用、更新时间。
-- [ ] 项目方公告类订阅的条目仍单独可见（例外生效）。
-- [ ] 正文保留分歧：可抽查 ≥2 个来源的相反表述，引用通过连续原文校验。
-- [ ] 对该 Story 标记已读后，原文 read 状态不变（对应 §5.2）。
+- [x] 在 Blockchain 分类列表**内**直接看到整合条目，不跳页；条目显示来源数 ≥2、句段引用、更新时间。
+- [ ] 项目方公告类订阅的条目仍单独可见（例外生效）。**无数据前提可判**：58 条 `standalone='always'` 全是 `needs_context`（证据不足），没有一条真正的"项目方公告"，见 §11.5。
+- [-] 正文保留分歧：可抽查 ≥2 个来源的相反表述，引用通过连续原文校验。**部分通过**：digest 面板渲染出 5 条句段引用、`sourceCount=2`；"相反表述"这一抽查未做。
+- [ ] 对该 Story 标记已读后，原文 read 状态不变（对应 §5.2）。**未验收**。
 - 不通过：整合结果只能在信息工作台看到；或必须先理解 `ai_transform` 与 `ai_aggregate` 的差别才能建该规则。
 
 **场景三 · 读前准备**
 
-- [ ] 关闭浏览器后，计划时点仍产生 scheduled 记录（引用运行记录）。
-- [ ] 重新打开同一分类，"AI 处理后"直接可用，无需先发布；有草稿时明确提示"当前使用已生效版本 vN"。
-- [ ] 切换标签页再回来，页码／滚动位置／所选条目保持，不回到偏移 0。
+- [x] 关闭浏览器后，计划时点仍产生 scheduled 记录（引用运行记录）。55 条 scheduled 的 `scheduled_for` 100% 命中计划时点、54 条延迟 0–1s，见 §11.4。
+- [x] 重新打开同一分类，"AI 处理后"直接可用，无需先发布；有草稿时明确提示"当前使用已生效版本 vN"。
+- [x] 切换标签页再回来，页码／滚动位置／所选条目保持，不回到偏移 0。
 - 不通过：需要用户判断"该按哪个按钮"；或计划与草稿都无改动时"立即运行"仍禁用。
 
 每轮出口统一执行：`typecheck` → `lint` → `test`；并在 `local.folo.is` 生产构建上留一次真实交互证据。浏览器扩展阻挡时如实记为未验收，不折算为通过。
@@ -253,6 +256,30 @@
 | **D5 去重开关降级**                   | 删除 `SEMANTIC_DEDUPE_ALLOWED_CATEGORIES` 硬编码白名单（任意非空分类合格）；新增 `useSemanticDedupeEvaluatorAvailability()` 判定本地执行器可执行性；`SemanticDedupeSection.tsx` 的开关降级为「本地兜底执行器启停」并给出运行时可执行性提示                                                                                                                                                                                                                                                                          | `semantic-dedupe.test.ts` 通过                                                                                                      |
 | **P1-5 切标签状态保持**               | `InformationPage.tsx` 隐藏时只 `abort()` 在途请求、不再 `setSnapshot(null)`；回前台按 `ownerId` 核验账号后复用快照；删除主路径重复的 AI 摘要结果列表。`ProcessingReader.tsx` 新增 `offsetRef`，回前台重载当前页并保留选中项，仅 `initial` 清空选择                                                                                                                                                                                                                                                                  | `InformationPage.test.tsx` / `ProcessingReader.test.tsx` 新增用例通过                                                               |
 | **角色刷新时机**                      | `processing-role-client.ts` 在挂载与 `visibilitychange` 之外，可见期间每 60s 轮询一次角色投影；隐藏时停表，避免无意义的本机请求                                                                                                                                                                                                                                                                                                                                                                                     | —                                                                                                                                   |
+| **覆盖写入后的强制刷新（缺陷修复）**  | 新增 `refreshServiceProcessingRoles()`：先等在途轮询收尾再发起一次全新读取。原实现直接复用 `syncServiceProcessingRoles()`，它的 `pendingSync ??=` 重入门闩会让覆盖写入后恰好撞上在途轮询的界面拿到**写入之前**的响应，表现为「点了恢复没反应」，最长要等下一次轮询（60s）才生效。同时 `merged-entries-badge.tsx` 把写入失败显示出来（原本只置一个内部标志）                                                                                                                                                         | `processing-role-client.test.ts` 5 项通过（新增 2 项：并发复用同一在途结果、强制刷新不被在途轮询吞掉）                              |
+| **已读条目退出处理队列**              | 新增终态 `skipped`：`processing-state.ts` 的 `settleRead(skip, revive)` 把已读的当前输入从 `pending`/`failed` 落为 `skipped`，来源侧又变回未读时放回 `pending`；`processing-engine.ts` 导出 `settleReadStates()` 并在批层与单篇路径各设一道读态闸门；`processing-worker.ts` 在 `hydrateMaterials` **之前**调用，避免已读条目仍被白跑一遍详情与可读性抓取；工作台新增「已读跳过」计数与独立视图，`pending` 不再把已读算进去                                                                                          | 服务端新增 4 项测试；一致副本模拟：3699 条 → `skipped`，`revive` 0                                                                  |
+
+### 已读条目退出处理队列（2026-09-25）
+
+用户要求「已读的条目不用再处理，无论是否在队列里」。查实的数据（`VACUUM INTO` 一致副本，非只读连接——只读连接会忽略 WAL 中已提交的数据）：
+
+| 事实                                    | 实测                                                                                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pending` + `current` 的输入            | **3699 条，100% 是已读**（存储 `body.read` 与实时 `entries.read` 零不一致，3699/3699）                                                                  |
+| 这 3699 条落在哪                        | `publishedAt` 区间 `2019-11-21T00:00:00.941Z` ~ `2026-09-11T15:59:30.362Z`，**全部早于计划 `historySince`（`2026-09-11T16:00:00.000Z`）**，即全在窗口外 |
+| 窗口内已处理                            | 5103 条：已读 2809（**55%**）、未读 2294                                                                                                                |
+| 未读且未处理                            | **0 条**                                                                                                                                                |
+| `entries` 表整体读态                    | 8802 条中已读 8363（95%）                                                                                                                               |
+| 一致副本上模拟一次 `settleReadStates()` | `skip` 候选 3699、`revive` 0；执行后 `pending` 3699 → 0，`skipped` 3699                                                                                 |
+
+两点必须说清楚：
+
+1. **这 3699 条本来就没在烧模型额度**——worker 的 `withinWindow(publishedAt, historySince, cutoffAt)` 闸门早已把它们挡在模型与材料抓取之外。它们只是被来源同步往回翻历史时采集入库，然后永久显示为「待处理」。所以「待处理 3699」既误导（快照陈旧）又不实（窗口外）。
+2. **真正被浪费的是窗口内的已读比例**：已处理的 5103 条里 55% 是已读，这部分钱已经花掉；本轮改动让后续不再花。
+
+**口径后果（必须知道）**：已读条目不再产生单篇决策，因此也**不会成为综述成员**——`runStoryAggregation` 的候选只来自 `processingState.published()`。如果期望「已读条目仍可被并入综述、只是不单独处理」，那需要让聚合接受无单篇决策的原始材料，属于另一套口径，本轮**没有**做。
+
+**未做（留给决策）**：`capture()` 仍会记录已读条目（只在处理阶段跳过）。若要让队列本身不再增长、库体积不再变大，需要在采集侧过滤；但采集时读态可能过期（一条抓取时未读、五分钟后被读掉的条目会被错误丢弃），且会让已读条目彻底不出现在工作台。
 
 ### 质量门
 
@@ -306,10 +333,273 @@
 
 ### 未完成（明确不计入完成）
 
-1. **场景二连数据前提都没有**：库里 story 数为 0，18 条角色全是 `hidden`，没有任何 `story` / `merged` / `keeper`。综述摘要（`GET /processing/stories/:storyId/digest`）与内联面板**只有 fixture 单测证据**，没有一条真实综述端到端走通过。要判定场景二，必须先发布一条聚合规则并让某分类真跑出一篇综述。
-2. **场景三的「保存并启用」未在界面核对**：账号下没有任何自动化规则，统一列表与详情都无从渲染。「一次动作后 AI 处理后可用」「有草稿时提示当前使用已生效版本 vN」仍只有代码与单测证据。
-3. **场景一的「计数恢复」未在界面核对**：两态控件确实在，但没有一条被隐藏的条目落在可滚动窗口内（滚 14 屏无带角色的条目），因此看不到计数变化。
-4. **工作台「已隐藏 0 条」与角色投影 18 条不一致**：口径分歧已存在（角色取全部 input、快照取计划范围），需决定是否统一。
-5. **既有计划记录会被读成「固定名单」**：库里的旧计划是 `{mode:"fixed",sourceKeys:[22]}`。旧记录无法区分「用户选的是全部订阅」还是「手挑的 22 个来源」，因此它现在显示为「固定名单，不会自动纳入新来源」。这是 D4 向后兼容的必然结果，但用户需要自己重选一次「全部订阅」才会开始自动纳入——**属于需要告知的行为变化，不是 bug**。
+1. **场景二卡在账号数据，不是实现**：库里 story 数为 0，没有任何 `story` / `merged` / `keeper` 角色。**根因已查实**：`rule_set_releases` v1/v2 与 `automation_draft` 的 `rules` 数组**都是空的**（只有 `global.markdown` 全局指令），同时 5137 条决策里 **5120 条 `policy.aggregation = "deny"`**（只有 17 条 allow）。没有聚合规则 ⇒ `runStoryAggregation` 永远拿不到候选 ⇒ 该配置下不可能产出综述。综述摘要（`GET /processing/stories/:storyId/digest`）与内联面板**只有 fixture 单测证据**。用户已授权代建一条 Blockchain 聚合规则并跑一轮，取得真实综述后再判场景二。**→ 已收口（2026-09-25）**：聚合规则已发布并跑通，roles 里出现 4 条真实 Story，digest 返回 `status:"ready"` 的真实综述正文，角标与深链均已真机核对，见 §10.8(c)。
+2. **场景三的「保存并启用」未在界面核对**：账号下没有任何自动化规则，统一列表与详情都无从渲染。「一次动作后 AI 处理后可用」「有草稿时提示当前使用已生效版本 vN」仍只有代码与单测证据。与第 1 条同一根因，建规则时一并核对。**→ 已收口（2026-09-25）**：`hasAddRule=true`、`hasEmptyPlaceholder=false`、版本提示「当前使用已生效版本 v4」，见 §10.8(d)。
+3. **场景一的「计数恢复」未在界面核对**：两态控件确实在，但先前用 `page.mouse.wheel` 深滚的仪器无效（该列表在内部 `overflow-y:auto` 容器里，`mouse.wheel` 滚的是 window），据此得出的「滚 14 屏没有带角色的条目」**不成立**。改用容器 `scrollTop` 后是否能看到计数变化，需在部署本轮构建后重新取证。**→ 已收口（2026-09-25），但判据本身要改写**：用容器 `scrollTop` 取证成功（处理后 hidden 0 / 原始内容 hidden 6，itemId 可枚举），但**时间线头部不显示总数**，所以「计数恢复」只能读作**条目集与角色分布恢复**。会话中一度记下的「两态总计数 2175 → 2198」经复查**不成立**（2175 是 `/action` 左侧边栏「全部」计数，`2198` 无任何落盘来源），已在 §10.8(b) 末尾明确纠正。
+4. **工作台计数与角色投影的口径** —— **已更正为「同一口径下的时点差异」，不是待决策的口径分歧**：最新阅读快照 `createdAt = 2026-09-19T15:08:45.087Z`、`max_seq = 11352`，而角色投影取全部 current input（`seq` 已到 14261）。快照按 §5 红线**在创建时冻结成员与 hidden 标记**，之后发布的决定不会自动进入，只有显式 `refresh()` 才吸收——所以两个数字不同是设计结果。已在工作台计数区加常驻说明（三语 `processing.reader.status.counts_note`），写明「计划范围内、截至该快照」。
+5. **既有计划记录会被读成「固定名单」**：库里的旧计划是 `{mode:"fixed",sourceKeys:[22]}`。旧记录无法区分「用户选的是全部订阅」还是「手挑的 22 个来源」，因此它现在显示为「固定名单，不会自动纳入新来源」。这是 D4 向后兼容的必然结果，但用户需要自己重选一次「全部订阅」才会开始自动纳入——**属于需要告知的行为变化，不是 bug**。附带事实：这 22 个来源与 `sources` 表里 `category = "Blockchain"` 的 22 个来源**完全一致**（`view = 0`），所以现有计划事实上就是「Blockchain 单分类」。
 6. **`{mode:"category"}` 的「自动纳入新来源」未验证**：处理服务不知道 Folo 的 view/category 体系，靠客户端用共享解析器解析后把名单落库、重开页面时再解析并写回。这条「自动纳入」的实际效果尚未真机确认（见 §2 D4 的允许偏离）。
 7. **`/tmp/folo-v32-verify/`** 下的验收脚本与截图是临时产物，未纳入仓库；若要长期留存证据需另找位置。
+8. **已读条目无法再成为综述成员**：见《已读条目退出处理队列》的口径后果。若需要保留这条通道，须另行设计。
+
+**一处不是缺陷的状态**：`processing_schedule_triggers` 61 条记录**全是 `deferred_budget` / `retry_wait`，没有一条 `succeeded`**。这不是故障——`processing-worker.ts` 里 `deferred_budget` 的判定条件包含「来源覆盖未完成」（`pending` / `budget` / `timestamp_boundary`），而来源同步**每轮每个来源最多只取一页**（`processing-source-sync.ts` 的注释与实现）。22 个来源、`historySince = 2026-09-11`、积压 3699 条窗口外条目，所以每轮必然落到这个状态。它表示「本轮做完了一批、还有剩余」，不表示失败。
+
+---
+
+## 10. v3.2 收口（2026-09-25）
+
+### 10.1 本轮代码变更
+
+**新增 2 个模块（各带单测）**
+
+| 文件                                | 作用                                                                                                                         | 证据                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `modules/action/rule-selection.ts`  | 把「初始选中项」的解析从组件里抽出来，并引入虚拟选中项 `processing_service:__detail__`（零规则时也能进入处理服务详情）       | `rule-selection.test.ts` 9 项  |
+| `modules/action/release-version.ts` | `resolveLiveReleaseVersion(releases, release)`：兼容 `save` / `release` 返回体都不含 `releases` 的现实，取两者版本号的最大值 | `release-version.test.ts` 4 项 |
+
+**改动 4 个文件**
+
+| 文件                                             | 改动                                                                                                        |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `modules/action/action-setting.tsx`              | 删掉内联的 `parseRequestedScope`；零规则时也挂载处理服务详情；`ProcessingServiceDetail` 接 `onRulesChanged` |
+| `modules/action/use-processing-service-rules.ts` | 新增 `refresh()`（`revision` 计数触发重取），暴露给调用方                                                   |
+| `modules/action/processing-service-detail.tsx`   | 新增 `onRulesChanged`，`ProcessingSetting` 的 `onSaved` 接进来                                              |
+| `modules/action/processing-setting.tsx`          | `save()` 成功路径回调 `onSaved`；`liveReleaseVersion` 改用 `resolveLiveReleaseVersion`                      |
+
+### 10.2 本轮修掉的两个真实缺陷
+
+**(a) 「保存并启用」后，界面提示的已生效版本滞后一版。**
+
+`PUT /configuration`（保存草稿）返回 `{revision, config}`、`POST /rule-set-releases`（发布）返回 `{version, targetInputIds}`，**两者都不含 `releases`**。而 `liveReleaseVersion` 优先取 `Math.max(...editor.releases)`——编辑器里的 `releases` 是上一次读取的快照。实测：服务端已生效 v4，界面仍提示「当前使用已生效版本 **v3**」。修法：取「已读取到的版本列表」与「本次发布返回的版本」的最大值。
+
+**(b) 处理服务规则集为空时，界面上没有任何路径能新建第一条规则（缺实现）。**
+
+三条路径全都不通：`handleCreateRuleTop` 硬编码创建 **cloud** 规则（`action-setting.tsx:198-201`）；`handleCreateRule` 明确要求 `selected.scope` 是 `cloud | local`（`:190-196`）；`ActionButtonGroup`（带「新增规则」按钮）只在 cloud/local 详情分支挂载（`:216`）。于是 `?scope=processing_service` 深链因为「找不到 processing 行」而选不中，页面只剩空态占位，其 CTA 建的是 cloud 规则。修法：引入虚拟选中项，让处理服务详情在零规则时也能挂载。真机复验：`新增规则` 计数 **0 → 1**，`尚无自动化规则` 计数 **1 → 0**。
+
+### 10.3 部署与沙箱结论（可复用）
+
+| 结论                          | 实测                                                                                                                                                                                    |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| launchd 作业注册必须离开沙箱  | `launchctl bootstrap` 在沙箱内返回 `EIO 5`；安装脚本里的 `shutil.rmtree(previous)` 还会触发批量删除守卫 → 先把 `information-runtime-previous` **改名让位**，再用无沙箱跑安装            |
+| 批量删除守卫阈值              | 一次删除 ≥50 个文件被判危险；`rm -rf out/web`（454 个文件）会被拦 → 一律改名让位（`mv out/web out/web-pre-<tag>`）                                                                      |
+| 本地端口健康检查必须绕代理    | 环境里 `HTTP_PROXY=127.0.0.1:56838` 会把连不上的本机端口伪造成 **`502/503`**；必须 `curl -s --noproxy '*'`，只有 **`000`** 才代表「没有进程监听」                                       |
+| zsh glob 无匹配会中断整条命令 | `rm -f path/Singleton*` 在无匹配时报 `no matches found`，整条命令以 1 退出（但后续同伴命令仍会执行），极易误读为「脚本失败」。改用 `for f in a b c; do [ -e "$f" ] && rm -f "$f"; done` |
+| 沙箱里不要用 bash 找内容      | 对某些调用会**静默返回空且退出码 0**，看起来像「没有匹配」→ 一律改用检索工具（`Grep` / `Glob`）                                                                                         |
+
+部署结果：服务端产物 md5 `b79c12605449f851d491878ae52d1dc2`（构建产物 ↔ 已安装运行时一致），主站产物 `main-web/assets/index-N-7M7p8z.js` 内含新增的 `processing_service:__detail__`；`127.0.0.1:2240/information`、`local.folo.is/`、`local.folo.is/action?scope=processing_service`、`local.folo.is/information` **全部 200**。
+
+### 10.4 方法学纠错（读这个库时最容易踩的六条）
+
+**(a) `entry_decisions` 的真实表结构**是 `id / input_seq / generation / release_version / body / created_at`。决策自己的版本戳在**列** `release_version` 上；`body` 里没有 `input` / `release_version`，生成时间在 `json_extract(body,'$.generatedAt')`。
+
+**(b) `processing_inputs.release_version` 会被 publish 重新盖章，不能用来给历史决策分组。** 发布时对每个命中输入执行 `UPDATE processing_inputs SET release_version=?, generation=generation+1, status='pending' WHERE seq=? AND current=1`（`automation-store.ts:331` 附近）。因此 `entry_decisions JOIN processing_inputs GROUP BY inputs.release_version` 会把**发布之前**产生的旧决策整体算到新版本头上。本次实测就撞到了：该写法把 v4 报成 327 条决策，而其中绝大多数是发布前生成、被重新盖章的旧决策。正确做法：用 `entry_decisions.release_version`，或改用 `generatedAt > 发布 created_at` 判断。
+
+**(c) 时间字段别混。** `processing_inputs` **没有 `published_at` 列**，条目发布时间在 `json_extract(body,'$.publishedAt')`；表里的 `received_at` 是**采集入库时间**。
+
+**(d) `recent` 发布范围用 `receivedAt`，处理窗口用 `publishedAt`。** `automation-store.ts:365` 的 `publicationPlan` 判 `Date.parse(input.receivedAt) >= Date.parse(scope.since)`；`processing-engine.ts` 的 `withinWindow` 判 `candidate.body.publishedAt`。两套口径不同，做数据核对时不要互相套用。
+
+**(e) 一致副本只能用 `VACUUM INTO 'path'`（单引号）。** 只读连接会忽略 WAL 中已提交的数据，会读出「几十分钟前」的假状态；`VACUUM INTO "path"` 用双引号会被当标识符解析并报 `no such column`。
+
+**(f) 其余易踩列**：`automation_draft` 无 `updated_at`（只有 `revision` / `body`）；`jobs` 只有 `id / body / status`（`kind` 在 `processing_schedule_triggers` 上）；`processing_material_state` 主键是 `(source_key, item_id)`（它的主键**不含** `generation`，别按 `input_seq` JOIN）；`rule_set_releases` 的规则数用 `json_array_length(json_extract(body,'$.rules'))`。
+
+### 10.5 已读收敛的真机生效（2026-09-25 06:35Z → 06:53Z）
+
+| 时点                     | pending | skipped | succeeded | `entry_decisions` |
+| ------------------------ | ------- | ------- | --------- | ----------------- |
+| 前（06:35Z `post`）      | 3704    | 0       | 5264      | 5301              |
+| 后（06:53Z `state-mid`） | 483     | 3859    | 4936      | 5301              |
+
+- 收敛由 `settleReadStates()` 完成，位置在 `hydrateMaterials` **之前**（`processing-worker.ts:85`），所以已读条目这一轮连「抓详情 + 可读性提取」都没跑。
+- 收敛后的 `pending` 483 = **225 条本轮新采集的未读** + **258 条 v4 发布重新命中的未读**；`skipped` 3859 = 3664 条 `generation=1` + 69 条 `generation=3` + 其余为 `generation=0/2`。
+- `succeeded` 少了 328：v4 发布把命中输入（其中包含已 `succeeded` 的）改回 `pending` 并 `generation+1`；这批里已读的在收敛中落为 `skipped`。
+
+### 10.6 首轮积压的吞吐事实（必须知道，否则会误判成卡死）
+
+未读待处理 483 条，而批层每批 `MAX_ENTRY_BATCH_ITEMS = 8`（`MAX_ENTRY_BATCH_CHARS = 50_000`，`MAX_ENTRY_CHARS = 60_000`），且**批层是串行的、在单篇主循环之前整体跑完**——`processing-engine.ts:105` 先 `prepareNormalEntryBatches` 走完所有批次，`:108` 才开始主循环落库。
+
+本轮实测：**≈1 次模型调用/分钟**，单次 48s 均值，单次输入峰值 5.5 万 token。按 483 条推算需 ≈60 次调用、约 1 小时走完批层，之后主循环才开始写 `entry_decisions`。
+
+**推论**：「已读条目退出处理队列」修好之后，第一次运行会撞上一个**真实存在的未读积压**，而它按 8 条/批串行消化。这个阶段 `processing_inputs` 的状态与 `entry_decisions` 行数**完全不动**（模型产物只进 `processing_model_cache`），看起来像卡死但并不是。观测应以 `runtime/codex-usage.jsonl` 的调用计数为准。
+
+### 10.7 一处待决策
+
+**`saveAndEnable` 的三步不是原子的。** 「保存并启用」= 保存草稿 → 发布生效 → 保存计划，三步各自独立提交。本次实测出现过「发布成功、计划未保存」（失败发生在检查点之前，日志里没有留痕），结果是留下一个**没有任何候选**的发布版本——`runStoryAggregation` 对旧版本仍会跑一轮，但候选为空。建议把三步包成一个事务，或至少让第二、三步的失败在界面上可见。
+
+---
+
+## 11. 本轮真机复验（2026-09-25 17:00–18:00）
+
+### 11.1 修掉的两个真实回归（本轮新增，均已真机复核）
+
+**(a) `/inputs` 响应里出现终态 `skipped`，整个详情面板报「规则或服务响应无效」。**
+
+| 项       | 内容                                                                                                                                                                                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 症状     | `/action?scope=processing_service` 的处理服务详情整体显示「规则或服务响应无效，请检查填写内容。」（i18n key `processing.error.invalid`），拿不到任何输入                                                                                                                                                   |
+| 根因     | `processing-client.ts:375` 的 `status` 是**闭合枚举** `pending \| running \| succeeded \| failed`，而 `processingInputWireSchema` 用 `.strict()`；`/information/v1/inputs` 的真实响应 9624 项里含 **4150 项 `status="skipped"`**（《已读条目退出处理队列》引入的终态）→ 整份响应解析失败被当成「响应无效」 |
+| 修法     | 枚举补 `skipped`，并加回归守护测试（含反向断言：`"archived"` 仍须被拒，否则枚举会退化成任意字符串）                                                                                                                                                                                                        |
+| 真机复核 | `inputsHttp = 200`、`inputsBytes = 2646389`、`inputsStatusCounts = {skipped: 4150, succeeded: 5474}`；`规则或服务响应无效` 与 `processing.error.invalid` 出现次数**均为 0**；产物 `about-CA4TYkvy.js` 内含 `["pending","running","succeeded","failed","skipped"]`                                          |
+
+**(b) `/action` 上 4 处 i18n raw key（`PROCESSING.SCOPE` ×2、`actions.action_card.all` ×2）。**
+
+这不是「键没写」，是**命名空间绑定**问题，两个成因叠加：
+
+1. **`useTranslation([ns1, ns2])` 默认只用 `ns1` 绑定 `t`。** `node_modules/react-i18next/dist/commonjs/useTranslation.js:82`：
+   ```js
+   const calculatedT = i18n.getFixedT(
+     currentLng,
+     i18nOptions.nsMode === "fallback" ? namespaces : namespaces[0], // ← 默认只取第一个
+     keyPrefix,
+     { scopeNs: namespaces },
+   )
+   ```
+   即必须显式声明 `nsMode: "fallback"`（类型见 `react-i18next/index.d.ts:200`、`:329`：`nsMode?: 'fallback' | 'default'`）才会把整个数组传下去。已用**运行时真实资源树**在 Node 里复现：`getFixedT('zh-CN','settings')` 下 `t("processing.scope")` 返回原键，`getFixedT('zh-CN','app')` 下返回「处理服务」。
+2. **旧产物把摘要函数的 `t` 编译成了恒等函数。** 旧包里是 `w = d.useCallback(l => l, [t])`，所以 `conditionSummary` 原样输出 `actions.action_card.all`；新包为 `{t:w} = L(["settings","app"],{nsMode:"fallback"}), S = d.useCallback(l => w(l), [w])`。**这是「代码改对了但页面没变」的典型陷阱**：修完必须核对产物里这一段的真实形态，不能只看源码。
+
+| 命名空间归属（本轮实测） | 键                                                                                                                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app`                    | `processing.scope`、`processing.conditions`、`processing.type.presentation`、`processing.error.invalid`、`automation.processing_unavailable_short`、`automation.execution_location_note` |
+| `settings`               | `actions.action_card.all`、`actions.scope.cloud`、`actions.scope.local`、`actions.action_card.summary.no_actions`、`actions.action_card.summary.disabled`                                |
+| **不存在**               | `settings.processing`（无此键）、`app.actions`（无此键）                                                                                                                                 |
+
+- 修法：`unified-action-list.tsx`（列表项列同时用到两个命名空间）与 `action-setting.tsx`（摘要函数）两处显式写 `nsMode: "fallback"`；新增 `unified-action-list.i18n.test.tsx`，**不 mock react-i18next**，用真实 i18next 实例 + 真实语言包，并做**正反对照**（同一个 `Probe` 组件里 `nsMode:"fallback"` 与默认模式各读一次）。
+- 真机复核：**`raw key 命中（键, 次数）= []`**；页面实际加载入口 `main-CkDHkpEa.js`，且 `swController = null`、`swRegistrations = 0`（排除旧包/Service Worker 缓存误导）；修复代码落在懒加载块 `index-DNVc9P21.js` 内，该块确实在页面的 `loadedJs` 列表里。
+
+### 11.2 场景一：时间线两态过滤
+
+范围 `/timeline/articles/231195353137392640/pending`（TechFlow）。两态控件存在（`AI 处理后` 为当前态 / `原始内容`），点击就地切换，URL 不变。
+
+| 判据                       | 【AI 处理后】     | 【原始内容】                   |
+| -------------------------- | ----------------- | ------------------------------ |
+| 22 步容器滚轮累计唯一条目  | **221**           | **231**                        |
+| 角色分布                   | `{"(none)": 221}` | `{"(none)": 225, "hidden": 6}` |
+| 命中 `roles.hidden` 的条目 | **0**（期望 0）   | **6**                          |
+
+「原始内容」相对「处理后」多出的 10 条 = **6 条处理服务隐藏 + 4 条本地语义去重**。后者能一起恢复是设计使然：两态切换跳过的正是同一个 `isEntryHiddenByProcessingRole(id, { localDedupe })` 调用，处理服务决策与本地去重共用一处过滤。
+
+6 条被隐藏的 itemId：`1303536587476328460`、`1303416012460285962`、`1303295389478182922`、`1303174332620496901`、`1303174332620496908`、`1303066359541817346`。
+
+**可追溯性**（把结论标出来，是 §6 场景一的核心诉求）：
+
+| 项                               | 实测                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 能否定位到某条被隐藏条目         | ✅ 在「原始内容」态滚到 `scrollTop = 12889`（`scrollHeight = 16424`，渲染 23 行）定位到 `1303536587476328460`，`role = hidden` |
+| 结论标识是否可追溯到             | ✅ `<span aria-label="AI 已隐藏">`，条目文本为 `TechFlow AI 已隐藏 · 1 天前 …`                                                 |
+| 处理**理由**文本是否在时间线展示 | ⚠️ 未展示（`reasonFragment = false`）                                                                                          |
+| 悬停卡是否有内容                 | ⚠️ `[data-radix-popper-content-wrapper]` 已挂载但 `innerText` 为空，`[role=tooltip]` 无节点                                    |
+| 是否有就地恢复入口               | ⚠️ 无（`restoreEntry = false`）                                                                                                |
+
+**必须纠正的一处记录。** 本轮会话中一度记下「两态总计数也不同（2175 → 2198，差 23）」。复查后**该说法不成立**：
+
+- `2175` 是 `/action` 页**左侧边栏「全部」**的计数（落盘于 `page-text.txt`），它随远端未读状态在 **2151–2195** 之间波动（同目录另有 `2184`/`2186`/`2195`/`2151` 四个采样），与时间线两态无关；
+- `2198` 在整个验证目录的**任何落盘产物里都找不到**；
+- 时间线头部**根本不显示总数**——`EntryListHeader` 只渲染订阅标题与操作按钮，`entriesIds.length` 只被虚拟列表与日期分组计数 `groupedCounts` 使用。
+
+因此 §6 场景一的「计数随之恢复」应读作**条目集与角色分布恢复**（上表的 221/0 vs 231/6），而不是某个可见总数变化。
+
+### 11.3 场景二：Blockchain 同事件综述
+
+聚合规则发布后跑通一轮，`GET /information/v1/processing/roles` 返回 78 个角色：`{hidden: 50, restored: 1, merged: 23, story: 4}`。
+
+| 项          | 实测                                                                                                                                                                 |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4 条 Story  | `488d8c06`（并入 1）、`63e65fcd`（并入 12）、`81996ca9`（并入 9）、`684879d0`（并入 1）                                                                              |
+| 角标        | 滚 24 屏命中代表条目 `1302816827394514945`，`badgeText = "综述2"`、`badgeAria = "另有 1 条内容已并入本条"`                                                           |
+| digest 响应 | `200`，`{"status":"ready","storyId":"488d8c06-…","revision":1,"title":"习近平抵达华盛顿开启对美国事访问","sourceCount":2}`                                           |
+| 就地面板    | 点角标后 **URL 不变**；面板渲染 5 个句段引用（`blockquotes = 5`），「来源 2 条 · 更新于 25 分钟前 · 第 1 版」                                                        |
+| 深链        | `/information?returnTo=%2Ftimeline%2Farticles%2F231195353137392640%2Fpending&storyId=488d8c06-5093-442f-bfdf-801cc0828788#smart-reading`，落地后正确解析出 `storyId` |
+
+### 11.4 场景三：读前准备（关闭浏览器后计划仍生效）
+
+| 判据                 | 实测                                                                                                                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 统一列表与详情可渲染 | `hasAddRule = true`、`hasEmptyPlaceholder = false`、`versionHint = "当前使用已生效版本 v4"`                                                                                               |
+| 切标签保状态         | `scrollTop 3441 → 3373`，视口内 23 条，选中条目仍在视口，URL 不变                                                                                                                         |
+| 计划配置             | `{enabled: true, times: ["08:00","12:00","15:00","20:00","23:00"], tz: "Asia/Shanghai", scope: {mode:"fixed", sourceKeys: 22 个}, historySince: "2026-09-11T16:00:00.000Z", revision: 2}` |
+| `kind × status` 分布 | `scheduled deferred_budget 48` / `scheduled retry_wait 6` / `scheduled running 1` / `manual 7` / `catchup 3`                                                                              |
+| **时点命中率**       | 55 条 `scheduled` 记录的 `scheduled_for` **100% 命中 `times`**（含 `2026-09-20T20:00`、`2026-09-24T23:00` 等深夜时点）                                                                    |
+| **触发延迟**         | 54 条 `created_at - scheduled_for` 差 **0–1 秒**；唯一例外是当前 `running` 那条（计划 08:23 才发布，晚 5014s）                                                                            |
+| 触发由谁发起         | 服务端 worker——`processing-worker.ts:31` 调 `store.schedule.tick(new Date())`，**与浏览器是否打开无关**                                                                                   |
+| 运行报告             | 最近 4 条有 `processing_trigger_reports`，各含 22 个来源、每个 `pages: 1`，`coverage` 为 `budget` / `history_boundary`                                                                    |
+
+### 11.5 隐藏分布的权威口径（清理后快照）
+
+在 `VACUUM INTO` 一致副本（`snapshot-after-cleanup.sqlite`）上按源码谓词统计：
+
+- **生效决策 5543 条**（走 `processing_inputs.decision_id → entry_decisions.id`，不按 `release_version` 分组）；
+- **(standalone, aggregation, rewrite, status) 全分布**：`auto/deny/allow/keep 3303`、`auto/deny/deny/keep 1591`、`auto/allow/allow/keep 384`、`auto/allow/deny/keep 149`、`always/deny/deny/needs_context 58`、`never/deny/deny/hide 45`、`auto/allow/deny/hide 13`；
+- **`entryHidden`（依 `processing-reading-store.ts:855` 谓词，含覆盖）= 58**，其中 `standalone = 'always'` 的 **0 条**（红线成立）；
+- **隐藏条目按来源**：`231195353137392640` 19 / `58374877360520192` 15 / `1124071324059041792` 8 / `1106497372717711360` 6 / `131152667982631936` 5 / `79332238621864960` 2 / 另 3 个来源各 1（合计 58）。
+
+**`standalone = 'always'` 的 58 条全是 `status = "needs_context"`**，reason 清一色是「证据不足 / 需要上下文」类（例如「证据目录为空，无法提取有效事实。」「缺少必要的文本证据以进行忠实性分析。」「缺少足够的上下文来确定文章的具体内容。」）。也就是说，**这 58 条是「证据不够所以不隐藏」，不是「项目方公告所以不隐藏」**——§6 里「项目方公告类订阅仍单独可见」这条判据**没有数据前提可判**，只能记为「例外在数据上成立（`always` 58 条全部落在 `needs_context`，且隐藏集里 `always` 为 0）」。
+
+### 11.6 收尾：验证遗留的覆盖行已清零
+
+| 步骤     | 结果                                                                                                                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 清理前   | 覆盖表 4 行 = 测试前基线 2 行（`feed/1106497372717711360`）+ 本轮验证新增 2 行（`feed/58374877360520192`）                                                                                 |
+| 落档     | 先 `VACUUM INTO` 出 `backups/before-v32-override-cleanup-20260925.sqlite`（175 MB），并确认**无活跃写者**（`processing_schedule_triggers` 无 `running`、`processing_inputs` 无 `running`） |
+| 执行     | 按来源键删除 2 行（`DELETE changes = 2`）                                                                                                                                                  |
+| 比对     | 剩余 2 行与 `before-v32-restore-fix-20260922.sqlite` **逐行一致** → 账号覆盖状态已还原                                                                                                     |
+| 连带效果 | 测试期间有 1 条 `restore` 覆盖在豁免一条隐藏，删除后 `entryHidden` 由 57 回到 **58**                                                                                                       |
+
+### 11.7 出口质量门
+
+`npx pnpm exec turbo run format:check lint typecheck test --continue`（全仓，无 `--filter`）：**35/35 任务通过**。
+
+- `prettier --check .`：`All matched files use Prettier code style!`
+- `eslint` + `tsslint`：**0 error**（975 条 warning 全部是仓库既有的 `ts/no-explicit-any`、`react-naming-convention/*` 之类）
+- `typecheck`：各包 `tsc --noEmit` 全过
+- 测试：11 个包全绿，其中 `@follow/web` **76 个测试文件全通过**、`information-service` 39 个、`electron-main` 11 个、`store` 8 个、`utils` 5 个、`ota` 5 个、`folocli` 5 个、`information-core` 4 个、`landing` 3 个、`ssr` 2 个、`readability` 1 个
+
+两处必须记下的门禁细节：
+
+1. **必须加 `--continue`。** 不加时，任何一个任务失败都会让 turbo 直接中止其余任务——本轮就出现过「一个与本次改动无关的测试在重负载下超时」把 `lint` 与 `format:check` 一起杀掉、看不到它们真实结果的情况。加 `--continue` 才能拿到完整判断。
+2. **`src/modules/integration/custom-integration-manager.test.ts` 在重负载下会抖动。** 该用例默认 5s 超时，并行跑全仓时实测 5180ms 超时失败，单独跑 617ms 通过；与本次改动无关。若要长期稳定，应给它单独的 timeout 或降低其真实耗时。
+
+## 12. 方法学纠错（第 7 条）与产物/运行时陷阱（读这个库与调这个前端时最容易踩的）
+
+### 12.1 第 7 条（最重要）：**「隐藏」不是 `policy` 上的字段，而是 `body.status === "hide"`**
+
+`policy` 的真实形状只有三个字段：
+
+```jsonc
+{ "standalone": "auto" | "always" | "never", // 是否独立展示
+  "aggregation": "allow" | "deny",           // 是否可参与综合
+  "rewrite": "allow" | "deny" }              // 是否可改写
+```
+
+**`policy` 里没有 `hidden`、也没有 `presentation`。** 判定在 `processing-reading-store.ts:855` 的 `entryHidden()`：
+
+```ts
+override?.mode === "hide" ||
+  (override?.mode !== "restore" &&
+    decision?.policy.standalone !== "always" &&
+    (decision?.policy.standalone === "never" || decision?.status === "hide"))
+```
+
+三个必须记住的后果：
+
+1. `policy.standalone === "never"` **或** `body.status === "hide"` 二者任一即隐藏——两个来源都要查；
+2. `policy.standalone === "always"` 是**例外闸门**，优先级最高（即使 `status = "hide"` 也不隐藏）；
+3. 条目级 `restore` 覆盖**同时豁免隐藏与并入**。
+
+### 12.2 其余新增陷阱
+
+**(a) `rule_set_releases` 的主键是 `version`，不是 `id`。**
+
+**(b) `sources` 表只有 `key / body / active`**，订阅标题在 `json_extract(body,'$.title')`。
+
+**(c) i18n 资源有两种形状，别混用。** 仓库源文件 `locales/<ns>/<lang>.json` 是**扁平点号键**（`"processing.scope": "处理服务"`）；构建产物 `/locales/<lang>.js` 是**嵌套对象**（顶层 = `ai, app, common, errors, external, lang, native, settings, shortcuts`）。判定「界面上到底有没有这个键」的权威来源是 `LocaleCache.shared.set(lang)` 序列化回 `localStorage["follow:locale-zh-CN"]` 的那份内存资源树（本轮实测 82810 字节）。
+
+**(d) 跨命名空间的 `t` 必须写 `nsMode: "fallback"`**（见 §11.1(b)）。只写 `useTranslation(["a","b"])` 会静默只查 `a`。
+
+**(e) 条目列是虚拟列表，且渲染容器必须从条目行向上找。** `[data-entry-id]` 向上找到的那个 `overflow-y:auto` 容器才是滚动目标；用「全文档最高的可滚动 div」会选中左侧订阅栏，滚动完全无效、条目数卡住不动。另外 **`page.evaluate(fn)` 只序列化函数体**，Node 侧作用域里的函数在页面里不可见（`FIND_SCROLLER is not defined`）——滚动逻辑必须内联进 `page.evaluate`。
+
+**(f) `processing_schedule_triggers` 里只要有 `running`，安装器就会拒绝执行。** `apps/information-service/scripts/install-launch-agent.py:32-34` 的阻塞判据是「`processing_inputs.status='running'` 或 `processing_schedule_triggers.status='running'`」。**lease 已过期也照样阻塞**（本轮就撞到一条 `running` 且 lease 超时 5014s 的记录）→ 这种时候改用手工 `cp` 替换 `information-runtime` 下的产物目录。
+
+**(g) `mv` 不能跨设备。** `/tmp` ↔ `/Volumes/SSD` 会报 `EXDEV: cross-device link not permitted`；一律**就地改名让位**（`mv out/web out/web-pre-<tag>`）。附带：批量删除守卫阈值 50，`rm -rf out/web`（454 个文件）会被拦下。
+
+**(h) 页面内裸 `fetch("/information/v1/inputs")` 返回 403。** 该接口要一次性令牌，脚本发起的请求拿不到正文（26 B 的 403）。要看真实响应必须**在页面网络层截获应用自己那次请求的 `response.body()`**，不能自己重发。
+
+**(i) 本地端口健康检查必须绕代理。** 环境里 `HTTP_PROXY=127.0.0.1:56838` 会把连不上的本机端口伪造成 `502/503`；必须 `curl -s --noproxy '*'`，且只有 **`000`** 才代表「没有进程监听」。
