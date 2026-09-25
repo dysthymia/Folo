@@ -618,3 +618,65 @@ override?.mode === "hide" ||
 **(h) 页面内裸 `fetch("/information/v1/inputs")` 返回 403。** 该接口要一次性令牌，脚本发起的请求拿不到正文（26 B 的 403）。要看真实响应必须**在页面网络层截获应用自己那次请求的 `response.body()`**，不能自己重发。
 
 **(i) 本地端口健康检查必须绕代理。** 环境里 `HTTP_PROXY=127.0.0.1:56838` 会把连不上的本机端口伪造成 `502/503`；必须 `curl -s --noproxy '*'`，且只有 **`000`** 才代表「没有进程监听」。
+
+---
+
+## 13. 增量：「编辑订阅」弹窗里的私人订阅标签（2026-09-25 21:00–22:35）
+
+### 13.1 为什么要加
+
+私人订阅标签原先只有两个入口：「设置 → 订阅源」的「我的标签」列（先勾选行、再批量加/减）和「Actions → 我的处理服务 → 私人订阅标签」（建/改名/删标签 + 批量选源绑定）。两者都是**批量视角**，而打标签最常见的时机其实是**刚订阅完、或回头整理某一个源**——那一刻用户面前只有「编辑订阅」弹窗，弹窗里却没有标签入口。本轮把入口补进 `FeedForm`。
+
+### 13.2 实现
+
+| 项     | 内容                                                                                                                                                                                 |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 新组件 | `apps/desktop/layer/renderer/src/modules/action/feed-subscription-tags.tsx`                                                                                                          |
+| 挂载点 | `modules/discover/FeedForm.tsx` 的 `</Form>` 之后、`<RootPortal>` 之前，条件 `isSubscribed`（新建订阅时服务端还没这个 source，写标签必然失败）                                       |
+| 数据   | 复用 `processingClient.load()` 取 `subscriptionTags` + `sourceTags`；`processingClient.bindTags([processingFeedSourceKey(feedId)], [tagId], "add"｜"remove", revision, signal)` 写入 |
+| 门禁   | `isLocalFoloHost()`（hostname 严格等于 `local.folo.is`），与订阅源设置页的标签列同一条件                                                                                             |
+| 交互   | 每个标签一个 checkbox，勾选/取消**即时写入、不参与表单的保存流程**（所以刻意放在 `<Form>` 之外）；写入成功后重读服务端快照，失败回滚本地勾选并露出 `processing.error.*`              |
+| 文案   | 新增 `processing.tags_form_hint` / `processing.tags_form_empty`（en / ja / zh-CN 三份，`locales/app/*.json` 严格字母序；fr-FR / zh-TW 是部分翻译，按既有惯例不补）                   |
+| 测试   | `modules/action/feed-subscription-tags.test.tsx` 7 项：门禁不渲染、回显勾选、add、remove、空态、读取失败、写入失败回滚                                                               |
+
+设计上刻意**不在弹窗里建标签**：建/改名/删标签是全局操作，统一留在 Actions 的处理服务面板；弹窗只回答「这个源挂哪些标签」。
+
+### 13.3 真机复验（2026-09-25 22:20–22:35）
+
+部署：重建 `out/web`（23 MB）与 `out/information-web`（2.9 MB）→ 装进 `information-runtime/{main-web,web}`（旧目录就地改名 `*-pre-20260925T221606`）→ `launchctl kickstart -k gui/<uid>/is.folo.local.information`。入口由 `main-CkDHkpEa.js` 换成 `main-DgRuxgYt.js`，`/`、`/assets/main-*.js`、`/information/` 全部 200。
+
+探针（`probe-edit-feed-tags7.cjs`）走完整真机路径 —— 侧栏展开分类 → 右键订阅项 →「编辑」→ 弹窗里的标签区块：
+
+```text
+展开后侧栏 [data-feed-id] 数量 = 87
+菜单项 = ["全部标记为已读 A","编辑 E","取消订阅","添加订阅源到列表","移动至分类","认证 C",
+          "在新标签页打开订阅源 O","在新标签页打开网站 O","复制 ID C","更改为其他视图","为此范围设置 AI 规则"]
+编辑订阅弹窗已打开 = true
+  t=2s feed-form-processing-tags 数量 = 1
+标签区块快照 = {
+  "blockText": "私人订阅标签 勾选即给这个订阅源加上标签，取消勾选即移除。标签只用于本机处理服务，不改分类，也不写入公开 List。临时验证标签",
+  "checkboxes": [{ "label": "临时验证标签", "checked": false }],
+  "rawKeyLeak": false, "hasEmptyCopy": false, "targetPresent": true }
+勾选后 = {"checked":true,"alert":null}
+pageErrors = (none)
+```
+
+库内落盘核对：`source_tag_bindings` 出现 `{source_key: "feed/58374877360520192", tag_id: "75a23440-…"}`。
+
+**验证后已清理**：用同一面板的「移除」删掉临时标签，`subscription_tags` 与 `source_tag_bindings` 双双回到 0 行，与验证前基线一致。写操作可回滚——临时标签本就是本轮探针创建的，删标签时服务端一并撤掉它的绑定。
+
+### 13.4 本轮新增的探针陷阱
+
+**(a) 侧栏的订阅默认折叠在分类里。** 不展开就一个 `[data-feed-id]` 都找不到，只看得到折叠头 `data-sub="feed-category-<name>"`。展开按钮：`button[data-type="collapse"][data-state="close"]`。
+
+**(b) `[data-feed-id]` 上的 `aria-disabled="true"` 是常态，不是多选态。** 它来自 dnd-kit `useSortable()` 的 attributes。Playwright 的 auto-wait 据此判定 "not enabled"，`.click()` 会一直重试到超时；`force: true` 也不能用——force 只跳过 actionability，事件仍走真实 hit-testing，会落到覆盖层上。
+
+**(c) 右键改用合成事件。** 在元素上 `dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, view: window, button: 2, clientX, clientY }))`，绕开坐标与 hit-testing。
+
+**(d) radix 的长菜单可能被弹到视口外。** 此时连 `click({ force: true })` 都报 `Element is outside of the viewport`。可靠做法是对目标菜单项逐一派发 `pointerdown / mousedown / pointerup / mouseup / click`。
+
+**(e) 侧栏右键菜单是「编辑」，不是「编辑订阅」。** `useFeedActions` 的 label 取决于 `isEntryList`：订阅栏右键拿到的是 `sidebar.feed_actions.edit`（=「编辑」）。断言要写成 `/^编辑/`，不能等值比较。
+
+**(f) 标签名渲染在 `input` 的 `value` 里，`value` 不进 `innerText`。** 用「页面文本里有没有这个标签名」判断标签是否创建成功会**误判为失败**（本轮第一版探针就这样错判，白跑一轮）。要么读 `input[aria-label="改名"]` 的 `value`，要么直接查库。
+
+**(g) 探针失败时必须显式 `process.exit()`。** 只在 `.catch` 里设 `process.exitCode = 1` 不会关掉 chromium，进程会一直挂着（本轮两次各挂了 5–7 分钟）。
