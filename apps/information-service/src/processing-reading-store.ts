@@ -13,7 +13,7 @@ import type { ProcessingStateStore } from "./processing-state"
 import type { Story, StoryRevision, StoryStore } from "./story-store"
 
 export type ReadingView =
-  "smart" | "standalone" | "all" | "hidden" | "pending" | "failed" | "stories"
+  "smart" | "standalone" | "all" | "hidden" | "pending" | "skipped" | "failed" | "stories"
 export type ReadingSnapshotAudit = {
   cutoffAt: string
   maxSeq: number
@@ -33,6 +33,7 @@ export type ReadingSnapshotCounts = {
   stories: number
   hidden: number
   pending: number
+  skipped: number
   failed: number
 }
 export type ReadingEntry = {
@@ -439,7 +440,11 @@ export class ProcessingReadingStore {
       limit > 50
     )
       throw new ProcessingReadingError("invalid_pagination")
-    if (!["smart", "standalone", "all", "hidden", "pending", "failed", "stories"].includes(view))
+    if (
+      !["smart", "standalone", "all", "hidden", "pending", "skipped", "failed", "stories"].includes(
+        view,
+      )
+    )
       throw new ProcessingReadingError("invalid_snapshot")
     const snapshot = input.snapshotId ? this.snapshotById(input.snapshotId) : this.snapshot()
     const where = this.viewWhere(view)
@@ -482,10 +487,9 @@ export class ProcessingReadingStore {
       standalone: count(this.viewWhere("standalone")),
       stories: count(this.viewWhere("stories")),
       hidden: count(this.viewWhere("hidden")),
-      pending: count(
-        "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'')!='failed'",
-      ),
-      failed: count("kind='entry' AND decision_id IS NULL AND entry_status='failed'"),
+      pending: count(this.viewWhere("pending")),
+      skipped: count(this.viewWhere("skipped")),
+      failed: count(this.viewWhere("failed")),
     }
   }
 
@@ -976,7 +980,11 @@ export class ProcessingReadingStore {
       case "hidden":
         return "kind='entry' AND hidden=1"
       case "pending":
-        return "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'')!='failed'"
+        // 已读跳过与「还没轮到」是两件事：前者永远不会再消耗额度，混在一起会让用户
+        // 误以为队列还在增长。
+        return "kind='entry' AND decision_id IS NULL AND COALESCE(entry_status,'') NOT IN ('failed','skipped')"
+      case "skipped":
+        return "kind='entry' AND entry_status='skipped'"
       case "failed":
         return "kind='entry' AND decision_id IS NULL AND entry_status='failed'"
       case "stories":

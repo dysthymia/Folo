@@ -113,6 +113,9 @@ export async function runEntryProcessing(
       !withinWindow(candidate.body.publishedAt, historySince, cutoffAt)
     )
       continue
+    // 已读条目不进模型。队列状态由 `settleReadStates` 在更早的阶段收敛，这里只做防御：
+    // 直接调用引擎的路径（测试、试运行）也必须遵守同一口径。
+    if (entryReadState(entrySnapshots.get(candidate.seq)) === true) continue
     if (batches.failedInputSeqs.has(candidate.seq)) continue
     if (options.signal.aborted) {
       result.pending++
@@ -297,6 +300,44 @@ export async function runEntryProcessing(
   return result
 }
 
+/**
+ * 读态判定的单一来源：批层准备与原单篇路径共用，避免两处口径分叉。
+ *
+ * `null` 表示来源没有提供读态（例如 X 搜索条目），不能当成已读丢弃；`read` 不是内容身份
+ * 的一部分，所以来源侧的读态变化不会让输入自动换代，判定必须走这里的实时快照。
+ */
+function entryReadState(entry: { read?: boolean | null } | undefined): boolean | null {
+  const read = entry?.read
+  return typeof read === "boolean" ? read : null
+}
+
+/**
+ * 用来源侧实时读态收敛队列，并把「已读」落成终态。
+ *
+ * 必须由 worker 在抓取正文之前调用：否则已读条目的详情与可读性提取会白跑一遍，等于把
+ * 省下的模型额度又花在网络与解析上。已读条目本身不会因为来源侧读到一半就自动换代
+ * （`read` 不属于内容身份），所以历史积压只能在这里显式退出队列。
+ */
+export function settleReadStates(store: ProcessingEngineStore): {
+  skip: number[]
+  revive: number[]
+} {
+  const skip: number[] = []
+  const revive: number[] = []
+  for (const candidate of store.automation.inputs()) {
+    // 已出决定与正在跑的输入不参与收敛：前者不该被追溯改写，后者由租约负责收尾。
+    // 失败态要参与：已读条目的处理失败没有修复价值，留在失败视图只会误导。
+    if (!candidate.current || ["succeeded", "running"].includes(candidate.status)) continue
+    const read = entryReadState(
+      store.entry?.(candidate.sourceKey, candidate.itemId) ?? candidate.body,
+    )
+    if (read === true) skip.push(candidate.seq)
+    else if (read === false) revive.push(candidate.seq)
+  }
+  if (skip.length || revive.length) store.processingState.settleRead(skip, revive)
+  return { skip, revive }
+}
+
 async function prepareNormalEntryBatches(
   options: EntryProcessingOptions,
   candidates: ReturnType<ProcessingEngineStore["automation"]["inputs"]>,
@@ -316,6 +357,8 @@ async function prepareNormalEntryBatches(
       candidate.status !== "pending" ||
       !sourceKeys.has(candidate.sourceKey) ||
       !withinWindow(candidate.body.publishedAt, historySince, cutoffAt) ||
+      // 已读条目在批层就要挡掉，否则会先花一次批量模型调用再在原单篇路径被丢弃。
+      entryReadState(entrySnapshots.get(candidate.seq)) === true ||
       options.store.processingState.material(candidate) !== "complete"
     )
       continue

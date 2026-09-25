@@ -68,6 +68,20 @@ export function syncServiceProcessingRoles(): Promise<void> {
 }
 
 /**
+ * 写入覆盖（恢复／隐藏）之后的强制刷新。
+ *
+ * 不能直接复用 `syncServiceProcessingRoles`：它为了让「同一时刻只发一次请求」而做了重入门闩，
+ * 覆盖写入后如果恰好有一次轮询在途，就会拿到写入**之前**发起的响应，界面上表现为「点了没反应」，
+ * 要等下一次轮询（最长 60s）才生效。这里先等在途请求收尾，再发起一次全新的读取。
+ */
+export async function refreshServiceProcessingRoles(): Promise<void> {
+  const inFlight = pendingSync
+  if (inFlight) await inFlight.catch(() => {})
+  pendingSync = null
+  await syncServiceProcessingRoles()
+}
+
+/**
  * 把处理服务的决策接进时间线。只在处理服务可用的部署（`local.folo.is`）下工作，
  * 正式站点不请求本地服务。
  *

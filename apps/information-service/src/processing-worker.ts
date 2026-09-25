@@ -4,7 +4,7 @@ import type { AIConfigStore } from "./ai-config"
 import { expandXContexts } from "./content-identity"
 import type { FoloReader } from "./folo"
 import { runSemanticDedupe } from "./processing-dedupe"
-import { runEntryProcessing } from "./processing-engine"
+import { runEntryProcessing, settleReadStates } from "./processing-engine"
 import type { ProcessingTriggerStatus } from "./processing-schedule"
 import { acquireSources } from "./processing-source-sync"
 import { errorCode, sourceText } from "./service"
@@ -81,6 +81,8 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       store.stories.invalidateInputs(
         store.automation.invalidateSources([...new Set(changedSources)]),
       )
+    // 已读条目在抓详情之前就退出队列：材料水合与可读性提取都不该为它们白跑一遍。
+    settleReadStates(store)
     const material = await hydrateMaterials(
       options,
       trigger.sourceKeys,

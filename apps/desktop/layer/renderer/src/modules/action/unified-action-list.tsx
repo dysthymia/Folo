@@ -79,8 +79,13 @@ const UnifiedRuleListItem = ({
   isActive: boolean
   onSelect: (id: string) => void
 }) => {
-  const { t } = useTranslation(["settings", "app"])
-  // 与 scopeBadgeLabel 一致：跨命名空间的字面量键在这里收窄，避免多命名空间的键联合类型误报。
+  // 这一行同时用到两个命名空间：徽标走 app（`processing.scope`、`automation.*`），
+  // 停用/无动作提示走 settings（`actions.action_card.summary.*`）。
+  // react-i18next 的 `useTranslation([ns1, ns2])` **默认只用 ns1 绑定 t**
+  // （`useTranslation.js` 里 `getFixedT(lng, namespaces[0], …)`，只有 `nsMode: "fallback"`
+  // 才会把整个数组传下去），所以必须显式声明回退模式，否则 app 侧的键会原样打到界面上。
+  const { t } = useTranslation(["settings", "app"], { nsMode: "fallback" })
+  // 与下方的 t 一致：跨命名空间的字面量键在这里收窄，避免多命名空间的键联合类型误报。
   const tr = (key: string) => t(key as never)
   return (
     <button

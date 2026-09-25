@@ -56,7 +56,7 @@ export const MergedEntriesBadge = ({
   const dialog = useModalStack()
   const role = useEntryProcessingRole(entryId)
   const mergedEntries = useEntryProcessingRoleRelatedEntries(entryId)
-  const { setMode, busy } = useProcessingEntryOverride()
+  const { setMode, busy, failed } = useProcessingEntryOverride()
   const isStory = role?.kind === "story" && Boolean(role.storyId)
   const isHidden = role?.kind === "hidden"
   const isRestored = role?.kind === "restored"
@@ -110,10 +110,17 @@ export const MergedEntriesBadge = ({
                 disabled={busy}
                 onClick={() => void setMode(inputSeq, isRestored ? "automatic" : "restore")}
               >
-                {isRestored
-                  ? t("processing.badge.back_to_automatic")
-                  : t("processing.reader.override.restore")}
+                {t(
+                  isRestored
+                    ? "processing.badge.back_to_automatic"
+                    : "processing.reader.override.restore",
+                )}
               </button>
+            )}
+            {failed && (
+              <p role="alert" className="text-red">
+                {t("processing.badge.override_failed")}
+              </p>
             )}
           </div>
         </HoverCardContent>

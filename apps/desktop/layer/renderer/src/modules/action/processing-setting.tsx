@@ -41,6 +41,7 @@ import {
 } from "./processing-run-settings"
 import { ProcessingTags } from "./processing-tags"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
+import { resolveLiveReleaseVersion } from "./release-version"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
 
 const client = createProcessingClient(getOneTimeToken)
@@ -51,7 +52,14 @@ type TransferStatus =
   | "processing.transfer_imported"
   | "processing.transfer_invalid"
 type MigrationSwitchStatus = "switched" | "changed" | "failed"
-export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
+export function ProcessingSetting({
+  onDirty,
+  onSaved,
+}: {
+  onDirty: (dirty: boolean) => void
+  // 保存成功后回调（不含发布/计划）：统一列表据此重新取数，把本页内新建的规则显示出来。
+  onSaved?: () => void
+}) {
   const { t } = useTranslation("app")
   const { ask } = useDialog()
   const [editor, setEditor] = useState<ProcessingEditor | null>(null)
@@ -97,10 +105,8 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
   // 刷新后使用服务端发布记录恢复运行资格；旧 revision 的发布不能解锁当前新草稿。
   const currentRevisionPublished =
     !!release || !!editor?.releases.some((item) => item.draftRevision === editor.revision)
-  // 已生效版本：取历史发布里的最高版本号，不依赖返回顺序。
-  const liveReleaseVersion = editor?.releases.length
-    ? Math.max(...editor.releases.map((item) => item.version))
-    : (release?.version ?? null)
+  // 已生效版本：把「本次刚发布」与历史列表一起取最大，只读历史会显示上一版（见 release-version.ts）。
+  const liveReleaseVersion = resolveLiveReleaseVersion(editor?.releases ?? [], release)
   const canRun =
     !!schedule?.config &&
     schedule.config.sourceKeys.length > 0 &&
@@ -302,6 +308,7 @@ export function ProcessingSetting({ onDirty }: { onDirty: (dirty: boolean) => vo
       setDraft(result.config)
       setRelease(null)
       setSaved(true)
+      onSaved?.()
       return true
     } catch (cause) {
       if (!controller.signal.aborted) reportError(cause)

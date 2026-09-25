@@ -32,6 +32,11 @@ import {
 } from "~/modules/action/action-scope"
 import { RuleCard } from "~/modules/action/rule-card"
 import {
+  isProcessingDetailSelection,
+  resolveInitialSelection,
+  resolveRequestedScope,
+} from "~/modules/action/rule-selection"
+import {
   buildActionSummary,
   buildConditionSummary,
   getRuleDisplayName,
@@ -89,17 +94,7 @@ const EmptyActionPlaceholder = ({ onCreateRule }: { onCreateRule: () => void }) 
   )
 }
 
-// 执行位置降为详情内的标识，不再作为主界面入口。?scope= 仅作初始定位，不强制先选执行位置。
-const parseRequestedScope = (): UnifiedRuleScope | null => {
-  const requested = new URLSearchParams(window.location.search).get("scope")
-
-  if (requested === "cloud" || requested === "local") return requested
-  // 处理服务只在本机部署可用，不接受跨域直接进入。
-  if (requested === "processing_service" && isLocalFoloHost()) return "processing_service"
-
-  return null
-}
-
+// 执行位置降为详情内的标识，不再作为主界面入口。?scope= 与默认执行位置的解析见 ./rule-selection。
 const parseRowId = (id: string): { scope: UnifiedRuleScope; key: string } | null => {
   const separator = id.indexOf(":")
   if (separator < 0) return null
@@ -113,12 +108,27 @@ export const ActionSetting = () => {
 
   useLocalActionHydration(user?.id)
 
-  const initialScope = useMemo(() => parseRequestedScope(), [])
+  const local = isLocalFoloHost()
+  const initialScope = useMemo(
+    () =>
+      resolveRequestedScope({
+        requested: new URLSearchParams(window.location.search).get("scope"),
+        local,
+      }),
+    [local],
+  )
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const cloudRules = useActionRules()
   const localRules = useLocalActionRules()
-  const { rules: processingRules, available: processingAvailable } = useProcessingServiceRules()
+  const {
+    rules: processingRules,
+    available: processingAvailable,
+    refresh: refreshProcessingRules,
+  } = useProcessingServiceRules()
+  // 处理服务只在本机部署可用：本机且 2240 可达时，即使一条规则都没有也要能进入它的编辑面板，
+  // 否则处理服务规则集为空就再也没有路径新建第一条规则（深链 ?scope=processing_service 会选空）。
+  const canOpenProcessingDetail = local && processingAvailable === true
 
   const cloudRows: UnifiedRuleRow[] = cloudRules.map((rule, index) => ({
     id: `cloud:${index}`,
@@ -136,16 +146,19 @@ export const ActionSetting = () => {
     actionSummary: buildActionSummary(rule, tSettings),
     enabled: !rule.result.disabled,
   }))
-  // 摘要函数只依赖 (key) => string，收窄一次避免把命名空间的字面量键类型带进去。
-  const tSettingsKey = useCallback((key: string) => tSettings(key as never), [tSettings])
-  const tAppKey = useCallback((key: string) => tApp(key as never), [tApp])
+  // 摘要函数只依赖 (key) => string。处理服务规则的条件摘要在 settings（`actions.action_card.all`）、
+  // 处理方式摘要在 app（`processing.type.*`），而 react-i18next 的 `useTranslation([ns1, ns2])`
+  // **默认只用 ns1 绑定 t**（只有 `nsMode: "fallback"` 才把整个数组传下去），所以这里显式要求回退模式，
+  // 让同一个 t 能同时查两个命名空间；否则条件摘要会原样显示 `actions.action_card.all`。
+  const { t: tSummary } = useTranslation(["settings", "app"], { nsMode: "fallback" })
+  const tSummaryKey = useCallback((key: string) => tSummary(key as never), [tSummary])
 
   const processingRows: UnifiedRuleRow[] = processingRules.map((rule) => ({
     id: `processing_service:${rule.id}`,
     scope: "processing_service",
     name: rule.name,
-    conditionSummary: buildProcessingConditionSummary(rule.when, tSettingsKey),
-    actionSummary: buildProcessingActionSummary(rule.actions, tAppKey),
+    conditionSummary: buildProcessingConditionSummary(rule.when, tSummaryKey),
+    actionSummary: buildProcessingActionSummary(rule.actions, tSummaryKey),
     enabled: rule.enabled,
     enableBlocked: !processingAvailable,
   }))
@@ -156,12 +169,24 @@ export const ActionSetting = () => {
   )
   const hasRules = unifiedRows.length > 0
 
-  // 深链 ?scope= 仅作初始定位：选中该执行位置下的第一条规则，不强制先选执行位置。
+  // 深链 ?scope= 与本机部署「默认进入处理服务」仅作初始定位，不强制先选执行位置。
   useEffect(() => {
-    if (selectedId || !initialScope || unifiedRows.length === 0) return
-    const first = unifiedRows.find((rule) => rule.scope === initialScope)
+    if (selectedId) return
+    const next = resolveInitialSelection({
+      scope: initialScope,
+      rows: unifiedRows,
+      canOpenProcessingDetail,
+    })
+    if (next) setSelectedId(next)
+  }, [initialScope, selectedId, unifiedRows, canOpenProcessingDetail])
+
+  // 在虚拟详情里新建并保存了第一条规则后，把选中切到那条规则，列表才会出现高亮项。
+  // 详情面板在两种选中下都是同类型同位置挂载，切换选中不会重置编辑状态。
+  useEffect(() => {
+    if (!isProcessingDetailSelection(selectedId)) return
+    const first = processingRows[0]
     if (first) setSelectedId(first.id)
-  }, [initialScope, selectedId, unifiedRows])
+  }, [processingRows, selectedId])
 
   const selected = selectedId ? parseRowId(selectedId) : null
 
@@ -181,7 +206,13 @@ export const ActionSetting = () => {
   let detail: React.ReactNode = null
   if (selected) {
     if (selected.scope === "processing_service") {
-      detail = <ProcessingServiceDetail available={!!processingAvailable} onDirty={() => {}} />
+      detail = (
+        <ProcessingServiceDetail
+          available={!!processingAvailable}
+          onDirty={() => {}}
+          onRulesChanged={refreshProcessingRules}
+        />
+      )
     } else {
       const index = Number(selected.key)
       detail = (
@@ -203,10 +234,16 @@ export const ActionSetting = () => {
           <ShareImportSection />
         </ActionScopeProvider>
       </div>
-      {hasRules ? (
+      {hasRules || isProcessingDetailSelection(selectedId) ? (
         <div className="flex min-h-0 w-full flex-1">
-          <UnifiedActionList rules={unifiedRows} selectedId={selectedId} onSelect={setSelectedId} />
-          <div className="flex min-h-0 flex-1 border-l border-fill-secondary">
+          {hasRules && (
+            <UnifiedActionList
+              rules={unifiedRows}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
+          )}
+          <div className={cn("flex min-h-0 flex-1", hasRules && "border-l border-fill-secondary")}>
             {detail ?? (
               <div className="flex flex-1 items-center justify-center text-sm text-text-secondary">
                 {tApp("automation.select_rule_hint")}

@@ -78,6 +78,32 @@ export class ProcessingStateStore {
     )
   }
 
+  /**
+   * 读态收敛：已读的当前输入直接进入终态，不再占用模型额度。
+   *
+   * `read` 不属于内容身份（automation-store 的身份比较显式忽略它），所以来源侧读到一半
+   * 不会自动让输入换代；队列里历史遗留的已读条目必须在这里显式收敛，否则会永久停留在
+   * 「待处理」并每轮重复参与候选。反向同样成立：来源侧又变回未读时要重新放回队列，
+   * 否则「跳过」会变成一个不可逆的黑洞。
+   *
+   * 只在读态明确时动作：`read` 为 `null`（例如 X 搜索来源没有读态）保持原状。失败态一并
+   * 收敛——已读条目的处理失败没有修复价值，留在失败视图只会误导。
+   */
+  settleRead(skip: number[], revive: number[]) {
+    const toSkipped = this.db.prepare(
+      "UPDATE processing_inputs SET status='skipped' WHERE seq=? AND current=1 AND status IN ('pending','failed')",
+    )
+    const toPending = this.db.prepare(
+      "UPDATE processing_inputs SET status='pending' WHERE seq=? AND current=1 AND status='skipped'",
+    )
+    let changed = 0
+    // 单条失败不必整体回滚：下一轮会重新计算，收敛本身是幂等的。
+    // `changes` 在 node:sqlite 的类型里是 `number | bigint`，显式归一化后再累加。
+    for (const seq of skip) changed += Number(toSkipped.run(seq).changes)
+    for (const seq of revive) changed += Number(toPending.run(seq).changes)
+    return changed
+  }
+
   cache(fingerprint: string): ProcessingDecision | null {
     const row = this.db
       .prepare("SELECT body FROM processing_model_cache WHERE fingerprint=?")

@@ -44,6 +44,7 @@ function fixture() {
   return {
     store,
     reader: async () => reader,
+    sourceReader: reader,
     aiConfig: new AIConfigStore("/unused-folo-test-ai-config.json"),
     runtimeDir: "/unused",
     acquire,
@@ -72,7 +73,7 @@ describe("调度到处理的后台链路", () => {
         id: "e",
         title: "原文",
         url: null,
-        read: true,
+        read: false,
         content: "完整正文",
         description: null,
         publishedAt: since,
@@ -99,6 +100,39 @@ describe("调度到处理的后台链路", () => {
       )
       expect(options.store.processingState.reports()).toHaveLength(1)
       expect(await runProcessingWorker(options, new AbortController().signal)).toBeNull()
+    } finally {
+      options.store.close()
+    }
+  })
+  it("已读条目在抓详情之前就退出队列，不消耗正文抓取与模型额度", async () => {
+    const options = fixture()
+    try {
+      const since = "2026-01-01T00:00:00Z"
+      options.store.saveEntry({
+        sourceKey: "feed/1",
+        id: "e",
+        title: "已读原文",
+        url: null,
+        read: true,
+        content: "完整正文",
+        description: null,
+        publishedAt: since,
+      })
+      options.store.schedule.save(
+        { sourceKeys: ["feed/1"], historySince: since, timeZone: "Asia/Shanghai", enabled: false },
+        0,
+      )
+      options.store.automation.publish(0, { mode: "future" }, randomUUID())
+      const queued = options.store.schedule.manual(randomUUID(), new Date())
+
+      expect(await runProcessingWorker(options, new AbortController().signal)).toEqual({
+        id: queued.id,
+        status: "succeeded",
+      })
+      const [input] = options.store.automation.inputs()
+      expect(input!.status).toBe("skipped")
+      expect(options.store.processingState.material(input!)).toBeNull()
+      expect(options.sourceReader.detail).not.toHaveBeenCalled()
     } finally {
       options.store.close()
     }

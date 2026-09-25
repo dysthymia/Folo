@@ -377,4 +377,24 @@ describe("createProcessingClient", () => {
     expect(processingRunSchema.safeParse({ ...processingRun, unknown: true }).success).toBe(false)
     expect(processingInputWireSchema.safeParse(processingInput).success).toBe(true)
   })
+
+  // 回归守护：「已读条目退出处理队列」把 `skipped` 引进状态机后，`/inputs` 的真实响应里
+  // 就会出现 status="skipped"。只要这里漏一个枚举值，整份响应都过不了 `.strict()` 校验，
+  // 详情面板会整体报「规则或服务响应无效，请检查填写内容。」而拿不到任何输入。
+  it("accepts the skipped terminal status returned by /inputs", async () => {
+    const skippedInput = { ...processingInput, status: "skipped", current: true }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ inputs: [skippedInput] }))
+    const client = createProcessingClient(async () => "token", fetcher)
+
+    await expect(client.loadInputs(new AbortController().signal)).resolves.toEqual({
+      inputs: [{ seq: 1, sourceKey: "feed:1", itemId: "entry-1", status: "skipped" }],
+    })
+    expect(processingInputWireSchema.safeParse(skippedInput).success).toBe(true)
+    // 枚举仍须闭合：未知状态不能被静默接受。
+    expect(
+      processingInputWireSchema.safeParse({ ...processingInput, status: "archived" }).success,
+    ).toBe(false)
+  })
 })

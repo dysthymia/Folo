@@ -26,14 +26,14 @@ function fixture() {
   return store
 }
 
-function entry(id: string, publishedAt: string): SourceEntry {
+function entry(id: string, publishedAt: string, read = false): SourceEntry {
   return {
     id,
     sourceKey: "feed/f1",
     title: `来源 ${id}`,
     url: `https://example.test/${id}`,
     publishedAt,
-    read: false,
+    read,
     content: `来源 ${id} 的可核查事实。`,
     description: null,
   }
@@ -406,7 +406,7 @@ describe("稳定阅读快照", () => {
     })
 
     expect(processingApi(store, "GET", "/reading-snapshot", {})).toMatchObject({
-      counts: { standalone: 3, stories: 0, hidden: 1, pending: 1, failed: 1 },
+      counts: { standalone: 3, stories: 0, hidden: 1, pending: 1, skipped: 0, failed: 1 },
       processing: {
         runStatus: "pending",
         sourceTotal: 1,
@@ -428,6 +428,42 @@ describe("稳定阅读快照", () => {
     expect(store.reading.page({ snapshotId: snapshot.id, view: "failed" })).toMatchObject({
       total: 1,
       items: [{ kind: "entry", state: "pending", inputSeq: failedTarget.seq, status: "failed" }],
+    })
+  })
+
+  it("已读跳过与待处理分开计数，并可从独立视图查看", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishInput(store, entry("ready", "2026-01-01T00:00:00.000Z"))
+    store.saveEntry(entry("waiting", "2026-01-02T00:00:00.000Z"))
+    const pendingTarget = store.automation.inputs().at(-1)!
+    store.saveEntry(entry("already-read", "2026-01-03T00:00:00.000Z", true))
+    const skippedTarget = store.automation.inputs().at(-1)!
+    store.processingState.settleRead([skippedTarget.seq], [])
+    store.schedule.save(
+      {
+        sourceKeys: [source.key],
+        historySince: "2026-01-01T00:00:00.000Z",
+        timeZone: "Asia/Shanghai",
+        enabled: true,
+        times: ["08:00"],
+      },
+      0,
+    )
+    store.reading.refresh()
+
+    expect(processingApi(store, "GET", "/reading-snapshot", {})).toMatchObject({
+      // 已读条目不再计入「待处理」，否则用户会把永不再处理的历史积压当成还在增长的队列。
+      counts: { standalone: 3, stories: 0, hidden: 0, pending: 1, skipped: 1, failed: 0 },
+    })
+    const snapshot = store.reading.snapshot()
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "pending" })).toMatchObject({
+      total: 1,
+      items: [{ kind: "entry", state: "pending", inputSeq: pendingTarget.seq }],
+    })
+    expect(store.reading.page({ snapshotId: snapshot.id, view: "skipped" })).toMatchObject({
+      total: 1,
+      items: [{ kind: "entry", state: "pending", inputSeq: skippedTarget.seq, status: "skipped" }],
     })
   })
 

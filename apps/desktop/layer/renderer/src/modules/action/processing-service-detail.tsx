@@ -11,9 +11,12 @@ import { ProcessingSetting } from "./processing-setting"
 export const ProcessingServiceDetail = ({
   available,
   onDirty,
+  onRulesChanged,
 }: {
   available: boolean
   onDirty: (dirty: boolean) => void
+  // 详情面板内保存成功后回调：统一列表据此重新取数，否则本页内新建的规则不会出现在列表里。
+  onRulesChanged?: () => void
 }) => {
   const { t } = useTranslation("app")
   if (!available) {
@@ -31,5 +34,5 @@ export const ProcessingServiceDetail = ({
       </section>
     )
   }
-  return <ProcessingSetting onDirty={onDirty} />
+  return <ProcessingSetting onDirty={onDirty} onSaved={onRulesChanged} />
 }

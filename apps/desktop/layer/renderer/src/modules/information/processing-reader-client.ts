@@ -117,6 +117,8 @@ const readingSnapshotCountsSchema = z
     stories: z.number().int().nonnegative(),
     hidden: z.number().int().nonnegative(),
     pending: z.number().int().nonnegative(),
+    // 已读跳过是后加的桶；旧版本服务不会返回它，缺省时按 0 处理。
+    skipped: z.number().int().nonnegative().optional(),
     failed: z.number().int().nonnegative(),
   })
   .strict()
@@ -169,7 +171,16 @@ export const readingSnapshotResponseSchema = z
 export const readingSnapshotPageSchema = z
   .object({
     snapshot: readingSnapshotSchema,
-    view: z.enum(["smart", "standalone", "all", "hidden", "pending", "failed", "stories"]),
+    view: z.enum([
+      "smart",
+      "standalone",
+      "all",
+      "hidden",
+      "pending",
+      "skipped",
+      "failed",
+      "stories",
+    ]),
     offset: z.number().int().nonnegative(),
     limit: z.number().int().positive().max(50),
     total: z.number().int().nonnegative(),

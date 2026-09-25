@@ -372,7 +372,10 @@ export const processingInputWireSchema = z
     receivedAt: isoDateTime,
     releaseVersion: positiveIntegerSchema.nullable(),
     generation: revisionSchema,
-    status: z.enum(["pending", "running", "succeeded", "failed"]),
+    // `skipped` 是「已读条目退出处理队列」引入的终态：已读条目不再消耗额度，
+    // 状态机里必须有它，否则 /inputs 响应过不了这里的 .strict() 校验，
+    // 详情面板会整体报「规则或服务响应无效」而拿不到任何输入。
+    status: z.enum(["pending", "running", "succeeded", "failed", "skipped"]),
     current: z.boolean(),
   })
   .strict()

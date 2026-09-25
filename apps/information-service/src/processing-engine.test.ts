@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest"
 
 import type { CodexJsonOptions } from "./codex"
 import type { ProcessingEngineStore } from "./processing-engine"
-import { runEntryProcessing } from "./processing-engine"
+import { runEntryProcessing, settleReadStates } from "./processing-engine"
 import { SOURCE_FIDELITY_REQUIREMENTS } from "./processing-prompt"
 
 const entry = {
@@ -54,14 +54,21 @@ const release: RuleSet = {
   ],
 }
 
-function storeFixture(mode: "restore" | "hide" | "automatic" = "automatic", tagIds: string[] = []) {
+function storeFixture(
+  mode: "restore" | "hide" | "automatic" = "automatic",
+  tagIds: string[] = [],
+  read = entry.read,
+) {
   let cached: unknown = null
   let completed: unknown = null
   let material: "complete" | "missing" | "failed" | null = null
   const failed: string[] = []
+  const settled: Array<{ skip: number[]; revive: number[] }> = []
+  // `read` 不属于内容身份，夹具按需覆盖，用来验证已读条目不再进入模型调用。
+  const currentInput = read === entry.read ? input : { ...input, body: { ...entry, read } }
   const store = {
     automation: {
-      inputs: () => [input],
+      inputs: () => [currentInput],
       release: () => release,
       complete: (_target: unknown, decision: unknown) => {
         completed = decision
@@ -71,7 +78,7 @@ function storeFixture(mode: "restore" | "hide" | "automatic" = "automatic", tagI
     },
     processingState: {
       prepare: (_seq: number, snapshot: unknown) => ({
-        input,
+        input: currentInput,
         snapshot,
       }),
       start: () => true,
@@ -85,6 +92,11 @@ function storeFixture(mode: "restore" | "hide" | "automatic" = "automatic", tagI
         material = status
       },
       overrides: () => [{ inputSeq: input.seq, mode, revision: 1 }],
+      // 读态收敛在真实 Store 上一次写库；夹具只记录调用，不改内存里的 status。
+      settleRead: (skip: number[], revive: number[]) => {
+        settled.push({ skip: [...skip], revive: [...revive] })
+        return skip.length + revive.length
+      },
     },
     sources: () => [
       { key: "feed/1", kind: "feed", id: "1", title: "媒体订阅", view: 0, category: null },
@@ -112,6 +124,7 @@ function storeFixture(mode: "restore" | "hide" | "automatic" = "automatic", tagI
     store,
     completed: () => completed,
     failed,
+    settled,
     setMaterial: (status: "complete" | "missing" | "failed") =>
       store.processingState.setMaterial(input, status),
   }
@@ -196,6 +209,7 @@ function batchStoreFixture(count: number) {
         failed.push({ inputSeq: target.seq, code }),
       material: () => "complete" as const,
       overrides: () => [],
+      settleRead: () => 0,
     },
     sources: () => [
       { key: "feed/1", kind: "feed", id: "1", title: "媒体订阅", view: 0, category: null },
@@ -438,6 +452,74 @@ describe("单篇处理 engine", () => {
 
     expect(result).toMatchObject({ completed: 0, pending: 1, failures: [] })
     expect(prompts).toEqual([])
+  })
+
+  it("已读条目不再请求模型，并在收敛时落为跳过态", async () => {
+    const fixture = storeFixture("automatic", [], true)
+    fixture.setMaterial("complete")
+    // 收敛由 worker 在抓正文之前调用；这里单独验证映射与幂等，不依赖 worker。
+    expect(settleReadStates(fixture.store)).toEqual({ skip: [1], revive: [] })
+    const prompts: string[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: executeWith(
+        {
+          entryId: "entry-1",
+          title: "标题",
+          summary: "摘要",
+          disposition: "keep",
+          reason: "原因",
+          aggregation: false,
+          rewrite: false,
+          labels: [],
+          facts: [],
+        },
+        prompts,
+      ),
+    })
+
+    // 既不请求模型，也不计入 pending：已读条目必须退出队列而不是每轮重新排队。
+    expect(result).toMatchObject({ completed: 0, pending: 0, failures: [] })
+    expect(prompts).toEqual([])
+    expect(fixture.settled).toEqual([{ skip: [1], revive: [] }])
+  })
+
+  it("来源侧又变回未读时把跳过态放回队列", async () => {
+    const fixture = storeFixture()
+    fixture.setMaterial("complete")
+    expect(settleReadStates(fixture.store)).toEqual({ skip: [], revive: [1] })
+    const prompts: string[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: executeWith(
+        {
+          entryId: "entry-1",
+          title: "标题",
+          summary: "摘要",
+          disposition: "keep",
+          reason: "原因",
+          aggregation: false,
+          rewrite: false,
+          labels: [],
+          facts: [],
+        },
+        prompts,
+      ),
+    })
+
+    expect(result).toMatchObject({ completed: 1, pending: 0, failures: [] })
+    expect(prompts).toHaveLength(1)
+    expect(fixture.settled).toEqual([{ skip: [], revive: [1] }])
   })
 
   it("按 historySince 与 cutoffAt 过滤候选，不将窗口外文章交给模型", async () => {

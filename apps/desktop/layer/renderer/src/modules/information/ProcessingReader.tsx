@@ -521,15 +521,21 @@ export function ProcessingReader() {
         </button>
       </div>
       {readingStatus?.counts && (
-        <div
-          className="flex flex-wrap gap-2 text-sm"
-          aria-label={t("processing.reader.status.counts")}
-        >
-          {(["standalone", "stories", "hidden", "pending", "failed"] as const).map((key) => (
-            <span key={key} className="rounded-full bg-fill px-3 py-1 text-text-secondary">
-              {t(`processing.reader.status.count.${key}`)} {readingStatus.counts?.[key]}
-            </span>
-          ))}
+        <div className="space-y-1">
+          <div
+            className="flex flex-wrap gap-2 text-sm"
+            aria-label={t("processing.reader.status.counts")}
+          >
+            {(["standalone", "stories", "hidden", "pending", "skipped", "failed"] as const).map(
+              (key) => (
+                <span key={key} className="rounded-full bg-fill px-3 py-1 text-text-secondary">
+                  {t(`processing.reader.status.count.${key}`)} {readingStatus.counts?.[key] ?? 0}
+                </span>
+              ),
+            )}
+          </div>
+          {/* 快照成员按设计冻结在创建时刻，与时间线的全量角色投影不是一个口径。 */}
+          <p className="text-xs text-text-tertiary">{t("processing.reader.status.counts_note")}</p>
         </div>
       )}
       {(readingStatus?.processing || readingStatus?.schedule) && (
@@ -618,7 +624,7 @@ export function ProcessingReader() {
         </p>
       )}
       <div className="flex flex-wrap gap-2" role="group" aria-label={t("processing.reader.views")}>
-        {(["smart", "hidden", "pending", "failed"] as const).map((value) => (
+        {(["smart", "hidden", "pending", "skipped", "failed"] as const).map((value) => (
           <button
             type="button"
             key={value}

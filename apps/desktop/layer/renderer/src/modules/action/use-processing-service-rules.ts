@@ -1,5 +1,5 @@
 import type { AutomationRule } from "@follow/information-core"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 import { getOneTimeToken, isLocalFoloHost } from "../ai-chat/local-provider"
 import { createProcessingClient } from "./processing-client"
@@ -13,12 +13,16 @@ export type ProcessingServiceRulesState = {
   // null = 加载中；true = 可用（本机部署且 2240 可达）；false = 不可用
   available: boolean | null
   loading: boolean
+  // 详情面板里保存后重新取一次，否则统一列表看不见刚建的规则（本页内的编辑不刷新页面）。
+  refresh: () => void
 }
 
 export function useProcessingServiceRules(): ProcessingServiceRulesState {
   const [rules, setRules] = useState<AutomationRule[]>([])
   const [available, setAvailable] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
+  const [revision, setRevision] = useState(0)
+  const refresh = useCallback(() => setRevision((value) => value + 1), [])
 
   useEffect(() => {
     // 非本机部署直接判定不可用，避免向官方域请求一次性凭据。
@@ -42,7 +46,7 @@ export function useProcessingServiceRules(): ProcessingServiceRulesState {
         setLoading(false)
       })
     return () => controller.abort()
-  }, [])
+  }, [revision])
 
-  return { rules, available, loading }
+  return { rules, available, loading, refresh }
 }
