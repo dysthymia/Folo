@@ -557,6 +557,21 @@
 1. **必须加 `--continue`。** 不加时，任何一个任务失败都会让 turbo 直接中止其余任务——本轮就出现过「一个与本次改动无关的测试在重负载下超时」把 `lint` 与 `format:check` 一起杀掉、看不到它们真实结果的情况。加 `--continue` 才能拿到完整判断。
 2. **`src/modules/integration/custom-integration-manager.test.ts` 在重负载下会抖动。** 该用例默认 5s 超时，并行跑全仓时实测 5180ms 超时失败，单独跑 617ms 通过；与本次改动无关。若要长期稳定，应给它单独的 timeout 或降低其真实耗时。
 
+### 11.8 提交后复核：服务端产物曾比源码旧一处，已重装对齐
+
+提交前只核对了「构建产物 ↔ 已安装运行时」的 md5（当时两者一致，都是 `b79c12605449f851d491878ae52d1dc2`），**没有核对「已安装运行时 ↔ 当前源码」**。提交后补做这一步时发现不一致：
+
+| 项         | 结果                                                                                                                                                                                                                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 差异是什么 | 只有 2 行，都在 `processing-state.ts` 的 `settleRead()`：已安装版本是 `changed += toSkipped.run(seq).changes`，当前源码构建出 `changed += Number(toSkipped.run(seq).changes)`                                                                                                          |
+| 为什么会差 | `node:sqlite` 的 `run()` 返回 `changes: number \| bigint`，直接 `let changed: number; changed += ...` 过不了 `tsc`，所以事后补了 `Number()`。**运行时等价**（实测 `.changes` 是普通 number），但字节不同                                                                               |
+| 证据       | md5 旧 `b79c12605449f851d491878ae52d1dc2`（2 383 685 B）/ 新 `6a3e97d0b95b5173e4fe01ecc0df0123`（2 383 701 B）；按行 diff 恰好 2 行不同                                                                                                                                                |
+| 渲染层侧   | **一致**。`main-web` 构建于 17:42，其下唯一更新的渲染层文件是测试文件 `unified-action-list.i18n.test.tsx`（不进包），因此主站产物就是已提交源码的产物                                                                                                                                  |
+| 处理       | 旧产物留档到 `backups/information-runtime-index-20260925T191206.mjs` → 覆盖 `information-runtime/index.mjs` → `launchctl kickstart -k`（重启前先确认库里**没有** `running` 的 job/trigger，本轮实测无）→ 新 pid 64620                                                                  |
+| 重装后复核 | 运行时与构建产物 md5 一致（`6a3e97d0…`）；`/information`、`/health`、`/`、`/action?scope=processing_service`、`/information` **全部 200**；重跑 `/action` 探针结论**完全不变**（`{skipped: 4150, succeeded: 5474}`、错误文案 0、raw key 空、`pageErrors` 空、入口 `main-CkDHkpEa.js`） |
+
+**教训（可直接复用）**：部署核对要做**两步**——「产品代码构建产物 ↔ 已安装运行时」和「当前源码 ↔ 构建产物」。只做前者会在「源码改过、但改的是类型层面」时给出假绿。判定第二步最省事的办法是**重建一次再比 md5**（本轮就是靠它发现的），比逐文件比 mtime 可靠（`lint-staged` 的 `prettier --write` 会刷新 mtime 而不改内容）。
+
 ## 12. 方法学纠错（第 7 条）与产物/运行时陷阱（读这个库与调这个前端时最容易踩的）
 
 ### 12.1 第 7 条（最重要）：**「隐藏」不是 `policy` 上的字段，而是 `body.status === "hide"`**
