@@ -46,6 +46,7 @@ import { toastFetchError } from "~/lib/error-parser"
 import { useSettingModal } from "~/modules/settings/modal/useSettingModal"
 import { feed as feedQuery, useFeedQuery } from "~/queries/feed"
 
+import { FeedSubscriptionTags } from "../action/feed-subscription-tags"
 import { ViewSelectorRadioGroup } from "../shared/ViewSelectorRadioGroup"
 import { FeedSummary } from "./FeedSummary"
 
@@ -481,6 +482,8 @@ const FeedInnerForm = ({
           />
         </form>
       </Form>
+      {/* 标签写入本机信息服务、即时生效，因此不放进表单的保存流程；新建订阅时来源还不存在，只在编辑时展示。 */}
+      {isSubscribed && <FeedSubscriptionTags feedId={id || feed.id} />}
       <RootPortal to={placeholderRef.current}>
         <div className="flex items-center justify-end gap-4 pt-2">
           {isSubscribed && (

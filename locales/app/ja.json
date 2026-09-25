@@ -978,6 +978,8 @@
   "processing.summary_length": "要約の文字数上限",
   "processing.tag_name": "新しいタグ名",
   "processing.tags": "非公開購読タグ",
+  "processing.tags_form_empty": "タグがまだありません。まず「アクション」ページの「非公開購読タグ」で作成してください。",
+  "processing.tags_form_hint": "チェックするとこの購読元にタグを付け、外すと解除します。タグは本機の処理サービスでのみ使い、分類も公開リストも変更しません。",
   "processing.tags_hint": "分類や公開リストを変更せず、購読元の役割やテーマを付けます。",
   "processing.tags_scope_categories": "カテゴリ",
   "processing.tags_scope_lists": "List",
