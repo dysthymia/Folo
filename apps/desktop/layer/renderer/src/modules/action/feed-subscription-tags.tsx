@@ -241,14 +241,16 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
         {showList && (
           <ul
             data-testid="feed-form-processing-tags-options"
-            className="shadow-context-menu absolute inset-x-0 top-full z-10 mt-1 max-h-52 overflow-y-auto rounded-md border border-fill-secondary bg-material-medium p-1"
+            // `bg-material-medium` 是半透明材质，必须配 backdrop-blur 才可读 —— 否则底下的
+            // 表单项会透上来把文字搅糊。这几项与同表单「分类」的 AutoCompletion 下拉保持一致。
+            className="shadow-context-menu absolute inset-x-0 top-full z-10 mt-1 max-h-52 overflow-y-auto rounded-[6px] border bg-material-medium p-1 text-text backdrop-blur-background"
           >
             {canCreate && (
               <li>
                 <button
                   type="button"
                   data-testid="feed-form-processing-tags-create"
-                  className="flex w-full items-center gap-2 rounded-[5px] px-2 py-1.5 text-left text-sm hover:bg-theme-item-hover"
+                  className="flex w-full cursor-menu items-center gap-2 rounded-[5px] px-2.5 py-1.5 text-left hover:bg-theme-item-hover"
                   disabled={busy}
                   onClick={() => createTag(trimmedQuery)}
                 >
@@ -265,7 +267,7 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
                     type="button"
                     data-testid="feed-form-processing-tags-option"
                     data-checked={checked}
-                    className="flex w-full items-center gap-2 rounded-[5px] px-2 py-1.5 text-left text-sm hover:bg-theme-item-hover"
+                    className="flex w-full cursor-menu items-center gap-2 rounded-[5px] px-2.5 py-1.5 text-left hover:bg-theme-item-hover"
                     disabled={busy}
                     onClick={() => toggleTag(tag.id, !checked)}
                   >
@@ -278,7 +280,7 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
               )
             })}
             {showEmptyHint && (
-              <li className="px-2 py-1.5 text-sm text-text-secondary">
+              <li className="px-2.5 py-1.5 text-text-secondary">
                 {t("processing.tags_form_no_match")}
               </li>
             )}
