@@ -411,6 +411,9 @@ const FeedInnerForm = ({
               </FormItem>
             )}
           />
+          {/* 标签紧跟分类：这两项都是「给这个源补元数据」，放一起最顺手。
+              标签写入本机信息服务、即时生效，不随表单保存；新建订阅时来源还不存在，只在编辑时展示。 */}
+          {isSubscribed && <FeedSubscriptionTags feedId={id || feed.id} />}
           <FormField
             control={form.control}
             name="isPrivate"
@@ -482,8 +485,6 @@ const FeedInnerForm = ({
           />
         </form>
       </Form>
-      {/* 标签写入本机信息服务、即时生效，因此不放进表单的保存流程；新建订阅时来源还不存在，只在编辑时展示。 */}
-      {isSubscribed && <FeedSubscriptionTags feedId={id || feed.id} />}
       <RootPortal to={placeholderRef.current}>
         <div className="flex items-center justify-end gap-4 pt-2">
           {isSubscribed && (

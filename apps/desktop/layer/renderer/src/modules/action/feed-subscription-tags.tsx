@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { getOneTimeToken, isLocalFoloHost } from "../ai-chat/local-provider"
@@ -10,12 +10,13 @@ const client = createProcessingClient(getOneTimeToken)
 type FeedSubscriptionTag = { id: string; name: string }
 
 /**
- * 「编辑订阅」弹窗里的私人订阅标签区块。
+ * 「编辑订阅」弹窗里的私人订阅标签，做成交互式多选（类似 Notion 的多选属性）：
+ * 已选项以 chip 呈现，输入框可过滤已有标签，也能**就地创建**新标签。
  *
  * 写入的是本机信息服务的 `source-tags`，与「设置 → 订阅源」的「我的标签」列、
  * 「Actions → 我的处理服务 → 私人订阅标签」读写同一份数据（都以 `feed/<id>` 为 source key）。
  *
- * 标签是即时生效的，不参与外层表单的保存流程，所以挂在 FeedForm 的 </Form> 之后。
+ * 标签即时生效，不参与外层表单的保存流程。
  */
 export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
   const { t } = useTranslation("app")
@@ -27,8 +28,13 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
   const [tagIds, setTagIds] = useState<string[]>([])
   const [revision, setRevision] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [pendingTagId, setPendingTagId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ProcessingRequestError["kind"] | null>(null)
+  const [query, setQuery] = useState("")
+  const [open, setOpen] = useState(false)
+
+  const rootRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
@@ -59,46 +65,127 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
     return () => controller.abort()
   }, [enabled, read])
 
-  const toggle = useCallback(
-    async (tagId: string, checked: boolean) => {
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", onPointerDown)
+    return () => document.removeEventListener("mousedown", onPointerDown)
+  }, [open])
+
+  /** 所有写入都走这里：先乐观更新本地，失败回滚，成功后以服务端快照为准。 */
+  const run = useCallback(
+    async (operation: (signal: AbortSignal) => Promise<unknown>, rollback: () => void) => {
       const controller = new AbortController()
       controllerRef.current = controller
-      setPendingTagId(tagId)
+      setBusy(true)
       setError(null)
-      // 先动本地、失败再回滚；写入用服务端最新 revision，避免与其它窗口并发写冲突。
-      setTagIds((current) =>
-        checked ? [...new Set([...current, tagId])] : current.filter((id) => id !== tagId),
-      )
       try {
-        await client.bindTags(
-          [sourceKey],
-          [tagId],
-          checked ? "add" : "remove",
-          revision,
-          controller.signal,
-        )
+        await operation(controller.signal)
         await read(controller.signal)
       } catch (cause) {
         if (controller.signal.aborted) return
-        setTagIds((current) =>
-          checked ? current.filter((id) => id !== tagId) : [...new Set([...current, tagId])],
-        )
+        rollback()
         setError(cause instanceof ProcessingRequestError ? cause.kind : "request")
       } finally {
-        if (!controller.signal.aborted) setPendingTagId(null)
+        if (!controller.signal.aborted) setBusy(false)
       }
     },
-    [read, revision, sourceKey],
+    [read],
   )
+
+  const toggleTag = useCallback(
+    (tagId: string, checked: boolean) => {
+      // 写入用服务端最新 revision，避免与其它窗口并发写冲突。
+      setTagIds((current) =>
+        checked ? [...new Set([...current, tagId])] : current.filter((id) => id !== tagId),
+      )
+      void run(
+        (signal) =>
+          client.bindTags([sourceKey], [tagId], checked ? "add" : "remove", revision, signal),
+        () =>
+          setTagIds((current) =>
+            checked ? current.filter((id) => id !== tagId) : [...new Set([...current, tagId])],
+          ),
+      )
+    },
+    [revision, run, sourceKey],
+  )
+
+  const createTag = useCallback(
+    (name: string) => {
+      setQuery("")
+      // 回滚要恢复的三样：标签集、绑定、revision。
+      const before = { tags, tagIds, revision }
+      let bound = false
+      void run(
+        async (signal) => {
+          const created = await client.createTag(name, revision, signal)
+          const known = new Set(tags.map((tag) => tag.id))
+          const fresh = created.tags.find((tag) => !known.has(tag.id))
+          if (!fresh) throw new ProcessingRequestError("invalid")
+          // createTag 返回的快照本身就是权威标签集，先按它把 chip 画出来。
+          // 实测这一步之后还有「换凭据 + 绑定 + 换凭据 + 重读快照」约 4.6s，
+          // 等重读完再显示会让用户对着被禁用的输入框干等。
+          setTags(created.tags.map((tag) => ({ id: tag.id, name: tag.name })))
+          setRevision(created.revision)
+          setTagIds((current) => [...new Set([...current, fresh.id])])
+          // 绑定用创建后返回的新 revision，否则服务端判冲突。
+          await client.bindTags([sourceKey], [fresh.id], "add", created.revision, signal)
+          bound = true
+        },
+        () => {
+          // 只有「创建 / 绑定」本身失败才回滚。若绑定已成功、只是随后重读快照失败，
+          // 写入其实已经落库，回滚等于把用户刚建好的标签藏起来。
+          if (bound) return
+          setTags(before.tags)
+          setTagIds(before.tagIds)
+          setRevision(before.revision)
+        },
+      )
+    },
+    [revision, run, sourceKey, tagIds, tags],
+  )
+
+  const selectedTags = useMemo(
+    () => tagIds.map((id) => tags.find((tag) => tag.id === id)).filter((tag) => !!tag),
+    [tagIds, tags],
+  )
+  const trimmedQuery = query.trim()
+  const matchedTags = useMemo(() => {
+    if (!trimmedQuery) return tags
+    const needle = trimmedQuery.toLowerCase()
+    return tags.filter((tag) => tag.name.toLowerCase().includes(needle))
+  }, [tags, trimmedQuery])
+  // 同名标签已存在时不再给「创建」，避免建出重名项。
+  const canCreate =
+    trimmedQuery.length > 0 &&
+    !tags.some((tag) => tag.name.toLowerCase() === trimmedQuery.toLowerCase())
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      if (canCreate) createTag(trimmedQuery)
+      else if (matchedTags.length === 1) {
+        const only = matchedTags[0]!
+        toggleTag(only.id, !tagIds.includes(only.id))
+      }
+    } else if (event.key === "Escape") {
+      setOpen(false)
+    } else if (event.key === "Backspace" && !query && selectedTags.length > 0) {
+      toggleTag(selectedTags.at(-1)!.id, false)
+    }
+  }
 
   if (!enabled) return null
 
+  const showList = open && !loading
+  const showEmptyHint = showList && matchedTags.length === 0 && !canCreate
+
   return (
-    <section
-      data-testid="feed-form-processing-tags"
-      className="rounded-xl border border-fill-secondary p-4"
-    >
-      <p className="font-medium">{t("processing.tags")}</p>
+    <div data-testid="feed-form-processing-tags">
+      <p className="text-sm font-medium text-text">{t("processing.tags")}</p>
       <p className="mt-1 text-xs leading-relaxed text-text-secondary">
         {t("processing.tags_form_hint")}
       </p>
@@ -107,28 +194,97 @@ export function FeedSubscriptionTags({ feedId }: { feedId: string }) {
           {t(`processing.error.${error}`)}
         </p>
       )}
-      {loading ? (
-        <p className="mt-3 text-sm text-text-secondary">{t("processing.loading")}</p>
-      ) : tags.length === 0 ? (
-        <p className="mt-3 text-sm text-text-secondary">{t("processing.tags_form_empty")}</p>
-      ) : (
-        <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
-          {tags.map((tag) => (
-            <li key={tag.id}>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  aria-label={tag.name}
-                  checked={tagIds.includes(tag.id)}
-                  disabled={pendingTagId !== null}
-                  onChange={(event) => void toggle(tag.id, event.target.checked)}
-                />
-                {tag.name}
-              </label>
-            </li>
+
+      <div ref={rootRef} className="relative mt-3">
+        <div
+          className="flex min-h-9 cursor-text flex-wrap items-center gap-1 rounded-md border border-fill-secondary bg-fill-quinary px-2 py-1"
+          onClick={() => inputRef.current?.focus()}
+        >
+          {selectedTags.map((tag) => (
+            <span
+              key={tag.id}
+              data-testid="feed-form-processing-tag-chip"
+              className="flex items-center gap-1 rounded bg-fill-secondary px-1.5 py-0.5 text-xs text-text"
+            >
+              {tag.name}
+              <button
+                type="button"
+                aria-label={t("processing.tags_form_remove_chip", { name: tag.name })}
+                className="text-text-secondary hover:text-text"
+                disabled={busy}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  toggleTag(tag.id, false)
+                }}
+              >
+                <i className="i-mgc-close-cute-re size-3" />
+              </button>
+            </span>
           ))}
-        </ul>
-      )}
-    </section>
+          <input
+            ref={inputRef}
+            data-testid="feed-form-processing-tags-input"
+            className="min-w-24 flex-1 bg-transparent text-sm outline-none placeholder:text-text-secondary"
+            aria-label={t("processing.tags_form_placeholder")}
+            placeholder={selectedTags.length > 0 ? "" : t("processing.tags_form_placeholder")}
+            value={query}
+            disabled={loading || busy}
+            onChange={(event) => {
+              setQuery(event.target.value)
+              setOpen(true)
+            }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={handleKeyDown}
+          />
+        </div>
+
+        {showList && (
+          <ul
+            data-testid="feed-form-processing-tags-options"
+            className="shadow-context-menu absolute inset-x-0 top-full z-10 mt-1 max-h-52 overflow-y-auto rounded-md border border-fill-secondary bg-material-medium p-1"
+          >
+            {canCreate && (
+              <li>
+                <button
+                  type="button"
+                  data-testid="feed-form-processing-tags-create"
+                  className="flex w-full items-center gap-2 rounded-[5px] px-2 py-1.5 text-left text-sm hover:bg-theme-item-hover"
+                  disabled={busy}
+                  onClick={() => createTag(trimmedQuery)}
+                >
+                  <i className="i-mgc-add-cute-re size-3 shrink-0" />
+                  {t("processing.tags_form_create", { name: trimmedQuery })}
+                </button>
+              </li>
+            )}
+            {matchedTags.map((tag) => {
+              const checked = tagIds.includes(tag.id)
+              return (
+                <li key={tag.id}>
+                  <button
+                    type="button"
+                    data-testid="feed-form-processing-tags-option"
+                    data-checked={checked}
+                    className="flex w-full items-center gap-2 rounded-[5px] px-2 py-1.5 text-left text-sm hover:bg-theme-item-hover"
+                    disabled={busy}
+                    onClick={() => toggleTag(tag.id, !checked)}
+                  >
+                    <i
+                      className={`i-mgc-check-cute-re size-3 shrink-0 ${checked ? "opacity-100" : "opacity-0"}`}
+                    />
+                    {tag.name}
+                  </button>
+                </li>
+              )
+            })}
+            {showEmptyHint && (
+              <li className="px-2 py-1.5 text-sm text-text-secondary">
+                {t("processing.tags_form_no_match")}
+              </li>
+            )}
+          </ul>
+        )}
+      </div>
+    </div>
   )
 }
