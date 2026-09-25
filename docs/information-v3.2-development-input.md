@@ -627,21 +627,28 @@ override?.mode === "hide" ||
 
 私人订阅标签原先只有两个入口：「设置 → 订阅源」的「我的标签」列（先勾选行、再批量加/减）和「Actions → 我的处理服务 → 私人订阅标签」（建/改名/删标签 + 批量选源绑定）。两者都是**批量视角**，而打标签最常见的时机其实是**刚订阅完、或回头整理某一个源**——那一刻用户面前只有「编辑订阅」弹窗，弹窗里却没有标签入口。本轮把入口补进 `FeedForm`。
 
-### 13.2 实现
+### 13.2 实现（两版）
 
-| 项     | 内容                                                                                                                                                                                 |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 新组件 | `apps/desktop/layer/renderer/src/modules/action/feed-subscription-tags.tsx`                                                                                                          |
-| 挂载点 | `modules/discover/FeedForm.tsx` 的 `</Form>` 之后、`<RootPortal>` 之前，条件 `isSubscribed`（新建订阅时服务端还没这个 source，写标签必然失败）                                       |
-| 数据   | 复用 `processingClient.load()` 取 `subscriptionTags` + `sourceTags`；`processingClient.bindTags([processingFeedSourceKey(feedId)], [tagId], "add"｜"remove", revision, signal)` 写入 |
-| 门禁   | `isLocalFoloHost()`（hostname 严格等于 `local.folo.is`），与订阅源设置页的标签列同一条件                                                                                             |
-| 交互   | 每个标签一个 checkbox，勾选/取消**即时写入、不参与表单的保存流程**（所以刻意放在 `<Form>` 之外）；写入成功后重读服务端快照，失败回滚本地勾选并露出 `processing.error.*`              |
-| 文案   | 新增 `processing.tags_form_hint` / `processing.tags_form_empty`（en / ja / zh-CN 三份，`locales/app/*.json` 严格字母序；fr-FR / zh-TW 是部分翻译，按既有惯例不补）                   |
-| 测试   | `modules/action/feed-subscription-tags.test.tsx` 7 项：门禁不渲染、回显勾选、add、remove、空态、读取失败、写入失败回滚                                                               |
+**初版（22:20）**：`FeedForm` 里一张 checkbox 列表，挂在 `</Form>` 之后、`<RootPortal>` 之前；只能勾选已有标签，**不能在弹窗里建标签**（当时的判断是：建/改名/删标签属全局操作，统一留在 Actions 面板）。真机已复核通过。
 
-设计上刻意**不在弹窗里建标签**：建/改名/删标签是全局操作，统一留在 Actions 的处理服务面板；弹窗只回答「这个源挂哪些标签」。
+**终版（23:00，用户反馈后重写）**：用户提出两点 ——「编辑订阅时的标签放在分类下面」「应该可以在这里直接创建，类似 Notion 里的多选属性」。于是从 checkbox 列表改成**多选属性控件**，并把挂载点上移。
 
-### 13.3 真机复验（2026-09-25 22:20–22:35）
+| 项     | 内容                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 新组件 | `apps/desktop/layer/renderer/src/modules/action/feed-subscription-tags.tsx`                                                                                                                                                                                                                                                                                                                         |
+| 挂载点 | `modules/discover/FeedForm.tsx` 的 **`category` 字段之后、`isPrivate` 字段之前**（`FeedForm.tsx:413` 附近），条件 `isSubscribed`（新建订阅时服务端还没这个 source，写标签必然失败）。选这里是因为「分类」和「标签」都是「给这个源补元数据」，放一起最顺手                                                                                                                                           |
+| 数据   | 复用 `processingClient.load()` 取 `subscriptionTags`（含 `revision`）+ `sourceTags`；`bindTags([processingFeedSourceKey(feedId)], [tagId], "add"｜"remove", revision, signal)` 写入；`createTag(name, revision, signal)` 建新标签                                                                                                                                                                   |
+| 并发   | 所有写操作都带**读到的 `revision`**；`createTag` 返回新快照，紧接着的 `bindTags` 用**创建后返回的 `revision`**（不是读到的那个），否则服务端判冲突                                                                                                                                                                                                                                                  |
+| 门禁   | `isLocalFoloHost()`（hostname 严格等于 `local.folo.is`），与订阅源设置页的标签列同一条件                                                                                                                                                                                                                                                                                                            |
+| 交互   | 已选标签渲染成 chip（chip 上的 × 解绑）＋输入框 ＋ 下拉候选；输入已有名称则过滤候选，输入新名称则出现「创建「xxx」」项（**同名不重复创建**）；`Enter` 提交（可创建时创建、唯一匹配时切换）；`Backspace` 在空输入时解绑最后一个 chip；`Escape`/外部点击关下拉                                                                                                                                        |
+| 写路径 | 统一 `run(operation, rollback)`：`setBusy → await operation → await read`（重读服务端快照）；失败 `rollback()` 本地乐观更新并露出 `processing.error.*`。整个控件**即时写入、不参与表单的保存流程**。`createTag` 是例外——它返回的标签快照本身就是权威标签集，因此在它返回时就把 chip 画出来，不等「绑定 + 重读」那两次往返（理由与实测见 13.4）；回滚也相应精确化：只有「创建 / 绑定」自身失败才回滚 |
+| 表单内 | 控件现在落在 `<form>` 内部，所以：`Enter` 必须 `preventDefault()`（否则触发整表单提交），三个 `<button>` 全部显式 `type="button"`（默认 `submit` 会提交表单）                                                                                                                                                                                                                                       |
+| 文案   | 新增 `processing.tags_form_hint` / `tags_form_create` / `tags_form_no_match` / `tags_form_placeholder` / `tags_form_remove_chip`（en / ja / zh-CN 三份，`locales/app/*.json` 严格字母序；fr-FR / zh-TW 是部分翻译，按既有惯例不补）；初版的 `tags_form_empty` 已删                                                                                                                                  |
+| 测试   | `modules/action/feed-subscription-tags.test.tsx` **9 项**：门禁不渲染、已绑定回显成 chip、空态 placeholder、展开下拉见全部候选、点未选写 add、点已选写 remove ＋ chip × 解绑、输入新名称出现创建项并以新 revision 绑定、同名不给创建、读取失败露可读错误、写入失败回滚 chip ＋ 提示冲突                                                                                                             |
+
+**终版推翻初版的一个判断**：初版认为「弹窗不建标签」，终版改成**就地创建**。用户说得对——打标签最常见的时机就是整理某一个源，此刻被丢到别的页面去建标签，等于把一次操作拆成两次。
+
+### 13.3 第一轮真机复验（2026-09-25 22:20–22:35，初版 checkbox 列表）
 
 部署：重建 `out/web`（23 MB）与 `out/information-web`（2.9 MB）→ 装进 `information-runtime/{main-web,web}`（旧目录就地改名 `*-pre-20260925T221606`）→ `launchctl kickstart -k gui/<uid>/is.folo.local.information`。入口由 `main-CkDHkpEa.js` 换成 `main-DgRuxgYt.js`，`/`、`/assets/main-*.js`、`/information/` 全部 200。
 
@@ -665,7 +672,77 @@ pageErrors = (none)
 
 **验证后已清理**：用同一面板的「移除」删掉临时标签，`subscription_tags` 与 `source_tag_bindings` 双双回到 0 行，与验证前基线一致。写操作可回滚——临时标签本就是本轮探针创建的，删标签时服务端一并撤掉它的绑定。
 
-### 13.4 本轮新增的探针陷阱
+### 13.4 第二轮真机复验（2026-09-25 23:05–23:20，终版多选属性）
+
+部署：重建 `out/web` 与 `out/information-web` → 装进 `information-runtime/{main-web,web}`（旧目录就地改名 `*-pre-20260925T230441`）→ `launchctl kickstart -k`。入口由 `main-DgRuxgYt.js` 换成 `main-u6JTxZfh.js`；`/`、`/information/`、`/assets/main-u6JTxZfh.js` 全部 200；`launchctl print` 显示 `state = running`。
+
+探针 `probe-edit-feed-tags8.cjs` 走完整真机路径（侧栏展开分类 → 右键订阅项 →「编辑」→ 弹窗内标签区块）：
+
+```text
+折叠中的分类 = 8
+展开后侧栏 [data-feed-id] 数量 = 87
+右键订阅项 = 58374877360520192
+编辑订阅弹窗已打开
+标签控件已就绪
+表单几何 = {"category":514,"tagsBlock":609,"privateFollow":717,"hideFromTimeline":763,"view":810,"tagsInsideForm":true}
+位置判定：分类(514) < 标签(609) < 私密订阅(717) = true
+初始状态 = {"blockText":"私人订阅标签标签只用于本机处理服务，不改分类，也不写入公开 List。",
+            "chips":[],"placeholder":"选择或创建标签"}
+输入新名称后 = {"listOpen":true,"createText":"创建「验证标签2550」","optionCount":0}
+已点「创建」
+  t=7.5s chips=["验证标签2550"] alert=null
+新标签已挂成 chip = true
+最终状态 = {"rawKeyLeak":false,"blockText":"私人订阅标签标签只用于本机处理服务，不改分类，也不写入公开 List。验证标签2550验证标签2550"}
+pageErrors = (none)
+```
+
+库内落盘核对：`subscription_tags` 1 行 `c0d868b1-8726-4748-a7f1-46bafcbdeb78 / 验证标签2550`；`source_tag_bindings` 1 行 `feed/58374877360520192 -> c0d868b1-…`；`subscription_tag_metadata.revision` 4 → 5（`createTag` 与 `bindTags` 各推进一次）。
+
+清理：用 Actions → 私人订阅标签 里该行「移除」，`subscription_tags` 与 `source_tag_bindings` 双双回到 0 行。**注意 `revision` 不会跟着回退**（实测停在 6）——它是单调递增的并发写保护计数器，不是行数。
+
+**第一次探针为什么全军覆没（必须知道）**：紧跟 `launchctl kickstart -k` 之后跑的那一轮，弹窗内所有 `/information/v1/*` 请求都失败（`error = "request"`，界面文案「读取或保存失败，请重试。尚未确认保存成功。」），15 s 轮询期间始终没恢复，也没有建出任何标签。隔几分钟、同样命令、同样凭据重跑即完全正常（同一路径返回 200）。**结论：探针与服务重启之间要留间隔**，否则会把启动窗口的失败误读成功能缺陷。
+
+**实测耗时构成**（读的是页面 `performance.getEntriesByType("resource")`，不是估算）：
+
+| 步骤                                                                | 耗时           |
+| ------------------------------------------------------------------- | -------------- |
+| 换一次性凭据 `api.folo.is/better-auth/one-time-token/generate`      | 840–976 ms     |
+| `POST /information/v1/subscription-tags`（建标签）                  | 1438 ms        |
+| 换一次性凭据                                                        | 976 ms         |
+| `PUT /information/v1/source-tags`（绑定）                           | 1323 ms        |
+| 换一次性凭据 + `POST /information/v1/configuration`（重读全量快照） | 840 + ~1500 ms |
+
+原本「点创建 → 看到 chip」要约 7 s，其中 **每个请求都要单独换一次凭据，3 次共约 2.7 s**——这是既有架构的固有成本，`processing-client` 每个请求都调一次 `getOneTimeToken`，Actions 面板同样如此，不是本组件引入的。据此只改了一处：把 chip 的显示提前到 `createTag` 返回时（见 13.2 的「写路径」行）。
+
+#### 13.4.1 改完再验一次（同一晚 23:31，入口 `main-Dr9-NRXd.js`）
+
+上面那次部署的产物**不含**乐观显示那一改，所以改完又重建、重装、重跑了一遍（质量门重跑 35/35）。同一条探针，补了两处断言：chip 出现的耗时，以及**写入链落定后 chip 是否仍在**（落定后 chip 来自服务端快照，留得下来才算真的绑上）。
+
+```text
+位置判定：分类(514) < 标签(609) < 私密订阅(717) = true
+初始状态 = {"blockText":"…","chips":["计时标签4061"],"placeholder":""}   ← 已有绑定回显（上一轮诊断留下的标签）
+输入新名称后 = {"listOpen":true,"createText":"创建「验证标签7949」","optionCount":0}
+已点「创建」
+  t=2s chips=["计时标签4061","验证标签7949"] alert=null
+新标签已挂成 chip = true
+点「创建」→ chip 出现耗时 = 2203ms          ← 优化前同一路径实测约 7s
+写入链落定后（重读服务端快照）= {"chips":["计时标签4061","验证标签7949"],"alert":null,"inputDisabled":false}
+新标签收敛后仍在 chip 里 = true
+控件已解除忙态 = true
+pageErrors = (none)
+```
+
+库内落盘：`source_tag_bindings` 2 行（含 `feed/58374877360520192 -> d60b5112-…` 这条新建标签的绑定）。清理后 `subscription_tags` / `source_tag_bindings` 双双回到 0 行（`revision` 停在 14，不回退）。
+
+**chip 出现耗时 2203 ms 与预测吻合**（`createTag` 返回 ≈ 换凭据 915 ms + `subscription-tags` 1438 ms）：省掉的正是「换凭据 + 绑定 + 换凭据 + 重读」这一串。
+
+#### 13.4.2 一个把自己坑了的探针缺陷（必须记）
+
+chip 一旦提前到 2.2 s 出现，探针就会在 ~3 s 就截图并 `context.close()`——而此刻 `bindTags` 还在飞，**关标签页把请求一起掐掉了**：界面显示两个 chip，库里却只有一条绑定。同一探针在优化前没有这个问题，因为 chip 要 7.5 s、探针收尾时写入早就完成了——**是这次提速暴露了探针的时序假设**。
+
+修法：chip 出现后不能立即收尾，要 `waitForTimeout(15000)` 等写入链落定，再重读一次 chip。这条重读同时把「乐观显示」和「最终落库」两件事都验了：留得下来才算真的绑上。
+
+### 13.5 本轮新增的探针陷阱
 
 **(a) 侧栏的订阅默认折叠在分类里。** 不展开就一个 `[data-feed-id]` 都找不到，只看得到折叠头 `data-sub="feed-category-<name>"`。展开按钮：`button[data-type="collapse"][data-state="close"]`。
 
@@ -680,3 +757,15 @@ pageErrors = (none)
 **(f) 标签名渲染在 `input` 的 `value` 里，`value` 不进 `innerText`。** 用「页面文本里有没有这个标签名」判断标签是否创建成功会**误判为失败**（本轮第一版探针就这样错判，白跑一轮）。要么读 `input[aria-label="改名"]` 的 `value`，要么直接查库。
 
 **(g) 探针失败时必须显式 `process.exit()`。** 只在 `.catch` 里设 `process.exitCode = 1` 不会关掉 chromium，进程会一直挂着（本轮两次各挂了 5–7 分钟）。
+
+**(h) 服务重启后立刻跑探针会全量失败。** 见 13.4。判定「服务是否在跑」也不能只靠 HTTP 200——启动窗口里首页可能已经能返回，而 `/information/v1/*` 还在失败。
+
+**(i) 读接口在线上是空体 `POST`，不是 `GET`。** `informationRequestInit()` 会把所有 GET 改成 POST 并加 `X-Folo-Read: 1`。抓包时按 GET 去找会一条都找不到。
+
+**(j) 沙箱里用 Bash 跑 `grep` 会静默返回空。** 本轮 `launchctl list | grep is.folo.local.information` 明明有输出却拿到空、退出码 0，一度误判成服务没起来。判服务状态一律用 `launchctl print gui/$(id -u)/<label>`。
+
+**(k) vitest v4 已移除 `--reporter=basic`。** 传了会直接报 `Failed to load custom Reporter from basic`（连测试都没开始跑）；去掉该参数用默认 reporter 即可。
+
+**(l) 「写下 → 立刻收尾」的探针会掐掉自己在飞的写请求。** 界面上的乐观状态会骗过断言：看到的 chip 是本地画的，`context.close()` 却把 `bindTags` 掐断，库里少一条绑定。见 13.4.2。凡断言「写入成功」，都要**等到写入链落定后再从服务端重读一次**，并且**同时查库**——界面和库是两个独立判据，缺一个都可能假绿。
+
+**(m) 用界面文本判断「删干净了没有」同样会骗人。** 删完一行后面板重读快照可能失败、列表显示为空，但库里还留着一行。本轮实测：面板显示 `[]` 时库里还有 2 个标签。删除类操作一律**以查库为准**。
