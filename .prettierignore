@@ -5,6 +5,9 @@ CHANGELOG.md
 .waylog
 .vinext
 
+# 本地运行/构建产物（由 scripts/local-folo 与本地开发脚本写入，不入库）
+output
+
 apps/external/postcss.config.cjs
 
 apps/mobile/android
