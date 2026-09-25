@@ -742,6 +742,27 @@ chip 一旦提前到 2.2 s 出现，探针就会在 ~3 s 就截图并 `context.c
 
 修法：chip 出现后不能立即收尾，要 `waitForTimeout(15000)` 等写入链落定，再重读一次 chip。这条重读同时把「乐观显示」和「最终落库」两件事都验了：留得下来才算真的绑上。
 
+#### 13.4.3 截图暴露的一个视觉缺陷（00:00 修掉）
+
+上一节的截图里能直接看出来：下拉面板底下「私密订阅 / 在时间线上隐藏」两行**透过面板显出来**，文字糊在一起。原因是面板用了 `bg-material-medium`（半透明材质）却漏了配对的 `backdrop-blur-background`——这是 `material-*` 材质的固定搭配，同表单里「分类」用的 `AutoCompletion` 下拉就是这么写的（`components/ui/auto-completion/AutoCompletion.tsx:99-104`，面板类是 `bg-material-medium text-text backdrop-blur-background`）。补上模糊层，圆角与内边距一并对齐到同一先例。
+
+**这类缺陷单元测试和 DOM 断言都测不到**（结构完全正确、`role`/`testid` 都对），只能靠**真的看截图**。本轮前面的探针全绿，是截图才把它揪出来的——所以探针要留图，不能只留文本断言。
+
+修完重建（入口 `main-Dr9-NRXd.js` → **`main-w1zXVYZC.js`**，质量门 35/35，产物 CSS 里 `backdrop-blur-background` 命中 1 次），重装后隔 60 s 跑探针，判据全过：
+
+```text
+位置判定：分类(514) < 标签(609) < 私密订阅(717) = true
+初始状态 = {"chips":[],"placeholder":"选择或创建标签"}
+下拉已展开（用于截图）= {"panelHeight":42,"options":0,"hitInsidePanel":true,"hitTag":"LI.px-2.5"}
+输入新名称后 = {"listOpen":true,"createText":"创建「验证标签8875」","optionCount":0}
+点「创建」→ chip 出现耗时 = 2576ms
+写入链落定后（重读服务端快照）= {"chips":["验证标签8875"],"alert":null,"inputDisabled":false}
+新标签收敛后仍在 chip 里 = true    控件已解除忙态 = true    pageErrors = (none)
+```
+
+截图复核：下拉面板已是不透明的实心材质，「在时间线上隐藏」被完全遮住、不再透字。
+（安装这一次时踩了一个真实事故，见第 14 节。）
+
 ### 13.5 本轮新增的探针陷阱
 
 **(a) 侧栏的订阅默认折叠在分类里。** 不展开就一个 `[data-feed-id]` 都找不到，只看得到折叠头 `data-sub="feed-category-<name>"`。展开按钮：`button[data-type="collapse"][data-state="close"]`。
@@ -769,3 +790,34 @@ chip 一旦提前到 2.2 s 出现，探针就会在 ~3 s 就截图并 `context.c
 **(l) 「写下 → 立刻收尾」的探针会掐掉自己在飞的写请求。** 界面上的乐观状态会骗过断言：看到的 chip 是本地画的，`context.close()` 却把 `bindTags` 掐断，库里少一条绑定。见 13.4.2。凡断言「写入成功」，都要**等到写入链落定后再从服务端重读一次**，并且**同时查库**——界面和库是两个独立判据，缺一个都可能假绿。
 
 **(m) 用界面文本判断「删干净了没有」同样会骗人。** 删完一行后面板重读快照可能失败、列表显示为空，但库里还留着一行。本轮实测：面板显示 `[]` 时库里还有 2 个标签。删除类操作一律**以查库为准**。
+
+---
+
+## 14. 本轮的一次真实事故：安装脚本把本机服务装崩了（2026-09-26 00:11–00:22）
+
+**现象**：装完最终产物后 `launchctl print` 报 `job state = exited`、`last exit code = 1`、`active count = 0`，2240 无监听，`/` 返回 `000`，服务陷入崩溃循环（`runs = 29`）。
+
+**根因链**（两处叠加，缺一不会出事）：
+
+1. **构建偶发失败**：`@follow/information-service run build:web` 报
+   `parsing layer/renderer/tsconfig.json failed: Error: write EPIPE`，`EXIT_INFO_WEB=1`。
+   这是子进程管道断掉的环境性错误（重构建跑在刚结束的全仓质量门之后），**重跑一次即成功**，与源码无关。
+2. **安装脚本把失败吞了**：脚本里是 `cp -R "$SRC/$src" "$RT/$dest" && echo "INSTALLED …"`，
+   而 **`set -e` 不会因为 `&&` 列表里「非末尾」命令失败而中止**。于是 `cp` 失败被静默忽略，
+   脚本继续往下跑、照样打印 `INSTALL_DONE`。此时 `$RT/web` 已经被前一句 `mv` 挪成了备份，
+   新的却没拷进来 —— **运行时少了整个 `web/` 目录**，服务找不到 web 资源便 `exit 1`。
+
+**修法**：安装脚本改成每一步都显式判存在、显式判返回码（先验证源产物齐全再动运行时目录，
+拷完检查 `index.html` 在不在，任一失败就 `exit 1`），并在结尾轮询端口直到 `/` 返回 200 才算完成
+（重启窗口里 `launchctl` 可能还停在 `spawn scheduled`，不能只看某一瞬间）。
+
+**定位过程中两个把方向带偏的观察，记下来省下次的时间**：
+
+- **`http://local.folo.is/` 返回 503 不等于服务有问题。** 本机 80 端口是 **Docker** 占的
+  （`lsof` 显示 `com.docke … TCP *:80 (LISTEN)`），浏览器是经 `HTTP_PROXY` 到 2240 才访问到应用的。
+  判服务死活要直连 **`127.0.0.1:2240`**，并且只有 **`000`** 才是「没有进程监听」。
+- **`launchctl print` 的 `state` 会瞬时骗人。** `kickstart -k` 之后它可能先显示 `spawn scheduled`
+  再变 `running`；真正可靠的是 `job state`、`last exit code`、`runs` 三个字段一起看。
+
+**验证恢复**：重跑 information-service 的 web 构建（`EXIT=0`）→ 用改过的安装脚本重装
+→ 端口轮询 4 s 内 `HEALTHY`，`/` 与 `/information/` 均 200 → 隔 60 s 再跑探针，全部判据通过。
