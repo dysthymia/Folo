@@ -821,3 +821,125 @@ chip 一旦提前到 2.2 s 出现，探针就会在 ~3 s 就截图并 `context.c
 
 **验证恢复**：重跑 information-service 的 web 构建（`EXIT=0`）→ 用改过的安装脚本重装
 → 端口轮询 4 s 内 `HEALTHY`，`/` 与 `/information/` 均 200 → 隔 60 s 再跑探针，全部判据通过。
+
+---
+
+## 15. 增量：把标签从「处理规则」里移走（2026-09-26 18:00–）
+
+### 15.1 先回答「为什么改规则要重新发布，是不是得改代码」
+
+**不用改代码。** 「保存」和「生效」是两件事，跟源码无关：
+
+- **草稿**是 `automation_draft` 这张**单行表**里的 `body`（全量 JSON：`ownerId` / `global` / `rules[]`）。
+  改草稿只动这一行。
+- **线上跑的是已发布版本**。`processing-worker.ts` 走 `store.automation.release(version)`，
+  每次发布往 `rule_set_releases` 存一份**完整 body 的快照**。所以改完草稿不发布，正在跑的规则一点不变。
+- 界面上「**保存并启用**」就是把这套串起来的：`save()` → `releaseRuleSet(scope, {skipDirtyCheck:true})` → `saveSchedule()`，
+  一键完成；也可以只点「保存」（改着、暂不生效），想生效时再点「发布」。
+- 截图里那两条同名规则正好是这套语义的痕迹：`rule_set_releases` 从 v3（1 条）到 v4（2 条）相隔 35 秒，
+  即那 35 秒内发生过两次发布动作 —— 而**改代码一次都没有**。
+
+### 15.2 移走的是什么，留下的是什么
+
+用户的原话是「**规则里只是可以按标签筛选，不应该有新建标签、为订阅源打标签之类的功能**」。对齐后：
+
+- **移走**：同页那块 `ProcessingTags` 面板。它的写操作是 `createTag` / `renameTag` / `deleteTag`，
+  外加「按分类或 List 批量 `bindTags`」—— 那是**数据管理**，不是规则。
+- **保留**：规则条件里的 `subscription_tag` 多选（`processing-condition-editor.tsx`）。
+  它本来就只能**选已有标签**、不能就地新建，符合要求，一行未动。
+- 结果：规则页对标签只剩「只读地用」，所有写操作都在别处。规则页因此少一块，其余九块不变。
+
+### 15.3 标签的新家：设置 → 订阅源
+
+新增 `modules/settings/tabs/feeds-processing-tags.tsx`，导出 `ProcessingTagManager`：
+
+- 一个默认折叠的 `<details>`：「管理标签（n）」；展开后是「新标签名称 + 新建」和每个标签一行（改名输入框 + 保存名称 + 删除）。
+- 删除走 `useDialog().ask({ variant: "danger" })` 二次确认，与同页「移动视图」的确认方式一致。
+- **不做乐观更新**：写入成功后重新 `client.load()` 拉服务端快照，前端不维护第二份标签真相；
+  失败时保留用户输入并露出错误（新建的名字不会被吞掉）。
+- 与既有能力互补，没有重复实现：设置页列表本来就有「我的标签」列 + 顶部按标签筛选 + 选中订阅源后底部操作栏批量加/减；
+  编辑单个订阅的弹窗里是 Notion 式多选（也能就地新建）。
+- **没有新建独立标签页** —— 用户明确说暂时不需要。
+
+顺带补了一个归零 effect：标签被删掉后，顶部的标签筛选器和底部批量操作的目标不会继续停在一个已不存在的 id 上
+（否则界面会卡在一个筛不出任何订阅源的空状态）。
+
+### 15.4 顺带清掉的死代码与死文案
+
+- 删 `modules/action/processing-tags.tsx`（263 行）。
+- `processing-tags-utils.ts` 删 `buildProcessingTagSelectionScopes` —— 它只被这个面板和它自己的测试用。
+  保留 `processingFeedSourceKey`（编辑订阅弹窗在用）、`processingTagNames` / `filterFeedIdsByProcessingTag`（设置页在用）。
+- 测试：`processing-tags-utils.test.ts` 里那 2 项 scopes 测试随之删掉，补了 2 项边界（`all` 筛选与失效 tag id）；
+  新增 `feeds-processing-tags.test.tsx` 8 项（空快照不渲染 / 列表与空态 / 新建 / 新建失败保留输入 / 改名 / 删除二次确认 / 文案不漏 raw key）。
+- i18n：`locales/app/` 里 16 个只服务于该面板的 key 从 en / ja / zh-CN 删除；
+  `locales/settings/` 新增 11 个 key（同样是 en / ja / zh-CN，`no-extra-keys` 只禁止非 en 文件多出 key，缺 key 会回落 en）。
+  `processing.tags`、`processing.tags_form_*`、`processing.list_owner*`、`processing.remove` **仍在使用，保留**。
+
+### 15.5 一处仍然存在、但没动的隐患
+
+那两条同名规则（`dd6466e1-…`、`ba98baf6-…`）还在已发布版本里。功能上无害 ——
+`story-engine.ts` 按 `order` 处理、输入一旦被前一条 `claimed` 后面的重叠规则就跳过，
+实测后一条产生 0 条 story。但规则卡片不显示 id，两条看起来一模一样；
+前一条被停用或删除时，后一条会以**旧提示词**静默接管。属于「该删但需要用户确认」的范畴，本轮未动数据。
+
+### 15.6 真机复验：两个环境前提 + 一个只有几何判据能抓到的布局缺陷
+
+**(a) 不能直接 `goto /settings/feeds`。**
+直连该路由时页面 body 长度为 0、没有任何 `data-testid`。这不是本轮的代码问题：
+上一轮探针的日志 `tags-entry.log` 里，同样直连该路由时「我的标签」**9 次探测（每 4 s 一次）全部 0 命中**，
+而同一份日志里 `/action?scope=processing_service` 是在 8 s 内渲染出来的。
+所以设置页必须走 UI 打开：`/` → `[data-testid="profile-menu-trigger"]` → `profile-menu-preferences` → `settings-tab-feeds`。
+（`/` 与 `/action?scope=processing_service` 直连都正常，只有设置页这个路由不行。）
+
+**(b) 本轮复验时 `local.folo.is` 整条链路是断的，要自己补一条。**
+两个叠加的独立故障：
+
+- 本机 80 端口由 Docker 的 Apache 占着，它本该把 `local.folo.is` 反代到 2240，但当时该容器不通
+  （`curl http://local.folo.is/` 返回 `000`；`lsof` 里能看到 `127.0.0.1:80->127.0.0.1:xxxxx` 的 `CLOSE_WAIT`）。
+- Chromium 自己也走不通外网：`https://api.folo.is/better-auth/get-session`、`/status/configs`
+  全部 `net::ERR_FAILED`，SPA 因此停在**空白引导态**（`#root` 里有壳、body 文本长度为 0、无任何报错），
+  这和设置页路由本身渲染不出来是两回事，别混在一起归因。
+
+修法是起一个链式透明代理（`/tmp/folo-v32-verify/dev-proxy.cjs`，监听 `127.0.0.1:8899`）：
+
+- `local.folo.is` → 直接打到 `127.0.0.1:2240`（**必须保住 hostname**，`isLocalFoloHost()` 是严格相等）；
+- 其余请求 → 原样转发给沙箱的出网代理 `$HTTP_PROXY`（http 用绝对形式，https 用 CONNECT 隧道）。
+
+Chromium 侧用 `proxy: { server: "http://127.0.0.1:8899", bypass: "<-loopback>" }`；
+`<-loopback>` 是必须的 —— 否则 Chromium 会对「解析到回环地址的域名」隐式绕过代理。
+（另试过 `--host-resolver-rules=MAP local.folo.is:80 127.0.0.1:2240`，这条路上不生效，别浪费时间。）
+
+**(c) 布局缺陷：按钮跑到可视区外，而且「点得到」骗过了探针。**
+这一块是订阅源表格（`min-w-[1000px]`）的兄弟节点，`block` 布局下被撑到 1000px；
+而设置弹窗的可视内容区只有 **774px（x 501–1275）**。实测控件位置：
+
+| 控件         | 修复前 x  | 结果                                     |
+| ------------ | --------- | ---------------------------------------- |
+| 整块         | 533–1533  | 右侧超出可视区                           |
+| 新建输入框   | 550–1460  | 超宽                                     |
+| 新建标签按钮 | 1468–1516 | **在横向滚动容器之外，滚不过去，点不到** |
+
+探针没抓到它的原因很关键：**探针是用 `page.evaluate` 里的 `el.click()` 点的**，
+这条路不要求元素可见，所以「点得到」不等于「看得见」。是**截图**暴露的。
+
+修法：这块改成宽度自适应（`w-fit max-w-full`）+ 输入框固定 `w-56`，
+让它的宽度不再跟着 1000px 的兄弟节点走。修后整块 533–1085、四个控件 `elementFromPoint` 全部命中自身。
+
+**判据补强**：探针里加了「可点性」判据 —— 控件中心的 `document.elementFromPoint` 必须命中它自己、
+且中心落在视口内。这类「渲染存在、DOM 存在、但人点不到」的缺陷，只有几何判据能抓。
+
+### 15.7 本轮复验结论（真机，`main-CBcdzO4Y.js`）
+
+| 判据                                                                                                          | 结果                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 设置 → 订阅源 出现「管理标签（1）」折叠块                                                                     | ✅                                                                                                                                               |
+| 设置页里不再出现「私人订阅标签」                                                                              | ✅ false                                                                                                                                         |
+| 新建标签 → 界面出现                                                                                           | ✅ `迁移标签7522`                                                                                                                                |
+| 改名 → 界面出现新名                                                                                           | ✅ `迁移标签7522改`                                                                                                                              |
+| 删除先出二次确认（danger 样式、含「无法撤销」）                                                               | ✅                                                                                                                                               |
+| 确认后界面消失                                                                                                | ✅                                                                                                                                               |
+| **查库**（删除后真值）                                                                                        | ✅ 只剩 `区块链-媒体`，绑定 1 条；revision 19 → 28（只增不减）                                                                                   |
+| 规则页不再有标签面板（「新增标签」「新标签名称」「筛选来源名称或分类」「从分类或 List 选择来源」全部 0 命中） | ✅                                                                                                                                               |
+| 规则条件仍能按「订阅标签」筛选                                                                                | ✅ 条件字段 21 项含 `subscription_tag`（「私人订阅标签」）；条件值是 `multiple` 多选，选项恰为现有标签，且该行**没有任何按钮**（只能选、不能建） |
+| 四个控件的可点性（`elementFromPoint` 命中自身）                                                               | ✅                                                                                                                                               |
+| pageErrors                                                                                                    | ✅ (none)                                                                                                                                        |
