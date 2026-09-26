@@ -36,27 +36,33 @@ cd apps/ssr && pnpm run dev
 pnpm run build:web
 ```
 
-## Quality gates (must-pass before commit/PR)
+## Quality gates
+
+Two scopes: an **incremental gate** while iterating, and the **full gate** that CI runs before merge. Never run the full gate after every edit.
+
+### Incremental gate (after each logical change)
 
 ```bash
-# 1) Typecheck first (required)
-pnpm run typecheck
+# Lint the changed files, then typecheck/test the packages owning them (plus the
+# packages that depend on those). Nothing else runs.
+pnpm run check:changed
+```
 
-# 2) Lint and auto-fix
-pnpm run lint:fix
+- Implemented in `scripts/check-changed.mjs`. It resolves the owning packages by longest workspace directory prefix, deliberately **not** via turbo's git-ref filtering: `--filter="[HEAD]"` is non-deterministic in this workspace, because `apps/*` and `apps/desktop/layer/*` both match files under `apps/desktop` and the attribution sometimes lands on the app root `Folo`, which has no `typecheck`/`test` script — turbo then skips the task and still exits 0, so the gate silently checks nothing.
+- Flags: `--dry` (print the resolved scope), `--no-lint`, `--since=origin/dev`.
+- `format:check` and `lint` are **root** tasks (`//#format:check`, `//#lint` = repo-wide prettier/eslint/tsslint), so `--filter` can never narrow them. Per-file lint/format is already enforced by the `pre-commit` hook (`lint-staged`); `check:changed` covers eslint for changed files, and `pnpm exec prettier --check <changed files>` covers formatting.
 
-# 3) Tests
-pnpm run test
+### Full gate (before push / PR — what CI runs)
+
+```bash
+# 1) Typecheck + lint + format, then tests. Order matters: typecheck → lint → test.
+pnpm exec cross-env CI=1 turbo run format:check typecheck lint
+pnpm exec cross-env CI=1 turbo run test
 ```
 
 - Run the above at the root, or use per-package variants as needed.
-- Follow this order strictly: typecheck → lint → test.
-- After every modification, run the following checks to catch errors early:
-
-```bash
-npm exec turbo run format:check typecheck lint
-npm exec turbo run test
-```
+- Do not run the full gate on `commit`: local commit only triggers the lightweight `pre-commit` hook (`lint-staged` on staged files). Full gate runs before `push` / PR.
+- `pnpm run lint:fix` (eslint --fix) is available when you want auto-fixes.
 
 ## Code style and conventions
 
@@ -165,7 +171,7 @@ These classes map to the UIKit color variables (see `.cursor rules/color` and `a
   - [ ] Uses correct UIKit Tailwind tokens and icon sources.
   - [ ] For motion: CSS first; `m.*` only if necessary.
 
-- Validation
+- Validation (full gate — before push / PR only, never on commit)
   - [ ] `pnpm typecheck` passes
   - [ ] `pnpm lint:fix` passes cleanly
   - [ ] Tests updated and pass
