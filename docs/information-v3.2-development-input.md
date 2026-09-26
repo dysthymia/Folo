@@ -875,12 +875,13 @@ chip 一旦提前到 2.2 s 出现，探针就会在 ~3 s 就截图并 `context.c
   `locales/settings/` 新增 11 个 key（同样是 en / ja / zh-CN，`no-extra-keys` 只禁止非 en 文件多出 key，缺 key 会回落 en）。
   `processing.tags`、`processing.tags_form_*`、`processing.list_owner*`、`processing.remove` **仍在使用，保留**。
 
-### 15.5 一处仍然存在、但没动的隐患
+### 15.5 一处仍然存在、但没动的隐患（**已于 21:35 处理，见 §16**）
 
 那两条同名规则（`dd6466e1-…`、`ba98baf6-…`）还在已发布版本里。功能上无害 ——
 `story-engine.ts` 按 `order` 处理、输入一旦被前一条 `claimed` 后面的重叠规则就跳过，
 实测后一条产生 0 条 story。但规则卡片不显示 id，两条看起来一模一样；
 前一条被停用或删除时，后一条会以**旧提示词**静默接管。属于「该删但需要用户确认」的范畴，本轮未动数据。
+用户确认「只留一条」后已在 §16 完成。
 
 ### 15.6 真机复验：两个环境前提 + 一个只有几何判据能抓到的布局缺陷
 
@@ -943,3 +944,114 @@ Chromium 侧用 `proxy: { server: "http://127.0.0.1:8899", bypass: "<-loopback>"
 | 规则条件仍能按「订阅标签」筛选                                                                                | ✅ 条件字段 21 项含 `subscription_tag`（「私人订阅标签」）；条件值是 `multiple` 多选，选项恰为现有标签，且该行**没有任何按钮**（只能选、不能建） |
 | 四个控件的可点性（`elementFromPoint` 命中自身）                                                               | ✅                                                                                                                                               |
 | pageErrors                                                                                                    | ✅ (none)                                                                                                                                        |
+
+## 16. 收尾：两条同名规则只留一条（2026-09-26 21:20–21:45）
+
+用户指令：「两条同名规则只留一条就行」「-pre- 备份清掉吧」。
+
+### 16.1 删哪条、依据是什么
+
+|      | id                                     | order | 来历                      |
+| ---- | -------------------------------------- | ----- | ------------------------- |
+| 保留 | `dd6466e1-5543-4224-a0cd-c7bb432beb43` | 0     | v3 就有                   |
+| 移除 | `ba98baf6-e71c-48c1-bee4-482ef1ab2cc1` | 1     | v4 比 v3 晚 35 秒多出来的 |
+
+两条 body 逐字节相同（`when.all=true` + `presentation` + `ai_aggregate`，presets P06/P07），
+所以**删哪条行为都等价**；固定删 order 1 那条等于回到 v3 的规则形状，理由是「后加的那条从未生效过」。
+
+### 16.2 第一遍走 UI：成功了一半
+
+`/action?scope=processing_service` **可以直连**（这点与 §15.6(a) 的 `/settings/feeds` 相反）。
+探针 12 s 拿到两张 `article#processing-rule-*`，找到 id 精确的那张、点其中「移除」按钮，
+界面随即只剩 `dd6466e1`。两个前提已先核对过：
+
+- `reprocessRecent` 默认 `false`（`processing-setting.tsx:92`），
+  `saveAndEnable` 在未勾选时**强制** `scope = {mode:"future"}`（`:343-347`）。
+- 探针里显式断言了「重新处理近期内容」未勾选，勾着就拒绝发布。
+
+卡住的地方很蠢但值得记：`hitTest("button:has-text('保存并启用')")` ——
+`:has-text()` 是 Playwright 的定位语法，塞进 `page.evaluate` 里的 `querySelector` 会直接
+抛 `SyntaxError: not a valid selector`。**页面内查找只能用 CSS 或手写遍历**；
+`hitTest` 后来改成支持 `{within, text}` 两种入参。
+
+### 16.3 第二遍起环境变了：`api.folo.is` 在沙箱出口不可达
+
+第一次探针（21:25）页面完整加载；第二次（21:31）起页面永远停在加载态，
+`bodyLen=198`、空态文案「尚无自动化规则」。逐层定位：
+
+| 探针                                                  | 结果                                         | 说明                                     |
+| ----------------------------------------------------- | -------------------------------------------- | ---------------------------------------- |
+| `curl --noproxy '*' http://127.0.0.1:2240/`           | **200**                                      | 本地服务正常                             |
+| `curl -x http://127.0.0.1:8899 http://local.folo.is/` | **200**                                      | 自建代理正常                             |
+| Chromium 内 `api.folo.is/*`                           | 全部 `net::ERR_CONNECTION_CLOSED`            | 页面因此拿不到会话与数据                 |
+| `dig api.folo.is`                                     | `198.18.0.29`                                | 沙箱 fake-IP                             |
+| 直连 `https://api.folo.is/…`                          | TCP 连上、TLS `SSL_ERROR_SYSCALL`            | 握手被掐                                 |
+| 经 `127.0.0.1:63140` 连 `api.folo.is`                 | **6/6 全 `000`**（CONNECT 隧道能建但无数据） | —                                        |
+| 经同一代理连 `github.com` / `www.baidu.com`           | **200**                                      | 代理本身没坏                             |
+| **平台侧请求 `https://api.folo.is/status/configs`**   | **正常返回完整 JSON**                        | **站点是活的，断的是本地沙箱出口这一段** |
+
+时间上是**时段性**的（21:25 通、21:40 起全 000），不受本地控制。
+而本地服务的每个请求都要用主站一次性凭据（`server.ts:111-121` 的
+`authenticate(token)` → `WebFetchError`/upstream 502），**没有主站出口就没有任何 API 路径**，
+浏览器与 `fetch` 两条路一起断。
+
+### 16.4 改库完成：复刻 `publish()`，但刻意少做一件事
+
+用户确认「不用验证了，直接按你说的来」后，用 `AutomationStore` 的写入语义直接落库
+（`/tmp/folo-v32-verify/dedup-rule-direct.cjs`，单个 `BEGIN IMMEDIATE` 事务）：
+
+1. `automation_draft`：`revision 4 → 5`，body 去掉 `ba98baf6`，`order` 重排（只剩一条，仍为 0）。
+   留下的那条内容没变，所以它的 `version` 保持 1、`global.version` 保持 3
+   —— 与 `saveDraft()` 的重算规则一致。
+2. `rule_set_releases`：插入 `v5`，`draft_revision=5`、`activation_seq=16972`、
+   `scope={"mode":"future"}`、`created_at=2026-09-26T13:32:05Z`。
+
+**刻意没做第 3 步。** 常规 `publish()` 还会把 targets 的
+`processing_inputs` 改成 `release_version=新版本, generation+1, status='pending'`，
+而 future 范围的 targets 定义是 `release_version IS NULL` ——
+库里那 **1386 条恰好全是 `status='skipped'`（已判定跳过）**，
+照常规语义执行会把它们**重新排成待处理，触发约 1386 次重新处理（真实模型调用成本）**。
+本次只想删掉一条重复规则，不该让任何条目重新排队，所以：
+
+- `targets` 记为空数组（本次发布不重算任何已有输入）；
+- `processing_inputs` 一行都不动；
+- 未来新输入不受影响：`assign()` 在 `release_version IS NULL` 时取
+  `SELECT MAX(version) FROM rule_set_releases`，会自动绑定到 v5。
+
+**复核（改前 / 改后逐项相等）**
+
+| 判据                          | 改前                                | 改后                                                  |
+| ----------------------------- | ----------------------------------- | ----------------------------------------------------- |
+| 草稿 revision                 | 4                                   | **5**                                                 |
+| 草稿规则                      | `0:dd6466e1` + `1:ba98baf6`         | **只剩 `0:dd6466e1`**                                 |
+| 最新发布                      | v4（recent，targets=360，2 条规则） | **v5（future，targets=[]，1 条规则）**                |
+| `processing_inputs` 分布      | `skipped 7666 / succeeded 3177`     | **完全相同**                                          |
+| 未分配输入数                  | 1386                                | **1386**                                              |
+| `ruleSetSchema.parse(新草稿)` | —                                   | **PASS**（`rules=1, order=0`）                        |
+| 服务                          | —                                   | `job state = running`、2240 = **200**、`runs` 稳定 54 |
+
+schema 校验是用仓库自带 TS 运行时真跑的，不是读代码推断：
+
+```sh
+cd /Volumes/SSD/Dev/Code/Folo
+./node_modules/.bin/tsx .tmp-check-ruleset.ts   # import { ruleSetSchema } from "./packages/internal/information-core/src/rules"
+# → SCHEMA=PASS rules=1 order=0
+```
+
+两个环境细节：`tsx` 解析不到 workspace 包名 `@follow/information-core`（根 `node_modules/@follow/`
+下没有它，只有 `apps/information-service` 里有），所以校验脚本要 `import` **相对路径**；
+日志在 `~/Library/Logs/FoloInformation/service.log`（`service.error.log` 里只有 node 的
+`node:sqlite` ExperimentalWarning）。该日志里 `internal_error` 出现 43 次、`worker: ready` 46 次，
+是长期累积的常态噪音（`grep -c rule` = 0），不是本轮引入的。
+
+### 16.5 本轮清掉的产物备份
+
+| 位置                               | 清理前                                                          | 清理后                              | 释放                 |
+| ---------------------------------- | --------------------------------------------------------------- | ----------------------------------- | -------------------- |
+| `…/FoloLocal/information-runtime/` | 19 个 `main-web-pre-*` / `web-pre-*`                            | 只剩 `index.mjs`、`main-web`、`web` | 318 MB               |
+| `apps/desktop/out/`                | 20 个（`information-web-pre-*`、`web-pre-*`、`web-previous-*`） | 只剩 `information-web`、`web`       | 331 MB（380M → 49M） |
+
+删除时只按白名单前缀逐个 `rm -rf`（不用通配符批量），并核对剩下的恰好是当前产物。
+**顺带发现、本轮未动**（供下次决定）：同级还有 5 个 `information-runtime-previous-*`
+（安装器的回落副本）与 12 个 `information-stage-*`（安装器临时目录，§14 已注明可删）；
+`/tmp/folo-v32-verify` 里 37 个 sqlite 快照副本合计 5.9 GB，而系统卷只剩 16 GiB。
