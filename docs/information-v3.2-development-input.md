@@ -1055,3 +1055,47 @@ cd /Volumes/SSD/Dev/Code/Folo
 **顺带发现、本轮未动**（供下次决定）：同级还有 5 个 `information-runtime-previous-*`
 （安装器的回落副本）与 12 个 `information-stage-*`（安装器临时目录，§14 已注明可删）；
 `/tmp/folo-v32-verify` 里 37 个 sqlite 快照副本合计 5.9 GB，而系统卷只剩 16 GiB。
+
+## 17. 排查「一直显示 Service Unavailable」：与 §16 的改动无关（2026-09-26 22:30）
+
+用户报「现在一直显示 Service Unavailable 看看跟你的改动有关吗」。**结论：无关**，
+根因是 **Docker Desktop 的 daemon 卡死**，而 `local.folo.is` 这条链恰好完全依赖它。
+
+### 17.1 判据链（按顺序走，两分钟定位）
+
+| 步骤 | 命令                                                                       | 实测                                            | 含义                                                                        |
+| ---- | -------------------------------------------------------------------------- | ----------------------------------------------- | --------------------------------------------------------------------------- |
+| 1    | `curl --noproxy '*' http://127.0.0.1:2240/`                                | **200**                                         | 本地服务是好的                                                              |
+| 1    | `curl --noproxy "" -x http://127.0.0.1:8899 http://local.folo.is/`         | **200**                                         | 绕过 Docker 的应用是好的                                                    |
+| 1    | `curl --noproxy '*' http://local.folo.is/`（打到 80）                      | **000 / 40 s 零字节**                           | **Docker 这条链断了**                                                       |
+| 2    | 读 `docker-compose.override.yml` + `output/local-folo.conf`                | `ProxyPass / http://host.docker.internal:2240/` | 503 的 upstream 就是宿主机 2240                                             |
+| 3    | `lsof -nP -iTCP:2240 -sTCP:LISTEN`                                         | `127.0.0.1:2240`                                | 服务**只监听回环**（`index.ts:203` 硬编码），容器能连上完全依赖 Docker 转发 |
+| 3    | `curl --noproxy '*' http://192.168.1.100:2240/`                            | **000**                                         | 从 LAN IP 也连不上，佐证上一条                                              |
+| 4    | python 直连 `~/.docker/run/docker.sock` 发 `GET /_ping` `/version` `/info` | **三个全部 6 s 超时**                           | **daemon 卡死 —— 这就是根因**                                               |
+
+第 4 步之所以不用 `docker` CLI：沙箱里它一律被 SIGTERM（`dangerouslyDisableSandbox` 也一样）。
+用 socket 直接打 API 即可（`/var/run/docker.sock` 是指向 `~/.docker/run/docker.sock` 的符号链接）。
+
+**最容易误判的一步**：`lsof -nP -iTCP:80` 里 `com.docke` 仍在 LISTEN、Docker Desktop 的 GUI 进程
+也都活着 —— **端口在听 ≠ daemon 活着**。只有 `/_ping` 有响应才算健康。
+另一个盲区：沙箱内到宿主机 80 的连接**被拦**（`--max-time 40` 收不到任何字节），
+所以「浏览器里看到 503、沙箱里只看到 `000`」是正常的，不要因为复现不出来就动摇结论。
+
+### 17.2 为什么能确定与 §16 的改动无关
+
+- 本次改动只有两件事：两个 DB 写入（草稿 + 不可变发布）、删除产物备份目录。
+  **没碰 Docker、没碰 80/443、没碰服务监听、没碰 `output/` 下的 conf 与证书**
+  （这两者的 mtime 仍是 2026-09-12）。
+- 服务进程 pid **46368**、`runs` 全程稳定 **54** —— 改库前后**没有重启过**；
+  `job state = running`、2240 = 200。
+- 更关键的是时间线：**这条链路在本次改动之前两小时就已经断了**。
+  20:00 前后排查标签迁移时就记过 `curl local.folo.is` = `000`、`lsof -iTCP:80` 只有
+  `com.docke` 的 `CLOSE_WAIT`，当时正是为此才写了 `dev-proxy.cjs` 绕开 Docker。
+
+### 17.3 修法与临时替代
+
+- **修**：重启 Docker Desktop。daemon 卡死时连 `docker restart <容器>` 都执行不了（API 不通），
+  只能从菜单栏图标或 `osascript -e 'quit app "Docker"'` 后重新启动。
+- **临时替代（已验证可用）**：`/tmp/folo-v32-verify/dev-proxy.cjs` 在 8899 上把
+  `local.folo.is` 直连到 2240，hostname 保持不变（`isLocalFoloHost()` 要求严格相等）。
+  把浏览器代理设成 `127.0.0.1:8899` 就能正常使用，含处理服务功能。
