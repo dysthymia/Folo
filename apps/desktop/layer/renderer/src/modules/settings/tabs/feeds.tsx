@@ -68,6 +68,8 @@ import { SettingModalContentPortal } from "~/modules/settings/modal/layout"
 import { Balance } from "~/modules/wallet/balance"
 import { Queries } from "~/queries"
 
+import { ProcessingTagManager } from "./feeds-processing-tags"
+
 type SortField =
   | "name"
   | "view"
@@ -138,6 +140,16 @@ const SubscriptionFeedsSection = () => {
     void loadProcessingTags(controller.signal)
     return () => controller.abort()
   }, [loadProcessingTags])
+
+  // 标签被删除后筛选器和批量操作的目标不能继续指向一个已经不存在的 id，
+  // 否则界面会停在一个筛不出任何订阅源的空状态上。
+  useEffect(() => {
+    const tags = processingTags?.subscriptionTags.tags
+    if (!tags) return
+    const missing = (id: string) => id !== "" && !tags.some((tag) => tag.id === id)
+    setTagFilter((current) => (current !== "all" && missing(current) ? "all" : current))
+    setSelectedTagId((current) => (missing(current) ? "" : current))
+  }, [processingTags])
 
   // Calculate RSSHub feeds count
   const rsshubFeedsCount = useMemo(() => {
@@ -286,6 +298,9 @@ const SubscriptionFeedsSection = () => {
           )}
         </div>
       </div>
+      {processingTagsEnabled && (
+        <ProcessingTagManager data={processingTags} reload={loadProcessingTags} />
+      )}
       {tagError && (
         <p role="alert" className="text-sm text-orange">
           {t("feeds.processing_tags.unavailable")}

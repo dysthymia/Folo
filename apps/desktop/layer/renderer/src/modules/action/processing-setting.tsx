@@ -39,7 +39,6 @@ import {
   isoFromDate,
   ProcessingRunSettings,
 } from "./processing-run-settings"
-import { ProcessingTags } from "./processing-tags"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
 import { resolveLiveReleaseVersion } from "./release-version"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
@@ -566,7 +565,7 @@ export function ProcessingSetting({
                 <p className="mt-2 text-text-secondary">{t("processing.not_automatic")}</p>
               )}
             </div>
-            <ProcessingTags editor={editor} refresh={refresh} />
+            {/* 标签的建/改名/删在「设置 → 订阅源」，这里只保留规则条件里的按标签筛选。 */}
             <fieldset disabled={busy} className="space-y-6 disabled:opacity-60">
               <label className="block space-y-2">
                 <span className="font-medium">{t("processing.global")}</span>
