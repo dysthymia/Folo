@@ -1099,3 +1099,34 @@ cd /Volumes/SSD/Dev/Code/Folo
 - **临时替代（已验证可用）**：`/tmp/folo-v32-verify/dev-proxy.cjs` 在 8899 上把
   `local.folo.is` 直连到 2240，hostname 保持不变（`isLocalFoloHost()` 要求严格相等）。
   把浏览器代理设成 `127.0.0.1:8899` 就能正常使用，含处理服务功能。
+
+### 17.4 修复实录：用户 Quit 之后打不开 Docker（22:55）
+
+按 §17.3 建议关掉 Docker Desktop 后，再点图标打不开。现场是典型的「GUI 退了、后端卡死残留」：
+
+- **GUI 已退出**（`pgrep -f "Docker Desktop.app/Contents/MacOS/Docker Desktop"` 为空），
+  但 `com.docker.backend`（17927）+ `services` + `fork` + `com.docker.build` +
+  `com.docker.virtualization` + `docker-agent` **全部还在**，其中 backend 卡死（`/_ping` 无响应）
+  并继续占着 80 端口 —— 新实例发现已有 backend 就退出，于是「点了没反应」。
+- `supervisor.log` 里能看到 GUI 的退出痕迹：`[2026-09-26T14:52:11Z] … wait status: 26624`，
+  而 backend 的启动记录还停在 `2026-09-24T12:34`（已连续跑了两天）。
+
+修复与复验：
+
+| 步骤                                          | 结果                                                                                                                                    |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `pkill -f "com.docker.backend"`（SIGTERM）    | **不够** —— build/virtualization 退了，backend+services 仍占 80                                                                         |
+| `pkill -9 -f "com.docker.backend"`（SIGKILL） | 80 端口释放                                                                                                                             |
+| 等待（**无需** `open -a Docker`）             | launchd 自动拉起整套：backend 89014 / services 89030 / fork 89031 / build 89178 / GUI 89194 / virtualization 89196 / docker-agent 89359 |
+| `/_ping`                                      | **200 OK**（Api-Version 1.56）                                                                                                          |
+| `curl --noproxy '*' http://local.folo.is/`    | **200 / 0.37 s**（卡死时是 `000` / 40 s 零字节）                                                                                        |
+| `https://local.folo.is/`                      | 200 / 0.11 s                                                                                                                            |
+| `http://local.folo.is/information/`           | 200                                                                                                                                     |
+| 80 返回内容                                   | 真实 HTML 8926 字节（入口 `/assets/polyfills-Bm-PauKc.js`）                                                                             |
+
+**一条差点误导判断的沙箱陷阱**：`ls -la /Applications/Docker.app/` 显示 `total 0`、
+Glob 也返回 `No files found`，**看上去像 app 被删了**（差点去重装）；
+但 `Read /Applications/Docker.app/Contents/Info.plist` 能读到完整的 `CFBundleExecutable =
+com.docker.backend`，进程也正是从这个路径启动的 —— **app 是完整的。判断 app 是否完整要用
+Read，不要用 `ls`/Glob。** 另外 `com.docker.vmnetd`（PID 868，位于
+`/Library/PrivilegedHelperTools/`）是常驻特权 helper，属正常现象，不要当成残留去杀。
