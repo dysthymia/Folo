@@ -1019,6 +1019,7 @@
   "processing.type.ai_dedupe": "Same-event dedupe",
   "processing.type.ai_transform": "Single-article AI",
   "processing.type.display": "Language and summary",
+  "processing.type.local_filter": "Standard local action",
   "processing.type.presentation": "Presentation and permissions",
   "processing.unavailable_source": "Unavailable: {{source}}",
   "processing.unread": "Unread",

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { localActionSyncService, useLocalActionStore } from "./local-store"
+import { localActionActions, localActionSyncService, useLocalActionStore } from "./local-store"
 import type { ActionItem } from "./store"
 
 const rule: ActionItem = {
@@ -84,5 +84,37 @@ describe("disablePublishedMigrationTargets", () => {
       reason: "owner",
     })
     expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it("补齐的本地 ID 立即持久化，刷新和调整顺序后仍绑定同一条规则", () => {
+    storage.getItem.mockReturnValue(JSON.stringify({ rules: [rule] }))
+    localActionActions.hydrate("owner")
+    const saved = String(storage.setItem.mock.calls[0]?.[1])
+    const localId = useLocalActionStore.getState().rules[0]?.localId
+    expect(localId).toBeTruthy()
+    storage.getItem.mockReturnValue(saved)
+    localActionActions.hydrate("owner")
+    expect(useLocalActionStore.getState().rules[0]?.localId).toBe(localId)
+    useLocalActionStore.setState((state) => ({
+      rules: [
+        { ...rule, localId: "another", index: 0 },
+        { ...state.rules[0]!, index: 1 },
+      ],
+    }))
+    expect(
+      localActionSyncService.disablePublishedMigrationTargets("owner", [{ ...target, localId }]),
+    ).toEqual({ switched: true, count: 1 })
+    expect(useLocalActionStore.getState().rules[0]?.result.disabled).toBeUndefined()
+    expect(useLocalActionStore.getState().rules[1]?.result.disabled).toBe(true)
+  })
+
+  it("无法持久化 ID 时保留旧规则运行，但不暴露可升级的临时标识", () => {
+    storage.getItem.mockReturnValue(JSON.stringify({ rules: [rule] }))
+    storage.setItem.mockImplementation(() => {
+      throw new Error("quota")
+    })
+    localActionActions.hydrate("owner")
+    expect(useLocalActionStore.getState().rules[0]).toMatchObject(rule)
+    expect(useLocalActionStore.getState().rules[0]?.localId).toBeUndefined()
   })
 })

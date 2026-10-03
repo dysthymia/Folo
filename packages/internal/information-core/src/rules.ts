@@ -100,6 +100,8 @@ export const presetRefSchema = z
   .object({ id: identifier, version: z.number().int().positive() })
   .strict()
 export const actionSchema = z.discriminatedUnion("type", [
+  // 普通本地动作继续由客户端执行，不生成模型指令或触发模型调用。
+  z.object({ type: z.literal("local_filter"), mode: z.enum(["block", "silence"]) }).strict(),
   z
     .object({
       type: z.literal("ai_transform"),
@@ -217,6 +219,8 @@ export type ConditionSet = z.infer<typeof conditionSetSchema>
 export type AutomationRule = z.infer<typeof ruleSchema>
 export type RuleSet = z.infer<typeof ruleSetSchema>
 export type PresentationPolicy = z.infer<typeof presentationPolicySchema>
+export const ruleUsesAI = (rule: Pick<AutomationRule, "actions">): boolean =>
+  rule.actions.some((action) => ["ai_transform", "ai_aggregate", "ai_dedupe"].includes(action.type))
 export type MatchState = "match" | "no_match" | "unknown"
 export type RuleInput = Partial<Record<z.infer<typeof textFields>, string | null>> & {
   source_id: string | null
@@ -373,7 +377,7 @@ export function compileInstructions(ruleSet: RuleSet, input: RuleInput) {
   }
   // 自由 Prompt 也可能影响资格；unknown 规则存在时先保留独立临时入口。
   const blocksFinalPresentation = pending.some((rule) =>
-    rule.actions.some((action) => action.type !== "display"),
+    rule.actions.some((action) => action.type !== "display" && action.type !== "local_filter"),
   )
   return {
     global: parsed.global,

@@ -12,6 +12,8 @@ import { createImmerSetter, createZustandStore } from "../../lib/helper"
 export type ActionItem = Omit<ActionItemRes, "condition"> & {
   condition: ActionFilterItem[][]
   index: number
+  // 浏览器本地规则的稳定标识；官方云端规则不需要此字段。
+  localId?: string
 }
 
 type ActionStore = {

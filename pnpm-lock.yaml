@@ -2350,6 +2350,9 @@ importers:
       '@follow/database':
         specifier: workspace:*
         version: link:../database
+      '@follow/information-core':
+        specifier: workspace:*
+        version: link:../information-core
       '@follow/models':
         specifier: workspace:*
         version: link:../models

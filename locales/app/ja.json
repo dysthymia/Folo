@@ -1005,6 +1005,7 @@
   "processing.type.ai_dedupe": "同一イベントの重複排除",
   "processing.type.ai_transform": "単一記事 AI",
   "processing.type.display": "言語と要約",
+  "processing.type.local_filter": "通常のローカル操作",
   "processing.type.presentation": "表示・統合・書き換え",
   "processing.unavailable_source": "利用不可：{{source}}",
   "processing.unread": "未読",

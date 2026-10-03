@@ -109,6 +109,7 @@
     "@follow/configs": "workspace:*",
     "@follow/constants": "workspace:*",
     "@follow/database": "workspace:*",
+    "@follow/information-core": "workspace:*",
     "@follow/models": "workspace:*",
     "@follow/shared": "workspace:*",
     "@follow/tracker": "workspace:*",

@@ -6,6 +6,7 @@ import { useEntryStore } from "../entry/store"
 import { unreadSyncService } from "../unread/store"
 import { getLocalActionSilenceEntryIds } from "./local-match"
 import { localActionSyncService, useLocalActionStore } from "./local-store"
+import { usePublishedLocalFilterStore } from "./published-local-filters"
 import type { ActionItem } from "./store"
 
 export const useLocalActionHydration = (ownerKey: string | null | undefined) => {
@@ -33,7 +34,11 @@ export function useLocalActionRule<T>(index: number, selector?: (rule: ActionIte
   })
 }
 
-export const useLocalActionRevision = () => useLocalActionStore((state) => state.revision)
+export const useLocalActionRevision = () => {
+  const localRevision = useLocalActionStore((state) => state.revision)
+  const publishedRevision = usePublishedLocalFilterStore((state) => state.revision)
+  return localRevision + publishedRevision
+}
 
 export const useIsLocalActionDataDirty = () => useLocalActionStore((state) => state.isDirty)
 

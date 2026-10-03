@@ -255,7 +255,7 @@ const migrateRule = (
   const issues: ActionMigrationIssue[] = []
   const allowedKeys =
     sourceLocation === "local"
-      ? ["name", "condition", "result", "index"]
+      ? ["name", "condition", "result", "index", "localId"]
       : ["name", "condition", "result"]
   if (!isRecord(value) || !hasOnlyKeys(value, allowedKeys)) {
     issues.push(issue(isRecord(value) ? "unknown_field" : "invalid_rule", `rules[${index}]`))

@@ -1,4 +1,5 @@
 export * from "./action-migration"
+export * from "./local-action-upgrade"
 export * from "./presets"
 export * from "./rules"
 export * from "./schedule-scope"

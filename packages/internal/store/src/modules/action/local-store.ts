@@ -19,6 +19,7 @@ interface LocalActionStore {
 }
 
 export type LocalActionMigrationTarget = {
+  localId?: string
   index: number
   name: string
   condition: unknown
@@ -95,6 +96,11 @@ const normalizeRule = (rule: unknown, index: number): ActionItem | null => {
   if (!isRecord(rule)) return null
 
   return {
+    // 数组位置仅用于旧编辑器导航，升级绑定始终使用持久化标识。
+    localId:
+      typeof rule.localId === "string" && /^[\w-]{1,160}$/.test(rule.localId)
+        ? rule.localId
+        : crypto.randomUUID(),
     condition: normalizeCondition(rule.condition),
     index,
     name:
@@ -105,10 +111,15 @@ const normalizeRule = (rule: unknown, index: number): ActionItem | null => {
 
 const normalizeRules = (rules: unknown): ActionItem[] => {
   if (!Array.isArray(rules)) return []
-
+  const ids = new Set<string>()
   return rules
     .map((rule, index) => normalizeRule(rule, index))
     .filter((rule): rule is ActionItem => !!rule)
+    .map((rule) => {
+      if (!rule.localId || ids.has(rule.localId)) rule.localId = crypto.randomUUID()
+      ids.add(rule.localId)
+      return rule
+    })
 }
 
 const readRulesFromStorage = (ownerKey: string): ActionItem[] => {
@@ -120,13 +131,26 @@ const readRulesFromStorage = (ownerKey: string): ActionItem[] => {
 
   try {
     const parsed = JSON.parse(raw) as unknown
-    if (Array.isArray(parsed)) {
-      return normalizeRules(parsed)
+    const rawRules = Array.isArray(parsed) ? parsed : isRecord(parsed) ? parsed.rules : []
+    const rules = normalizeRules(rawRules)
+    const stableIds = new Set(
+      Array.isArray(rawRules)
+        ? rawRules.flatMap((rule) =>
+            isRecord(rule) && typeof rule.localId === "string" ? [rule.localId] : [],
+          )
+        : [],
+    )
+    if (rules.some((rule) => !stableIds.has(rule.localId!))) {
+      try {
+        // 只在旧数据首次补 ID 时写入；持久化失败仍执行旧规则，但禁止以临时 ID 升级。
+        writeRulesToStorage(ownerKey, rules)
+      } catch {
+        return rules.map((rule) =>
+          stableIds.has(rule.localId!) ? rule : { ...rule, localId: undefined },
+        )
+      }
     }
-
-    if (isRecord(parsed)) {
-      return normalizeRules(parsed.rules)
-    }
+    return rules
   } catch {
     return []
   }
@@ -193,6 +217,7 @@ export const localActionActions = {
     set((state) => {
       const index = state.rules.length
       state.rules.push({
+        localId: crypto.randomUUID(),
         condition: [],
         index,
         name:
@@ -312,10 +337,12 @@ export const localActionActions = {
   },
   saveRules: () => {
     const { ownerKey, rules } = useLocalActionStore.getState()
-    writeRulesToStorage(ownerKey || "anonymous", rules)
+    const nextRules = normalizeRules(rules)
+    writeRulesToStorage(ownerKey || "anonymous", nextRules)
 
     set((state) => {
       state.ownerKey ||= "anonymous"
+      state.rules = nextRules
       state.isDirty = false
     })
   },
@@ -374,7 +401,9 @@ export const localActionSyncService = {
     )
       return { switched: false as const, reason: "owner" as const }
     const matches = targets.every((target) => {
-      const rule = state.rules[target.index]
+      const rule = target.localId
+        ? state.rules.find((item) => item.localId === target.localId)
+        : state.rules[target.index]
       return (
         rule?.name === target.name &&
         JSON.stringify(rule.condition) === JSON.stringify(target.condition) &&
@@ -384,7 +413,9 @@ export const localActionSyncService = {
     if (!matches) return { switched: false as const, reason: "changed" as const }
 
     const nextRules = state.rules.map((rule, index) =>
-      targets.some((target) => target.index === index)
+      targets.some((target) =>
+        target.localId ? target.localId === rule.localId : target.index === index,
+      )
         ? { ...rule, result: { ...rule.result, disabled: true } }
         : rule,
     )

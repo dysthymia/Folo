@@ -1,3 +1,4 @@
+import type { RuleInput } from "@follow/information-core"
 import type { ActionFeedField, ActionFilterItem, ActionOperation } from "@follow-app/client-sdk"
 
 import { isEntryStarred } from "../collection/getter"
@@ -7,6 +8,10 @@ import { getFeedById } from "../feed/getter"
 import { getSubscriptionByEntryId, getSubscriptionByFeedId } from "../subscription/getter"
 import type { SubscriptionModel } from "../subscription/types"
 import { useLocalActionStore } from "./local-store"
+import {
+  evaluatePublishedLocalFilters,
+  usePublishedLocalFilterStore,
+} from "./published-local-filters"
 import type { ActionItem } from "./store"
 
 type LocalActionStatus = "collected" | "read" | "unread"
@@ -221,13 +226,68 @@ const getLocalMatchedRules = (entryId: string) => {
 
 export const getLocalActionMatchedRules = (entryId: string) => getLocalMatchedRules(entryId)
 
+export const getPublishedLocalActionResult = (entryId: string) => {
+  const { snapshot } = usePublishedLocalFilterStore.getState()
+  const { ownerKey, isHydrated } = useLocalActionStore.getState()
+  const empty = { blocked: false, silenced: false, matchedRuleIds: [] as string[] }
+  // 同账号可继续使用最后成功的发布快照，换账号和退出登录立即停止旧账号规则。
+  if (!snapshot || !isHydrated || snapshot.ownerId !== ownerKey) return empty
+  const entry = getEntry(entryId)
+  const context = buildLocalActionEntryContext(entryId)
+  if (!entry || !context) return empty
+  const sourceKind = entry.inboxHandle ? "inbox" : "feed"
+  const entrySourceId = entry.inboxHandle || entry.feedId
+  const source = snapshot.sources?.find(
+    (item) => item.kind === sourceKind && item.id === entrySourceId,
+  )
+  const sourceId = source?.key ?? (entrySourceId ? `${sourceKind}/${entrySourceId}` : null)
+  const listMembership: NonNullable<RuleInput["list_id"]> = {}
+  for (const list of snapshot.listMemberships ?? []) {
+    listMembership[list.listKey] =
+      list.complete && list.status === "complete" && entry.feedId
+        ? list.feedIds.includes(entry.feedId)
+        : null
+  }
+  const input: RuleInput = {
+    source_id: sourceId,
+    contextId: sourceId ?? entryId,
+    title: context.feedTitle,
+    category: context.category,
+    category_ref:
+      context.category && context.view != null
+        ? { view: context.view, name: context.category }
+        : null,
+    view: context.view,
+    entry_author: context.entryAuthor,
+    entry_content: context.entryContent,
+    entry_title: context.entryTitle,
+    entry_url: context.entryUrl,
+    entry_media_length: context.entryMediaLength,
+    entry_attachments_duration: context.entryAttachmentsDuration,
+    feed_url: context.feedUrl,
+    site_url: context.siteUrl,
+    read: !!entry.read,
+    collected: isEntryStarred(entryId),
+    subscription_tag:
+      snapshot.sourceTags && sourceId
+        ? [...(snapshot.sourceTags.find((binding) => binding.sourceKey === sourceId)?.tagIds ?? [])]
+        : null,
+    list_id: listMembership,
+  }
+  return evaluatePublishedLocalFilters(snapshot.ruleSet, input)
+}
+
 export const isEntryBlockedByLocalActions = (entryId: string) =>
-  getLocalMatchedRules(entryId).some((rule) => rule.result.block)
+  getLocalMatchedRules(entryId).some((rule) => rule.result.block) ||
+  getPublishedLocalActionResult(entryId).blocked
 
 export const isEntrySilencedByLocalActions = (entryId: string) => {
   if (isEntryBlockedByLocalActions(entryId)) return false
 
-  return getLocalMatchedRules(entryId).some((rule) => rule.result.silence)
+  return (
+    getLocalMatchedRules(entryId).some((rule) => rule.result.silence) ||
+    getPublishedLocalActionResult(entryId).silenced
+  )
 }
 
 export const filterLocalActionEntryIds = (entryIds: string[]) =>

@@ -3,6 +3,8 @@ import { z } from "zod"
 // §2 D4 运行范围三态：落库只存描述符；只有固定名单保存名单快照。
 // 三种范围共用同一份解析（见 resolveScheduleSourceKeys），避免「全局说明不覆盖后来新增的订阅」。
 export const scheduleScopeSchema = z.discriminatedUnion("mode", [
+  // 新规则的选源由服务端根据启用的 AI 条件动态解析，允许暂时没有匹配来源。
+  z.object({ mode: z.literal("rules") }).strict(),
   z.object({ mode: z.literal("all") }).strict(),
   z
     .object({
@@ -53,6 +55,8 @@ export function resolveScheduleSourceKeys(
   scope: ScheduleScope,
   sources: readonly ScheduleSourceView[],
 ): string[] {
+  // rules 需要已发布规则和私人标签，客户端不能退化为全选。
+  if (scope.mode === "rules") return []
   if (scope.mode === "fixed") return [...scope.sourceKeys]
   if (scope.mode === "all") {
     return uniqueSorted(sources.map((source) => source.key))

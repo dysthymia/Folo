@@ -1019,6 +1019,7 @@
   "processing.type.ai_dedupe": "同事件去重",
   "processing.type.ai_transform": "单篇 AI 处理",
   "processing.type.display": "语言与摘要",
+  "processing.type.local_filter": "普通本地动作",
   "processing.type.presentation": "展示、综合与改写",
   "processing.unavailable_source": "暂不可用：{{source}}",
   "processing.unread": "未读",
