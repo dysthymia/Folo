@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
-import type { RuleSet } from "@follow/information-core"
+import type { AutomationRule, RuleSet } from "@follow/information-core"
 import { ruleSetSchema } from "@follow/information-core"
 import { z } from "zod"
 
@@ -11,6 +11,8 @@ export class AutomationError extends Error {
   constructor(
     public readonly code:
       | "revision_conflict"
+      | "legacy_scope_migration_required"
+      | "legacy_scope_upgrade_blocked"
       | "owner_required"
       | "invalid_rule_set"
       | "invalid_target"
@@ -90,6 +92,7 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS processing_inputs (seq INTEGER PRIMARY KEY AUTOINCREMENT, source_key TEXT NOT NULL, item_id TEXT NOT NULL, content_version TEXT NOT NULL, body TEXT NOT NULL, received_at TEXT NOT NULL, release_version INTEGER, generation INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', current INTEGER NOT NULL DEFAULT 1, decision_id TEXT);
       CREATE INDEX IF NOT EXISTS processing_input_identity ON processing_inputs(source_key,item_id,current);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS rule_activation_requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publication_requests (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, scope TEXT NOT NULL, release_version INTEGER NOT NULL);
     `)
   }
@@ -144,6 +147,252 @@ export class AutomationStore {
         .prepare("INSERT OR REPLACE INTO automation_draft VALUES(1,?,?)")
         .run(revision, JSON.stringify(config))
       return { revision, config }
+    })
+  }
+
+  effective(): { releaseVersion: number | null; config: RuleSet | null } {
+    const row = this.db
+      .prepare("SELECT version,body FROM rule_set_releases ORDER BY version DESC LIMIT 1")
+      .get()
+    return row
+      ? {
+          releaseVersion: Number(row.version),
+          config: ruleSetSchema.parse(JSON.parse(String(row.body))),
+        }
+      : { releaseVersion: null, config: null }
+  }
+
+  activateRule(
+    ruleId: string,
+    rule: AutomationRule | null,
+    expectedRevision: number,
+    requestId: string,
+    afterActivate?: () => void,
+  ) {
+    if (rule && (rule.id !== ruleId || rule.ownerId !== this.owner()))
+      throw new AutomationError("invalid_rule_set")
+    return this.activateChange(
+      { type: "rule", ruleId, rule },
+      expectedRevision,
+      requestId,
+      afterActivate,
+    )
+  }
+
+  activateGlobal(
+    markdown: string,
+    expectedRevision: number,
+    requestId: string,
+    afterActivate?: () => void,
+  ) {
+    return this.activateChange(
+      { type: "global", markdown },
+      expectedRevision,
+      requestId,
+      afterActivate,
+    )
+  }
+
+  upgradeRules(
+    expectedRevision: number,
+    expectedScheduleRevision: number,
+    requestId: string,
+    prepare: () => { config: RuleSet; effectiveConfig: RuleSet },
+    afterUpgrade: () => void,
+  ) {
+    if (!z.uuid().safeParse(requestId).success) throw new AutomationError("invalid_target")
+    type Result = {
+      revision: number
+      config: RuleSet
+      effectiveConfig: RuleSet
+      release: ReturnType<AutomationStore["releases"]>[number]
+    }
+    return this.transaction((): Result => {
+      const request = JSON.stringify({
+        type: "legacy_scope_upgrade",
+        expectedRevision,
+        expectedScheduleRevision,
+      })
+      const replay = this.db
+        .prepare("SELECT request,response FROM rule_activation_requests WHERE id=?")
+        .get(requestId)
+      if (replay) {
+        if (replay.request !== request) throw new AutomationError("revision_conflict")
+        return JSON.parse(String(replay.response)) as Result
+      }
+      if (this.draft().revision !== expectedRevision) throw new AutomationError("revision_conflict")
+      const prepared = prepare()
+      const saved = this.saveDraft(prepared.config, expectedRevision)
+      const effectiveConfig = ruleSetSchema.parse({
+        ...prepared.effectiveConfig,
+        rules: prepared.effectiveConfig.rules.map((rule) => {
+          const previous = this.effective().config?.rules.find((item) => item.id === rule.id)
+          const changed = JSON.stringify(previous) !== JSON.stringify(rule)
+          // 无关的未发布草稿版本不能冒充历史有效规则的新版本。
+          return {
+            ...rule,
+            version: changed
+              ? (saved.config.rules.find((item) => item.id === rule.id)?.version ?? rule.version)
+              : rule.version,
+          }
+        }),
+      })
+      if (this.validatePublication && !this.validatePublication(effectiveConfig))
+        throw new AutomationError("invalid_rule_set")
+      const activationSeq = Number(
+        this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM processing_inputs").get()!.seq,
+      )
+      const createdAt = new Date().toISOString()
+      const scope = { mode: "future" as const }
+      // 升级只把既有范围写入规则，不重算历史输入，也不改写已有 Story 版本。
+      const inserted = this.db
+        .prepare(
+          "INSERT INTO rule_set_releases(draft_revision,activation_seq,body,scope,targets,created_at) VALUES(?,?,?,?,?,?)",
+        )
+        .run(
+          saved.revision,
+          activationSeq,
+          JSON.stringify(effectiveConfig),
+          JSON.stringify(scope),
+          "[]",
+          createdAt,
+        )
+      const release = {
+        version: Number(inserted.lastInsertRowid),
+        draftRevision: saved.revision,
+        activationSeq,
+        createdAt,
+        scope,
+        targetInputIds: [],
+      }
+      afterUpgrade()
+      const result = { ...saved, effectiveConfig, release }
+      this.db
+        .prepare("INSERT INTO rule_activation_requests VALUES(?,?,?)")
+        .run(requestId, request, JSON.stringify(result))
+      return result
+    })
+  }
+
+  private activateChange(
+    change:
+      | { type: "rule"; ruleId: string; rule: AutomationRule | null }
+      | { type: "global"; markdown: string },
+    expectedRevision: number,
+    requestId: string,
+    afterActivate?: () => void,
+  ) {
+    if (!z.uuid().safeParse(requestId).success) throw new AutomationError("invalid_target")
+    type Result = {
+      revision: number
+      config: RuleSet
+      effectiveConfig: RuleSet
+      release: ReturnType<AutomationStore["releases"]>[number]
+    }
+    return this.transaction((): Result => {
+      const request = JSON.stringify({ change, expectedRevision })
+      const replay = this.db
+        .prepare("SELECT request,response FROM rule_activation_requests WHERE id=?")
+        .get(requestId)
+      if (replay) {
+        if (replay.request !== request) throw new AutomationError("revision_conflict")
+        return JSON.parse(String(replay.response)) as Result
+      }
+      const previous = this.draft()
+      if (previous.revision !== expectedRevision) throw new AutomationError("revision_conflict")
+      const active = this.effective().config ?? {
+        formatVersion: 4 as const,
+        ownerId: previous.config.ownerId,
+        global: { version: 1, markdown: "" },
+        rules: [],
+      }
+      let draftConfig = previous.config
+      let effectiveConfig = active
+      if (change.type === "global") {
+        draftConfig = {
+          ...draftConfig,
+          global: { ...draftConfig.global, markdown: change.markdown },
+        }
+        effectiveConfig = {
+          ...active,
+          global: {
+            ...active.global,
+            markdown: change.markdown,
+            version: active.global.version + Number(active.global.markdown !== change.markdown),
+          },
+        }
+      } else {
+        const existing = previous.config.rules.find((rule) => rule.id === change.ruleId)
+        const published = active.rules.find((rule) => rule.id === change.ruleId)
+        if (!change.rule && !existing && !published) throw new AutomationError("invalid_target")
+        // 位置沿用各自列表；新增规则追加。避免单条保存偷偷重排其他未发布草稿。
+        const replace = (config: RuleSet) => {
+          const old = config.rules.find((rule) => rule.id === change.ruleId)
+          const next = change.rule
+            ? {
+                ...change.rule,
+                order: old?.order ?? Math.max(-1, ...config.rules.map((rule) => rule.order)) + 1,
+              }
+            : null
+          return {
+            ...config,
+            rules: old
+              ? config.rules.flatMap((rule) =>
+                  rule.id === change.ruleId ? (next ? [next] : []) : [rule],
+                )
+              : next
+                ? [...config.rules, next]
+                : config.rules,
+          }
+        }
+        draftConfig = replace(draftConfig)
+        effectiveConfig = replace(active)
+      }
+      const saved = this.saveDraft(draftConfig, expectedRevision)
+      if (change.type === "rule" && change.rule) {
+        const savedRule = saved.config.rules.find((rule) => rule.id === change.ruleId)!
+        effectiveConfig = {
+          ...effectiveConfig,
+          rules: effectiveConfig.rules.map((rule) =>
+            rule.id === change.ruleId ? { ...savedRule, order: rule.order } : rule,
+          ),
+        }
+      }
+      effectiveConfig = ruleSetSchema.parse(effectiveConfig)
+      if (this.validatePublication && !this.validatePublication(effectiveConfig))
+        throw new AutomationError("invalid_rule_set")
+      const activationSeq = Number(
+        this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM processing_inputs").get()!.seq,
+      )
+      const scope = { mode: "future" as const }
+      const createdAt = new Date().toISOString()
+      // 普通保存不重算已有材料或失效既有 Story；后续新输入在领取时绑定新版本。
+      const inserted = this.db
+        .prepare(
+          "INSERT INTO rule_set_releases(draft_revision,activation_seq,body,scope,targets,created_at) VALUES(?,?,?,?,?,?)",
+        )
+        .run(
+          saved.revision,
+          activationSeq,
+          JSON.stringify(effectiveConfig),
+          JSON.stringify(scope),
+          "[]",
+          createdAt,
+        )
+      const release = {
+        version: Number(inserted.lastInsertRowid),
+        draftRevision: saved.revision,
+        activationSeq,
+        scope,
+        targetInputIds: [],
+        createdAt,
+      }
+      afterActivate?.()
+      const result = { ...saved, effectiveConfig, release }
+      this.db
+        .prepare("INSERT INTO rule_activation_requests VALUES(?,?,?)")
+        .run(requestId, request, JSON.stringify(result))
+      return result
     })
   }
 

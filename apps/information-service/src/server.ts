@@ -183,7 +183,12 @@ export function createInformationServer(
           )
             return json(response, 500, { error: "internal_error" })
           const status =
-            error instanceof AutomationError && error.code === "revision_conflict"
+            error instanceof AutomationError &&
+            [
+              "revision_conflict",
+              "legacy_scope_migration_required",
+              "legacy_scope_upgrade_blocked",
+            ].includes(error.code)
               ? 409
               : error instanceof AutomationError && error.code === "invalid_target"
                 ? 404

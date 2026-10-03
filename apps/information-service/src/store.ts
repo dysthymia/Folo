@@ -11,6 +11,7 @@ import type { Source, SourceEntry } from "./folo"
 import { ProcessingDedupeStore } from "./processing-dedupe"
 import { ProcessingFeedbackStore } from "./processing-feedback"
 import { ProcessingReadingStore } from "./processing-reading-store"
+import { resolveAIRuleSourceKeys } from "./processing-rule-scope"
 import { ProcessingScheduleStore } from "./processing-schedule"
 import { SourceSyncStore } from "./processing-source-sync"
 import { ProcessingStateStore } from "./processing-state"
@@ -110,7 +111,11 @@ export class Store {
     this.feedback = new ProcessingFeedbackStore(this.db, () => this.ownerId)
     this.exports = new ExportStore(this.db, () => this.ownerId)
     this.research = new ResearchStore(this.db, () => this.ownerId)
-    this.schedule = new ProcessingScheduleStore(this.db, () => this.ownerId)
+    this.schedule = new ProcessingScheduleStore(
+      this.db,
+      () => this.ownerId,
+      () => resolveAIRuleSourceKeys(this),
+    )
     this.sourceSync = new SourceSyncStore(this.db, () =>
       this.ownerId ? this.xQueries.sources() : [],
     )

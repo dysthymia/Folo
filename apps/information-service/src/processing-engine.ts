@@ -30,6 +30,7 @@ import {
   entryDisplayRequirements,
   SOURCE_FIDELITY_REQUIREMENTS,
 } from "./processing-prompt"
+import { matchesAIRule, runnableReleasedConfig } from "./processing-rule-scope"
 import type { TargetSnapshot } from "./processing-state"
 import { sourceText } from "./service"
 import type { Store } from "./store"
@@ -134,7 +135,6 @@ export async function runEntryProcessing(
     let target: { input: typeof candidate; snapshot: TargetSnapshot } | null = null
     let started = false
     try {
-      const config = await options.aiConfig.read()
       const context = processingRuleInput(
         options.store,
         candidate.sourceKey,
@@ -142,6 +142,19 @@ export async function runEntryProcessing(
         text,
         true,
       )
+      // 在读取密钥或领取目标前判定资格，普通规则及未命中的文章不依赖 AI 配置。
+      const activeConfig = options.store.automation.effective?.().config
+      const candidateConfig =
+        candidate.releaseVersion === null
+          ? activeConfig
+          : options.store.automation.release(candidate.releaseVersion)
+      if (
+        !candidateConfig ||
+        !matchesAIRule(runnableReleasedConfig(candidateConfig, activeConfig, context), context) ||
+        (activeConfig && !matchesAIRule(activeConfig, context))
+      )
+        continue
+      const config = await options.aiConfig.read()
       const snapshot: TargetSnapshot = {
         context,
         provider: config.provider,
@@ -160,7 +173,11 @@ export async function runEntryProcessing(
       }
       const release = options.store.automation.release(target.input.releaseVersion)
       if (!release) throw new Error("missing_release")
-      const instructions = compileInstructions(release, target.snapshot.context)
+      if (!matchesAIRule(release, target.snapshot.context)) continue
+      const instructions = compileInstructions(
+        runnableReleasedConfig(release, activeConfig, target.snapshot.context),
+        target.snapshot.context,
+      )
       const fingerprint = entryFingerprint({
         input: target.input,
         text,
@@ -365,7 +382,6 @@ async function prepareNormalEntryBatches(
     const text = sourceText(candidate.body.content ?? "")
     if (!text || text.length > MAX_ENTRY_CHARS) continue
     try {
-      const config = await options.aiConfig.read()
       const context = processingRuleInput(
         options.store,
         candidate.sourceKey,
@@ -373,6 +389,19 @@ async function prepareNormalEntryBatches(
         text,
         true,
       )
+      // 在读取密钥或领取目标前判定资格，普通规则及未命中的文章不依赖 AI 配置。
+      const activeConfig = options.store.automation.effective?.().config
+      const candidateConfig =
+        candidate.releaseVersion === null
+          ? activeConfig
+          : options.store.automation.release(candidate.releaseVersion)
+      if (
+        !candidateConfig ||
+        !matchesAIRule(runnableReleasedConfig(candidateConfig, activeConfig, context), context) ||
+        (activeConfig && !matchesAIRule(activeConfig, context))
+      )
+        continue
+      const config = await options.aiConfig.read()
       const target = options.store.processingState.prepare(candidate.seq, {
         context,
         provider: config.provider,
@@ -388,7 +417,11 @@ async function prepareNormalEntryBatches(
         continue
       const release = options.store.automation.release(target.input.releaseVersion)
       if (!release) continue
-      const instructions = compileInstructions(release, target.snapshot.context)
+      if (!matchesAIRule(release, target.snapshot.context)) continue
+      const instructions = compileInstructions(
+        runnableReleasedConfig(release, activeConfig, target.snapshot.context),
+        target.snapshot.context,
+      )
       const fingerprint = entryFingerprint({
         input: target.input,
         text,

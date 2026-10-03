@@ -1,4 +1,4 @@
-import { compileInstructions } from "@follow/information-core"
+import { compileInstructions, scheduleScopeSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
@@ -14,6 +14,7 @@ import type {
   ResearchPack,
   StoryDigest,
 } from "./processing-reading-store"
+import { legacyRuleUpgradePreview } from "./processing-rule-upgrade"
 import type {
   ProcessingScheduleInput,
   ProcessingScheduleReadingStatus,
@@ -29,25 +30,8 @@ const revision = z.number().int().nonnegative()
 const positiveInteger = z.number().int().positive()
 const scheduleConfig = z
   .object({
-    scope: z
-      .union([
-        z.object({ mode: z.literal("all") }).strict(),
-        z
-          .object({
-            mode: z.literal("category"),
-            view: z.number().int().min(0).max(5),
-            category: z.string().trim().min(1).max(200),
-          })
-          .strict(),
-        z
-          .object({
-            mode: z.literal("fixed"),
-            sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10000),
-          })
-          .strict(),
-      ])
-      .optional(),
-    sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10000),
+    scope: scheduleScopeSchema.optional(),
+    sourceKeys: z.array(z.string().min(1).max(300)).max(10000),
     historySince: z.iso.datetime({ offset: true }),
     timeZone: z.string().min(1).max(100),
     enabled: z.boolean(),
@@ -95,10 +79,23 @@ export type ProcessingEntryListItem = {
 }
 export type ProcessingEntryListResponse = { entries: ProcessingEntryListItem[] }
 export type ProcessingEntryRolesResponse = { roles: ProcessingEntryRole[] }
+export type ProcessingEntryResultsResponse = {
+  results: Array<{
+    itemId: string
+    sourceKey: string
+    sourceId: string | null
+    inputSeq: number
+    decisionId: string
+    contentVersion: string
+    releaseVersion: number
+  }>
+}
 export type ProcessingEntryDetailResponse = {
   // 详情页可读取原文和完整决策，供证据追溯；列表只能读取摘要级决策字段。
   entry: Omit<ProcessingEntryListItem, "decision"> & {
     input: SourceEntry
+    contentVersion: string
+    decisionId: string | null
     decision: ProcessingDecision | null
   }
 }
@@ -260,6 +257,8 @@ export function processingApi(
         .object({ expectedRevision: revision, config: scheduleConfig })
         .strict()
         .parse(body)
+      if (input.config.scope?.mode === "rules" && legacyRuleUpgradePreview(store).required)
+        throw new AutomationError("legacy_scope_migration_required")
       const knownSources = new Set(store.sources().map((source) => source.key))
       if (input.config.sourceKeys.some((sourceKey) => !knownSources.has(sourceKey)))
         throw new AutomationError("invalid_target")
@@ -315,6 +314,45 @@ export function processingApi(
   if (path === "/processing/roles" && method === "GET")
     // 时间线角色投影不受计划范围限制：时间线覆盖全部订阅，只取当前 input。
     return { roles: store.reading.roles() } satisfies ProcessingEntryRolesResponse
+  if (path === "/processing/entry-results" && method === "GET") {
+    owner(store)
+    const availableSources = new Set(store.sources().map((source) => source.key))
+    const releases = new Map<number, ReturnType<typeof store.automation.release>>()
+    // 时间线只轮询身份索引，正文与完整结果在用户点击后才读取。
+    const results = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
+      if (
+        input.releaseVersion === null ||
+        !availableSources.has(input.sourceKey) ||
+        store.stories.isMaterialWithdrawn(input.seq) ||
+        !decision.summary.trim()
+      )
+        return []
+      if (!releases.has(input.releaseVersion))
+        releases.set(input.releaseVersion, store.automation.release(input.releaseVersion))
+      const config = releases.get(input.releaseVersion)
+      // 仅标记执行当时真正命中 AI 变换的输出，普通动作与后来改动的草稿不会制造假结果。
+      if (!config || !compileInstructions(config, decision.context).transformations.length)
+        return []
+      return [
+        {
+          itemId: input.itemId,
+          sourceKey: input.sourceKey,
+          sourceId: input.body.feedId
+            ? `${input.body.feedKind ?? "feed"}/${input.body.feedId}`
+            : /^(?:feed|inbox)\//u.test(decision.context.source_id ?? "")
+              ? decision.context.source_id
+              : /^(?:feed|inbox)\//u.test(input.sourceKey)
+                ? input.sourceKey
+                : null,
+          inputSeq: input.seq,
+          decisionId,
+          contentVersion: input.contentVersion,
+          releaseVersion: input.releaseVersion,
+        },
+      ]
+    })
+    return { results } satisfies ProcessingEntryResultsResponse
+  }
   if (path === "/processing/entries" && method === "GET")
     return { entries: entryView(store) } satisfies ProcessingEntryListResponse
 
@@ -326,9 +364,23 @@ export function processingApi(
     const published = store.processingState
       .published()
       .find((candidate) => candidate.input.seq === seq)
-    if (!item || !input) throw new AutomationError("invalid_target")
+    owner(store)
+    if (
+      !item ||
+      !input ||
+      !store.sources().some((source) => source.key === input.sourceKey) ||
+      store.stories.isMaterialWithdrawn(input.seq)
+    )
+      throw new AutomationError("invalid_target")
     return {
-      entry: { ...item, input: input.body, decision: published?.decision ?? null },
+      // 版本标识供时间线校验索引与懒加载间的正文更新，避免打开另一代结果。
+      entry: {
+        ...item,
+        input: input.body,
+        contentVersion: input.contentVersion,
+        decisionId: published?.decisionId ?? null,
+        decision: published?.decision ?? null,
+      },
     } satisfies ProcessingEntryDetailResponse
   }
 

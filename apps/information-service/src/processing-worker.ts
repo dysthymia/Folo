@@ -5,6 +5,7 @@ import { expandXContexts } from "./content-identity"
 import type { FoloReader } from "./folo"
 import { runSemanticDedupe } from "./processing-dedupe"
 import { runEntryProcessing, settleReadStates } from "./processing-engine"
+import { resolveAIRuleSourceKeys, runnableReleasedConfig } from "./processing-rule-scope"
 import type { ProcessingTriggerStatus } from "./processing-schedule"
 import { acquireSources } from "./processing-source-sync"
 import { errorCode, sourceText } from "./service"
@@ -28,10 +29,16 @@ export type ProcessingWorkerOptions = {
 export async function runProcessingWorker(options: ProcessingWorkerOptions, signal: AbortSignal) {
   const { store } = options
   if (!store.ownerId || signal.aborted) return null
+  const ruleSources =
+    store.schedule.snapshot().config?.scope.mode === "rules" ? resolveAIRuleSourceKeys(store) : null
+  // 规则停用或暂时没有匹配来源时，旧队列也不能重新触发模型。
+  if (ruleSources?.length === 0) return null
   store.schedule.tick(new Date())
   if (!store.automation.releases().length) return null
   const trigger = store.schedule.claim(new Date(), 30 * 60_000)
   if (!trigger?.leaseToken) return null
+  if (ruleSources)
+    trigger.sourceKeys = trigger.sourceKeys.filter((key) => ruleSources.includes(key))
   const lease = trigger.leaseToken
   let status: Exclude<ProcessingTriggerStatus, "pending" | "running"> = "succeeded"
   try {
@@ -103,7 +110,10 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     const decisions = store.processingState.published()
     const releasedRuleSets = store.automation.releases().map((release) => ({
       version: release.version,
-      config: store.automation.release(release.version)!,
+      config: runnableReleasedConfig(
+        store.automation.release(release.version)!,
+        store.automation.effective().config,
+      ),
     }))
     // 先修复既有 Story，保留原身份，再允许新增事件聚合，避免修复对象被复制成新 Story。
     const repair = await (options.repair ?? runStoryRepair)({
@@ -126,8 +136,9 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     )
     for (const version of versions) {
       if (signal.aborted) break
-      const ruleSet = version === null ? null : store.automation.release(version)
-      if (!ruleSet) continue
+      const publishedRuleSet = version === null ? null : store.automation.release(version)
+      if (!publishedRuleSet) continue
+      const ruleSet = runnableReleasedConfig(publishedRuleSet, store.automation.effective().config)
       stories.push(
         await (options.aggregate ?? runStoryAggregation)({
           decisions: decisions.filter(

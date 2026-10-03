@@ -51,6 +51,18 @@ const release: RuleSet = {
       version: 1,
       executionLocation: "processing_service",
     },
+    // 引擎测试显式配置通用 AI 动作，标签规则只验证策略覆盖。
+    {
+      id: "ai-base",
+      ownerId: "owner",
+      name: "AI处理",
+      enabled: true,
+      order: 1,
+      when: { all: true },
+      actions: [{ type: "ai_transform", prompt: "提取事实" }],
+      version: 1,
+      executionLocation: "processing_service",
+    },
   ],
 }
 
@@ -395,6 +407,7 @@ describe("单篇处理 engine", () => {
             when: { all: true },
             actions: [
               { type: "presentation", policy: { standalone, aggregation, rewrite: "deny" } },
+              { type: "ai_transform", prompt: "提取事实" },
             ],
           },
         ],
@@ -424,6 +437,58 @@ describe("单篇处理 engine", () => {
       })
     },
   )
+  it.each(["disabled", "unmatched", "local"] as const)(
+    "%s 规则不调用单篇或批量模型",
+    async (mode) => {
+      const fixture = storeFixture()
+      fixture.setMaterial("complete")
+      fixture.store.automation.release = () => ({
+        ...release,
+        rules: [
+          {
+            ...release.rules[0]!,
+            enabled: mode !== "disabled",
+            when:
+              mode === "unmatched"
+                ? {
+                    anyOf: [
+                      {
+                        allOf: [{ field: "entry_title", operator: "contains", value: "不会匹配" }],
+                      },
+                    ],
+                  }
+                : { all: true },
+            actions:
+              mode === "local"
+                ? [{ type: "local_filter", mode: "block" }]
+                : [{ type: "ai_transform", prompt: "测试" }],
+          },
+        ],
+      })
+      let called = false
+      const result = await runEntryProcessing({
+        store: fixture.store,
+        aiConfig: {
+          ...aiConfig,
+          read: async () => {
+            throw new Error("should_not_read_ai_credentials")
+          },
+        } as never,
+        runtimeDir: "/tmp",
+        sourceKeys: ["feed/1"],
+        historySince: "2026-09-01T00:00:00.000Z",
+        signal: new AbortController().signal,
+        execute: async () => {
+          called = true
+          throw new Error("unexpected_model")
+        },
+      })
+      expect(called).toBe(false)
+      expect(result.completed).toBe(0)
+      expect(result.failures).toEqual([])
+    },
+  )
+
   it("正文材料尚未确认完整时保持 pending，且不调用模型", async () => {
     const fixture = storeFixture()
     const prompts: string[] = []

@@ -25,7 +25,27 @@ it("同一原帖保留两个查询上下文，等效指令只调用一次模型�
         enabled: true,
       }),
     )
-    store.automation.publish(0, { mode: "future" }, randomUUID())
+    // 身份复用测试显式启用 AI；空规则集现在不会隐式消费模型额度。
+    store.automation.saveDraft(
+      {
+        ...store.automation.draft().config,
+        rules: [
+          {
+            id: "summary",
+            ownerId: "owner",
+            name: "摘要",
+            enabled: true,
+            order: 0,
+            version: 1,
+            executionLocation: "processing_service",
+            when: { all: true },
+            actions: [{ type: "ai_transform", prompt: "提取原文事实并生成摘要" }],
+          },
+        ],
+      },
+      0,
+    )
+    store.automation.publish(1, { mode: "future" }, randomUUID())
     store.saveEntry({
       id: "original",
       sourceKey: "feed/f1",

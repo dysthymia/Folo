@@ -126,12 +126,12 @@ function parseTime(value: unknown): { value: string; minute: number } {
   return { value, minute: hour * 60 + minute }
 }
 
-function sourceKeys(value: unknown): string[] {
+function sourceKeys(value: unknown, allowEmpty = false): string[] {
   if (!Array.isArray(value) || value.some((key) => typeof key !== "string"))
     throw new ProcessingScheduleError("invalid_source_keys")
   const keys = unique(value)
   if (
-    !keys.length ||
+    (!allowEmpty && !keys.length) ||
     keys.some(
       (key) =>
         !/^(?:(?:feed|list|inbox)\/[^/\s]+|x\/search\/[^/\s]+)$/u.test(key) || key.length > 300,
@@ -186,6 +186,8 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
           })()
   // 运行范围三态（§2 D4）：新格式显式带 mode 描述符；旧记录只有扁平 sourceKeys，等价 fixed。
   const parsedScope = isRecord(input.scope) ? scheduleScopeSchema.safeParse(input.scope) : null
+  if (input.scope !== undefined && !parsedScope?.success)
+    throw new ProcessingScheduleError("invalid_schedule")
   let scope: ScheduleScope
   let resolvedKeys: string[]
   if (parsedScope?.success) {
@@ -196,7 +198,7 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
       scope = { mode: "fixed", sourceKeys: resolvedKeys }
     } else {
       // all / category 的已解析名单由 client 落库；服务端只校验 + 排序，不做独立分类解析。
-      resolvedKeys = sourceKeys(input.sourceKeys)
+      resolvedKeys = sourceKeys(input.sourceKeys, scope.mode === "rules")
     }
   } else if (Array.isArray(input.sourceKeys)) {
     resolvedKeys = sourceKeys(input.sourceKeys)
@@ -305,6 +307,7 @@ export class ProcessingScheduleStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly owner: () => string | null,
+    private readonly resolveRuleSources?: () => string[],
   ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS processing_schedule (
@@ -354,7 +357,11 @@ export class ProcessingScheduleStore {
       .get()
     if (!row) return { revision: 0, config: null }
     if (String(row.owner_id) !== ownerId) throw new ProcessingScheduleError("owner_mismatch")
-    return { revision: Number(row.revision), config: normalizeConfig(JSON.parse(String(row.body))) }
+    const config = normalizeConfig(JSON.parse(String(row.body)))
+    // 每次读取按当前规则与订阅解析，让后来新增的匹配来源自动进入下一轮。
+    if (config.scope.mode === "rules" && this.resolveRuleSources)
+      config.sourceKeys = this.resolveRuleSources()
+    return { revision: Number(row.revision), config }
   }
 
   readingStatus(now: Date | string = new Date()): ProcessingScheduleReadingStatus {
@@ -436,7 +443,7 @@ export class ProcessingScheduleStore {
     const cutoffAt = instant(now)
     return this.transaction(() => {
       const snapshot = this.snapshot()
-      if (!snapshot.config?.enabled) return []
+      if (!snapshot.config?.enabled || !snapshot.config.sourceKeys.length) return []
       const config = snapshot.config
       const state = this.db
         .prepare("SELECT last_tick_at,last_poll_at FROM processing_schedule_state WHERE id=1")
@@ -501,7 +508,8 @@ export class ProcessingScheduleStore {
     const cutoffAt = instant(now)
     return this.transaction(() => {
       const snapshot = this.snapshot()
-      if (!snapshot.config) throw new ProcessingScheduleError("invalid_schedule")
+      if (!snapshot.config || !snapshot.config.sourceKeys.length)
+        throw new ProcessingScheduleError("invalid_schedule")
       return this.createTrigger({
         kind: "manual",
         dedupeKey,

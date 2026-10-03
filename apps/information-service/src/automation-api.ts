@@ -11,6 +11,8 @@ import { z } from "zod"
 import { AutomationError } from "./automation-store"
 import { processingApi } from "./processing-api"
 import { processingRuleInput } from "./processing-engine"
+import { activateRuleSchedule } from "./processing-rule-scope"
+import { legacyRuleUpgradePreview, prepareLegacyRuleUpgrade } from "./processing-rule-upgrade"
 import { sourceText } from "./service"
 import type { Store } from "./store"
 
@@ -24,6 +26,72 @@ export function automationApi(store: Store, method: string, path: string, body: 
   const draft = repository.draft()
   const save = (config: typeof draft.config, expectedRevision: number) =>
     repository.saveDraft(config, expectedRevision)
+  if (path === "/configuration/effective" && method === "GET") {
+    // 浏览器普通动作镜像只读取已发布配置，草稿不会在刷新后提前生效。
+    return {
+      revision: draft.revision,
+      ...repository.effective(),
+      sources: store.sources(),
+      sourceInventoryKnown: store.sourceInventoryKnown(),
+      subscriptionTags: store.subscriptionTags.snapshot(),
+      sourceTags: store.subscriptionTags.sourceTagBindings().bindings,
+      listMemberships: store.sourceSync.listMemberships(),
+    }
+  }
+  if (path === "/rules/upgrade-preview" && method === "GET") return legacyRuleUpgradePreview(store)
+  if (path === "/rules/upgrade" && method === "POST") {
+    const input = z
+      .object({
+        expectedRevision: revision,
+        expectedScheduleRevision: revision,
+        requestId: z.uuid(),
+      })
+      .strict()
+      .parse(body)
+    const result = repository.upgradeRules(
+      input.expectedRevision,
+      input.expectedScheduleRevision,
+      input.requestId,
+      () => prepareLegacyRuleUpgrade(store, input.expectedScheduleRevision),
+      () => {
+        activateRuleSchedule(store)
+      },
+    )
+    return { ...result, schedule: store.schedule.snapshot() }
+  }
+  const activationId = /^\/rules\/([^/]+)\/activate$/.exec(path)?.[1]
+  if (activationId && (method === "PUT" || method === "DELETE")) {
+    // 先显式继承旧范围，避免保存任意新规则时把旧 ALL 规则静默扩大到全部订阅。
+    if (legacyRuleUpgradePreview(store).required)
+      throw new AutomationError("legacy_scope_migration_required")
+    const input = (
+      method === "PUT"
+        ? z.object({ expectedRevision: revision, requestId: z.uuid(), rule: ruleSchema }).strict()
+        : z.object({ expectedRevision: revision, requestId: z.uuid() }).strict()
+    ).parse(body)
+    const result = repository.activateRule(
+      activationId,
+      "rule" in input ? ruleSchema.parse(input.rule) : null,
+      input.expectedRevision,
+      input.requestId,
+      () => {
+        activateRuleSchedule(store)
+      },
+    )
+    return { ...result, schedule: store.schedule.snapshot() }
+  }
+  if (path === "/global-instructions/activate" && method === "PUT") {
+    const input = z
+      .object({ expectedRevision: revision, markdown: z.string().max(60000), requestId: z.uuid() })
+      .strict()
+      .parse(body)
+    const result = repository.activateGlobal(
+      input.markdown,
+      input.expectedRevision,
+      input.requestId,
+    )
+    return { ...result, schedule: store.schedule.snapshot() }
+  }
   if (path === "/configuration") {
     if (method === "GET")
       return {

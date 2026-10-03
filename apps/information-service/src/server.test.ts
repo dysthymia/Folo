@@ -258,6 +258,65 @@ describe("information HTTP server", () => {
     })
   }
 
+  it("旧范围升级前保存规则返回409，授权升级后原子进入规则范围", async () => {
+    const initial = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...initial.config,
+        rules: [
+          {
+            id: "legacy",
+            ownerId: "test-owner",
+            name: "旧规则",
+            enabled: true,
+            order: 0,
+            version: 1,
+            executionLocation: "processing_service",
+            when: { all: true },
+            actions: [{ type: "ai_transform", prompt: "摘要" }],
+          },
+        ],
+      },
+      0,
+    )
+    store.automation.publish(1, { mode: "future" }, "11111111-1111-4111-8111-111111111111")
+    store.schedule.save(
+      {
+        sourceKeys: ["feed/1"],
+        historySince: "2026-09-01T00:00:00.000Z",
+        enabled: false,
+        timeZone: "Asia/Shanghai",
+      },
+      0,
+    )
+    const denied = await request("/information/v1/rules/legacy/activate", {
+      method: "PUT",
+      headers: signedHeaders,
+      body: {},
+    })
+    expect(denied.status).toBe(409)
+    expect(JSON.parse(denied.body)).toEqual({ error: "legacy_scope_migration_required" })
+    const preview = await request("/information/v1/rules/upgrade-preview", {
+      headers: signedHeaders,
+    })
+    expect(preview.status).toBe(200)
+    expect(JSON.parse(preview.body)).toMatchObject({ required: true, supported: true })
+    const upgraded = await request("/information/v1/rules/upgrade", {
+      method: "POST",
+      headers: signedHeaders,
+      body: {
+        expectedRevision: 1,
+        expectedScheduleRevision: 1,
+        requestId: "22222222-2222-4222-8222-222222222222",
+      },
+    })
+    expect(upgraded.status).toBe(200)
+    expect(JSON.parse(upgraded.body)).toMatchObject({
+      revision: 2,
+      schedule: { config: { scope: { mode: "rules" }, enabled: false } },
+    })
+  })
+
   // 每次快照必须有同源请求与主站新凭据，旧本地会话不能独立授权。
   const signedHeaders = {
     Host: "local.folo.is",
