@@ -13,7 +13,9 @@ import { useTranslation } from "react-i18next"
 
 import { RelativeTime } from "~/components/ui/datetime"
 import { useModalStack } from "~/components/ui/modal/stacked/hooks"
+import { useProcessingEntryResult } from "~/modules/information/processing-entry-result-client"
 import { ProcessingEntryExplanation } from "~/modules/information/ProcessingEntryExplanation"
+import { ProcessingEntryResultPanel } from "~/modules/information/ProcessingEntryResultPanel"
 import { smartReadingPath } from "~/modules/information/reading-mode-link"
 import { StoryDigestPanel } from "~/modules/information/StoryDigestPanel"
 
@@ -55,6 +57,7 @@ export const MergedEntriesBadge = ({
   const { t } = useTranslation("app")
   const dialog = useModalStack()
   const role = useEntryProcessingRole(entryId)
+  const processingResult = useProcessingEntryResult(entryId)
   const mergedEntries = useEntryProcessingRoleRelatedEntries(entryId)
   const { setMode, busy, failed } = useProcessingEntryOverride()
   const isStory = role?.kind === "story" && Boolean(role.storyId)
@@ -72,7 +75,38 @@ export const MergedEntriesBadge = ({
     })
   }
 
-  if (!isStory && !isHidden && !isRestored && mergedEntries.length === 0) return null
+  const openResult = () => {
+    if (!processingResult) return
+    dialog.present({
+      title: t("processing.result.view"),
+      content: () => (
+        <ProcessingEntryResultPanel
+          inputSeq={processingResult.inputSeq}
+          decisionId={processingResult.decisionId}
+          sourceKey={processingResult.sourceKey}
+          itemId={processingResult.itemId}
+          contentVersion={processingResult.contentVersion}
+        />
+      ),
+      clickOutsideToDismiss: true,
+      modalClassName: "max-w-2xl",
+    })
+  }
+
+  if (!isStory && !isHidden && !isRestored && mergedEntries.length === 0)
+    return processingResult ? (
+      <button
+        type="button"
+        className={chipClass(cn("cursor-button", className))}
+        onClick={(event) => {
+          preventEntryNavigation(event)
+          openResult()
+        }}
+        onPointerDown={preventEntryNavigation}
+      >
+        {t("processing.result.view")}
+      </button>
+    ) : null
 
   if (isHidden || isRestored) {
     return (
@@ -103,6 +137,11 @@ export const MergedEntriesBadge = ({
                 : (role?.reason ?? t("processing.badge.hidden_hint"))}
             </p>
             {inputSeq !== undefined && <ProcessingEntryExplanation inputSeq={inputSeq} />}
+            {processingResult && (
+              <button type="button" className={processingButtonClass} onClick={openResult}>
+                {t("processing.result.view")}
+              </button>
+            )}
             {inputSeq !== undefined && (
               <button
                 type="button"
@@ -185,6 +224,11 @@ export const MergedEntriesBadge = ({
               </a>
             </div>
           </div>
+        )}
+        {!isStory && processingResult && (
+          <button className="px-2 text-xs text-accent underline" onClick={openResult} type="button">
+            {t("processing.result.view")}
+          </button>
         )}
         <div className="max-h-72 overflow-y-auto">
           {mergedEntries.map((entry) => {
