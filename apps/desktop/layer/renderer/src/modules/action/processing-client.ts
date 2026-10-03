@@ -1,4 +1,4 @@
-import type { RuleSet } from "@follow/information-core"
+import type { AutomationRule, RuleSet } from "@follow/information-core"
 import {
   conditionSchema,
   conditionSetSchema,
@@ -304,7 +304,8 @@ export type ProcessingTrialResult = z.infer<typeof processingTrialSchema>
 const scheduleConfigSchema = z
   .object({
     scope: scheduleScopeSchema,
-    sourceKeys: z.array(z.string().min(1).max(300)).min(1).max(10_000),
+    // 规则自动选源允许暂时零匹配；不能因此伪造一个来源或扩大为全部订阅。
+    sourceKeys: z.array(z.string().min(1).max(300)).max(10_000),
     historySince: isoDateTime,
     timeZone: z.string().min(1).max(100),
     enabled: z.boolean(),
@@ -325,6 +326,42 @@ const scheduleSchema = z
     config: scheduleConfigSchema.nullable(),
   })
   .strict()
+
+export const effectiveProcessingSchema = processingEditorSchema
+  .pick({
+    revision: true,
+    sources: true,
+    sourceInventoryKnown: true,
+    subscriptionTags: true,
+    sourceTags: true,
+    listMemberships: true,
+  })
+  .extend({ config: ruleSetSchema.nullable(), releaseVersion: positiveIntegerSchema.nullable() })
+  .strict()
+
+// 单条保存由服务端原子发布，响应中的草稿与实际生效配置分别保留。
+const ruleActivationSchema = processingDraftSchema
+  .extend({
+    effectiveConfig: ruleSetSchema,
+    release: processingReleaseWireSchema,
+    schedule: scheduleSchema,
+  })
+  .strict()
+export type EffectiveProcessing = z.infer<typeof effectiveProcessingSchema>
+export type RuleActivation = z.infer<typeof ruleActivationSchema>
+
+const ruleUpgradeSchema = z
+  .object({
+    required: z.boolean(),
+    expectedRevision: revisionSchema,
+    expectedScheduleRevision: revisionSchema,
+    affectedRules: z.array(z.object({ id: identifierSchema, name: z.string() }).strict()),
+    sourceCount: revisionSchema,
+    supported: z.boolean(),
+    reason: z.string().optional(),
+  })
+  .strict()
+export type RuleUpgrade = z.infer<typeof ruleUpgradeSchema>
 
 export const processingRunSchema = z
   .object({
@@ -456,6 +493,54 @@ export function createProcessingClient(
     return parsed.data
   }
   return {
+    previewUpgrade: (signal: AbortSignal) =>
+      request("rules/upgrade-preview", "GET", ruleUpgradeSchema, signal),
+    upgradeRules: (
+      expectedRevision: number,
+      expectedScheduleRevision: number,
+      requestId: string,
+      signal: AbortSignal,
+    ) =>
+      request("rules/upgrade", "POST", ruleActivationSchema, signal, {
+        expectedRevision,
+        expectedScheduleRevision,
+        requestId,
+      }),
+    loadEffective: (signal: AbortSignal) =>
+      request("configuration/effective", "GET", effectiveProcessingSchema, signal),
+    activateRule: (
+      rule: AutomationRule,
+      expectedRevision: number,
+      requestId: string,
+      signal: AbortSignal,
+    ) =>
+      request(
+        `rules/${encodeURIComponent(rule.id)}/activate`,
+        "PUT",
+        ruleActivationSchema,
+        signal,
+        {
+          rule: ruleSchema.parse(rule),
+          expectedRevision,
+          requestId,
+        },
+      ),
+    deleteRule: (id: string, expectedRevision: number, requestId: string, signal: AbortSignal) =>
+      request(`rules/${encodeURIComponent(id)}/activate`, "DELETE", ruleActivationSchema, signal, {
+        expectedRevision,
+        requestId,
+      }),
+    activateGlobal: (
+      markdown: string,
+      expectedRevision: number,
+      requestId: string,
+      signal: AbortSignal,
+    ) =>
+      request("global-instructions/activate", "PUT", ruleActivationSchema, signal, {
+        markdown,
+        expectedRevision,
+        requestId,
+      }),
     createTag: (name: string, expectedRevision: number, signal: AbortSignal) =>
       request("subscription-tags", "POST", tagSnapshotSchema, signal, { name, expectedRevision }),
     renameTag: (id: string, name: string, expectedRevision: number, signal: AbortSignal) =>

@@ -50,6 +50,7 @@ import {
 
 import { isLocalFoloHost } from "../ai-chat/local-provider"
 import { useSetSubViewRightView } from "../app-layout/subview/hooks"
+import { LocalAutomationSettings } from "./local-automation-settings"
 import { ProcessingServiceDetail } from "./processing-service-detail"
 import { useProcessingServiceRules } from "./use-processing-service-rules"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
@@ -101,7 +102,20 @@ const parseRowId = (id: string): { scope: UnifiedRuleScope; key: string } | null
   return { scope: id.slice(0, separator) as UnifiedRuleScope, key: id.slice(separator + 1) }
 }
 
+// 本地部署只有一个增强规则入口；官方规则及不兼容旧条件保留明确的兼容入口。
 export const ActionSetting = () => {
+  const params = new URLSearchParams(window.location.search)
+  return isLocalFoloHost() &&
+    params.get("scope") !== "cloud" &&
+    !params.has("legacy") &&
+    !params.has("advanced") ? (
+    <LocalAutomationSettings />
+  ) : (
+    <LegacyActionSetting />
+  )
+}
+
+const LegacyActionSetting = () => {
   const { t: tSettings } = useTranslation("settings")
   const { t: tApp } = useTranslation("app")
   const user = useWhoami()
@@ -117,7 +131,13 @@ export const ActionSetting = () => {
       }),
     [local],
   )
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search)
+    const index = params.get("ruleIndex")
+    return params.get("legacy") === "local" && index !== null && /^\d+$/.test(index)
+      ? `local:${index}`
+      : null
+  })
 
   const cloudRules = useActionRules()
   const localRules = useLocalActionRules()
