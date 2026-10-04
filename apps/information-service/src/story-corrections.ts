@@ -180,8 +180,20 @@ export class StoryCorrectionService {
     groups: number[][]
     independentInputSeqs?: number[]
   }) {
-    const parent = current(this.stories, input.storyId, input.expectedRevision)
     const independentInputSeqs = input.independentInputSeqs ?? []
+    // 全独立拆分只引用冻结成员ID，不能经current校验复活失效正文，也无需创建新Story。
+    if (input.groups.length === 0) {
+      const preview = this.stories.independentSplitPreview(input.storyId)
+      if (preview.expectedRevision !== input.expectedRevision)
+        throw new StoryStoreError("revision_conflict")
+      return this.stories.split({
+        storyId: input.storyId,
+        expectedCurrentRevision: input.expectedRevision,
+        children: [],
+        independentInputSeqs,
+      })
+    }
+    const parent = current(this.stories, input.storyId, input.expectedRevision)
     if (input.groups.length + independentInputSeqs.length < 2) invalidReference()
     const parentMembers = new Set(parent.revision.members.map((member) => member.inputSeq))
     const assigned = new Set<number>()

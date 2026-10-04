@@ -22,6 +22,7 @@ import { ProcessingReadingError } from "./processing-reading-store"
 import { ProcessingScheduleError } from "./processing-schedule"
 import type { ProcessingTrial } from "./processing-trial"
 import { ProcessingTrialError } from "./processing-trial"
+import { ResearchSelectionError } from "./research-selection"
 import { errorCode } from "./service"
 import type { Store } from "./store"
 import { StoryStoreError } from "./story-store"
@@ -56,7 +57,12 @@ export function createInformationServer(
   ai?: { config: AIConfigStore; chat: FoloChat; signal?: AbortSignal; trial?: ProcessingTrial },
   mainWebRoot?: string,
   externalHandlers: Array<{
-    handle(method: string, path: string, body: unknown): Promise<object | undefined>
+    handle(
+      method: string,
+      path: string,
+      body: unknown,
+      signal?: AbortSignal,
+    ): Promise<object | undefined>
   }> = [],
 ) {
   const publicUrl = new URL(publicOrigin)
@@ -139,12 +145,33 @@ export function createInformationServer(
               ai.signal?.removeEventListener("abort", abort)
             }
           }
-          for (const handler of externalHandlers) {
-            const result = await handler.handle(method, path, body)
-            if (result !== undefined) return json(response, 200, result)
+          // 长时间的一次性研究随请求断开或服务退出取消，防止旧账号结果晚发布。
+          const controller = new AbortController()
+          const abort = () => controller.abort()
+          response.once("close", abort)
+          ai?.signal?.addEventListener("abort", abort, { once: true })
+          if (ai?.signal?.aborted) abort()
+          try {
+            for (const handler of externalHandlers) {
+              const result = await handler.handle(method, path, body, controller.signal)
+              if (result !== undefined) return json(response, 200, result)
+            }
+          } finally {
+            response.removeListener("close", abort)
+            ai?.signal?.removeEventListener("abort", abort)
           }
           return json(response, 200, automationApi(store, method, path, body))
         } catch (error) {
+          if (error instanceof ResearchSelectionError)
+            return json(
+              response,
+              ["stale_selection", "owner_changed"].includes(error.code)
+                ? 409
+                : error.code === "invalid_target"
+                  ? 404
+                  : 400,
+              { error: error.code },
+            )
           if (error instanceof ProcessingTrialError)
             return json(
               response,

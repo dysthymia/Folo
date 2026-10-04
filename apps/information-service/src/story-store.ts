@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
+import type { EventIdentity } from "./processing-event"
+import { compatibleEvents, traceableEvent } from "./processing-event"
+
 export type StoryStatus = "active" | "merged" | "split" | "repairing"
 export type StoryFactKind = "fact" | "source_claim" | "inference"
 export type StoryCorrectionKind =
@@ -37,6 +40,8 @@ export type StoryFact = {
   dependsOnFactIds: string[]
 }
 export type StoryRevisionDraft = {
+  // 可选字段兼容旧版本；缺身份的历史Story继续可读，但不能自动续写。
+  eventIdentity?: EventIdentity
   title: string
   body: string
   aggregationRuleId: string
@@ -185,6 +190,12 @@ export class StoryStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY(story_id, reader_id, revision)
       );
+      CREATE TABLE IF NOT EXISTS story_reader_flags (
+        story_id TEXT NOT NULL,
+        reader_id TEXT NOT NULL,
+        collected INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(story_id, reader_id)
+      );
       CREATE TABLE IF NOT EXISTS story_current_member_index (
         input_seq INTEGER NOT NULL,
         story_id TEXT NOT NULL,
@@ -253,7 +264,7 @@ export class StoryStore {
       const current = this.requireRevision(storyId, story.currentRevision)
       const substantiveFingerprint = this.substantiveFingerprint(input)
       const substantiveRevision =
-        substantiveFingerprint === current.substantiveContentFingerprint
+        substantiveFingerprint === this.substantiveFingerprint(current)
           ? current.substantiveRevision
           : story.currentRevision + 1
       const revision = this.toRevision(
@@ -360,7 +371,7 @@ export class StoryStore {
       const current = this.requireRevision(storyId, story.currentRevision)
       const substantiveFingerprint = this.substantiveFingerprint(input)
       const substantiveRevision =
-        substantiveFingerprint === current.substantiveContentFingerprint
+        substantiveFingerprint === this.substantiveFingerprint(current)
           ? current.substantiveRevision
           : story.currentSubstantiveRevision + 1
       const revision = this.toRevision(
@@ -456,6 +467,34 @@ export class StoryStore {
     this.db
       .prepare("INSERT OR IGNORE INTO story_read_receipts VALUES(?,?,?,?)")
       .run(storyId, readerId, targetRevision, new Date().toISOString())
+  }
+
+  // 手动标未读只清理这篇综述的回执，不改变任何成员原文读态。
+  markUnread(storyId: string, readerId: string) {
+    this.requireStory(storyId)
+    if (!readerId.trim()) throw new StoryStoreError("invalid_story")
+    this.db
+      .prepare("DELETE FROM story_read_receipts WHERE story_id=? AND reader_id=?")
+      .run(storyId, readerId)
+  }
+
+  // 收藏按稳定 Story 身份保存，追加版本不会复制或丢失收藏。
+  setCollected(storyId: string, readerId: string, collected: boolean) {
+    this.requireStory(storyId)
+    if (!readerId.trim()) throw new StoryStoreError("invalid_story")
+    this.db
+      .prepare(
+        "INSERT INTO story_reader_flags VALUES(?,?,?) ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=excluded.collected",
+      )
+      .run(storyId, readerId, Number(collected))
+  }
+
+  isCollected(storyId: string, readerId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT collected FROM story_reader_flags WHERE story_id=? AND reader_id=?")
+        .get(storyId, readerId)?.collected,
+    )
   }
 
   readStatus(storyId: string, readerId: string) {
@@ -561,9 +600,42 @@ export class StoryStore {
           "UPDATE stories SET status='merged',merged_into=?,updated_at=? WHERE id=? AND status='active' AND current_revision=?",
         )
         .run(kept.id, revision.createdAt, merged.id, input.expectedMergedRevision)
+      // 合并后旧收藏链接仍可跳转，收藏列表也继承到保留的稳定身份。
+      this.copyCollected(merged.id, kept.id)
       this.clearCurrentMemberIndex(merged.id)
       return { correction, revision }
     })
+  }
+
+  // 拆分预览只返回冻结成员身份，不暴露失效正文、不重新发布决定或恢复旧材料。
+  independentSplitPreview(storyId: string) {
+    const story = this.requireStory(storyId)
+    if (story.status !== "active" && story.status !== "repairing")
+      throw new StoryStoreError("story_not_active")
+    const revision = this.requireRevision(storyId, story.currentRevision)
+    const members = revision.members.map(({ inputSeq }) => {
+      const row = this.db
+        .prepare("SELECT source_key,item_id,body,current FROM processing_inputs WHERE seq=?")
+        .get(inputSeq)
+      if (!row) throw new StoryStoreError("invalid_reference")
+      const body = JSON.parse(String(row.body)) as { title?: unknown; url?: unknown }
+      return {
+        inputSeq,
+        sourceKey: String(row.source_key),
+        itemId: String(row.item_id),
+        title: typeof body.title === "string" ? body.title : String(row.item_id),
+        url: typeof body.url === "string" ? body.url : null,
+        current: Number(row.current) === 1,
+        withdrawn: this.isMaterialWithdrawn(inputSeq),
+      }
+    })
+    return {
+      storyId,
+      status: story.status,
+      expectedRevision: story.currentRevision,
+      inputSeqs: revision.members.map((member) => member.inputSeq),
+      members,
+    }
   }
 
   split(input: {
@@ -573,7 +645,16 @@ export class StoryStore {
     independentInputSeqs?: number[]
   }) {
     return this.transaction(() => {
-      const parent = this.requireCurrent(input.storyId, input.expectedCurrentRevision)
+      let parent: Story
+      if (input.children.length === 0) {
+        // 显式全部独立只移除旧综合覆盖；允许repairing冻结成员，不把失效证据用于子Story。
+        const preview = this.independentSplitPreview(input.storyId)
+        if (preview.expectedRevision !== input.expectedCurrentRevision)
+          throw new StoryStoreError("revision_conflict")
+        parent = this.requireStory(input.storyId)
+      } else {
+        parent = this.requireCurrent(input.storyId, input.expectedCurrentRevision)
+      }
       const independentInputSeqs = uniqueIds(input.independentInputSeqs ?? [])
       // 允许全部成员恢复独立阅读；无需制造至少一个子 Story。
       if (input.children.length + independentInputSeqs.length < 2)
@@ -633,6 +714,7 @@ export class StoryStore {
           )
         this.insertRevision(revision)
         this.replaceCurrentMemberIndex(revision.storyId, revision.members)
+        this.copyCollected(parent.id, revision.storyId)
       }
       // 独立条目也是拆分分区，保存跨分区约束，避免下一轮又被自动拼回。
       const partitions = [...childMemberSets, ...independentInputSeqs.map((inputSeq) => [inputSeq])]
@@ -658,6 +740,25 @@ export class StoryStore {
       this.clearCurrentMemberIndex(parent.id)
       return { correction, childIds, independentInputSeqs }
     })
+  }
+
+  // 只读核验持久化成员的原文身份；旧记录不自动猜测，也不改写历史revision。
+  eventIdentityForMembers(members: StoryMemberReference[]): EventIdentity | null {
+    const events: EventIdentity[] = []
+    for (const member of members) {
+      const row = this.db
+        .prepare(
+          "SELECT decisions.body AS decision, inputs.body AS input FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.seq=decisions.input_seq WHERE decisions.id=? AND inputs.seq=?",
+        )
+        .get(member.decisionId, member.inputSeq)
+      if (!row) return null
+      const decision = JSON.parse(String(row.decision)) as { semantic?: { event?: unknown } }
+      const original = sourceTextFromInputBody(String(row.input))
+      const event = original === null ? null : traceableEvent(decision.semantic?.event, original)
+      if (!event || events.some((previous) => !compatibleEvents(previous, event))) return null
+      events.push(event)
+    }
+    return events[0] ?? null
   }
 
   canAggregate(aggregationRuleId: string, aggregationScopeVersion: string, inputSeqs: number[]) {
@@ -878,6 +979,11 @@ export class StoryStore {
       input.members.length < 2
     )
       throw new StoryStoreError("invalid_story")
+    if (input.eventIdentity) {
+      const verified = this.eventIdentityForMembers(input.members)
+      if (!verified || !compatibleEvents(verified, input.eventIdentity))
+        throw new StoryStoreError("invalid_reference")
+    }
     const memberIds = uniqueIds(input.members.map((member) => member.inputSeq))
     if (
       memberIds.length !== input.members.length ||
@@ -1045,28 +1151,35 @@ export class StoryStore {
     }
   }
 
+  // 仅迁移收藏，阅读回执仍按各个 Story 的实质版本独立计算。
+  private copyCollected(fromStoryId: string, toStoryId: string) {
+    this.db
+      .prepare(
+        `INSERT INTO story_reader_flags(story_id,reader_id,collected)
+      SELECT ?,reader_id,1 FROM story_reader_flags WHERE story_id=? AND collected=1
+      ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=1`,
+      )
+      .run(toStoryId, fromStoryId)
+  }
+
   private substantiveFingerprint(input: StoryRevisionDraft) {
-    // 排版和措辞微调不制造未读；事实、支持片段、成员或规则输入改变才视为实质更新。
-    return fingerprint({
-      title: normalized(input.title),
-      aggregationRuleId: input.aggregationRuleId,
-      aggregationScopeVersion: input.aggregationScopeVersion,
-      appliedRuleSetVersion: input.appliedRuleSetVersion,
-      instructionFingerprint: input.instructionFingerprint,
-      members: [...input.members].sort((left, right) => left.inputSeq - right.inputSeq),
-      sourceSpans: input.sourceSpans
-        .map(({ quote: _quote, ...span }) => span)
-        .sort((left, right) => left.id.localeCompare(right.id)),
-      facts: input.facts
-        .map((fact) => ({
-          ...fact,
-          text: normalized(fact.text),
-          citationIds: [...fact.citationIds].sort(),
-          dependsOnFactIds: [...fact.dependsOnFactIds].sort(),
-        }))
-        .sort((left, right) => left.id.localeCompare(right.id)),
-      citations: [...input.citations].sort((left, right) => left.id.localeCompare(right.id)),
-    })
+    // 实质身份只比较事实及依赖语义；增加转载成员、引用、措辞或规则版本不制造未读。
+    const factById = new Map(input.facts.map((fact) => [fact.id, fact]))
+    const facts = input.facts.map((fact) => ({
+      kind: fact.kind,
+      text: normalized(fact.text),
+      dependencies: fact.dependsOnFactIds
+        .map((id) => {
+          const dependency = factById.get(id)
+          return dependency ? `${dependency.kind}:${normalized(dependency.text)}` : id
+        })
+        .sort(),
+    }))
+    return fingerprint(
+      [...new Map(facts.map((fact) => [JSON.stringify(fact), fact])).values()].sort((left, right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right)),
+      ),
+    )
   }
 
   private insertRevision(revision: StoryRevision) {

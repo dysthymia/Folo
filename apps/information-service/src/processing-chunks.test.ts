@@ -44,6 +44,7 @@ function outputFor(options: CodexJsonOptions<unknown>, chunk: string, index: num
   }
   return {
     entryId: "entry-1",
+    event: null,
     title: "综合标题",
     summary: "综合摘要",
     disposition: "keep",

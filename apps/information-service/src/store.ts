@@ -114,7 +114,18 @@ export class Store {
     this.schedule = new ProcessingScheduleStore(
       this.db,
       () => this.ownerId,
-      () => resolveAIRuleSourceKeys(this),
+      (scope) => {
+        // 动态范围只在创建批次前展开；fixed 仍使用用户明确保存的名单。
+        if (scope.mode === "rules") return resolveAIRuleSourceKeys(this)
+        return this.sources()
+          .filter((source) => source.origin !== "generated" && !source.key.startsWith("generated:"))
+          .filter(
+            (source) =>
+              scope.mode !== "category" ||
+              (source.view === scope.view && source.category === scope.category),
+          )
+          .map((source) => source.key)
+      },
     )
     this.sourceSync = new SourceSyncStore(this.db, () =>
       this.ownerId ? this.xQueries.sources() : [],
@@ -214,6 +225,15 @@ export class Store {
   }
 
   saveEntry(entry: SourceEntry) {
+    // 综述属于派生产物，不能递归 capture 成新的原始材料。
+    const sourceRow = this.db
+      .prepare("SELECT body FROM sources WHERE key=? AND active=1")
+      .get(entry.sourceKey)
+    if (
+      entry.sourceKey.startsWith("generated:") ||
+      (sourceRow && (JSON.parse(String(sourceRow.body)) as Source).origin === "generated")
+    )
+      throw new Error("generated_source_capture_forbidden")
     this.db.exec("SAVEPOINT save_entry")
     try {
       this.db
@@ -236,6 +256,9 @@ export class Store {
         ? {
             ...entry,
             content: entry.content || previous.content,
+            imageCount: missingBody
+              ? previous.imageCount
+              : (entry.imageCount ?? previous.imageCount),
             mediaLength: missingBody
               ? previous.mediaLength
               : (entry.mediaLength ?? previous.mediaLength),

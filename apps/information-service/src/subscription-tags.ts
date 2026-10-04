@@ -140,6 +140,10 @@ export class SubscriptionTagStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY(owner_id, source_key, tag_id)
       );
+      CREATE TABLE IF NOT EXISTS managed_source_tag_bindings (
+        owner_id TEXT NOT NULL, manager TEXT NOT NULL, source_key TEXT NOT NULL, tag_id TEXT NOT NULL,
+        PRIMARY KEY(owner_id, manager, source_key, tag_id)
+      );
       CREATE INDEX IF NOT EXISTS source_tag_bindings_owner_source
         ON source_tag_bindings(owner_id, source_key);
       CREATE INDEX IF NOT EXISTS source_tag_bindings_owner_tag
@@ -291,12 +295,22 @@ export class SubscriptionTagStore {
       if (available.length !== ids.length) throw new SubscriptionTagError("invalid_tag_set")
 
       let changedBindings = 0
+      let changedOwnership = 0
       if (input.operation === "add") {
         const insert = this.db.prepare("INSERT OR IGNORE INTO source_tag_bindings VALUES(?,?,?,?)")
         const now = new Date().toISOString()
         for (const sourceKey of keys)
-          for (const id of ids)
+          for (const id of ids) {
             changedBindings += Number(insert.run(ownerId, sourceKey, id, now).changes)
+            // 手工再次添加受管理标签意味着用户要保留它，后续导入不能删除。
+            changedOwnership += Number(
+              this.db
+                .prepare(
+                  "DELETE FROM managed_source_tag_bindings WHERE owner_id=? AND source_key=? AND tag_id=?",
+                )
+                .run(ownerId, sourceKey, id).changes,
+            )
+          }
       } else {
         const remove = this.db.prepare(
           "DELETE FROM source_tag_bindings WHERE owner_id=? AND source_key=? AND tag_id=?",
@@ -306,9 +320,100 @@ export class SubscriptionTagStore {
             changedBindings += Number(remove.run(ownerId, sourceKey, id).changes)
       }
       return {
-        revision: changedBindings ? this.bumpRevision(revision) : revision,
+        revision: changedBindings || changedOwnership ? this.bumpRevision(revision) : revision,
         changedBindings,
         sourceKeys: keys,
+      }
+    })
+  }
+
+  managedTagNames(manager: string, sourceKey: string): string[] {
+    // 差异预览只显示此管理器拥有的标签，不能把手工标签列成待删除。
+    return this.db
+      .prepare(
+        "SELECT t.name FROM managed_source_tag_bindings b JOIN subscription_tags t ON t.id=b.tag_id AND t.owner_id=b.owner_id WHERE b.owner_id=? AND b.manager=? AND b.source_key=? ORDER BY t.name",
+      )
+      .all(this.ownerId(), manager, sourceKey)
+      .map((row) => String(row.name))
+  }
+
+  // 每个来源只替换此管理器此前写入的标签；历史与手工绑定保持原样。
+  replaceManagedBindings(
+    manager: string,
+    bindings: Array<{ sourceKey: string; names: string[] }>,
+    expectedRevision: number,
+  ) {
+    if (!manager.trim() || manager.length > 200) throw new SubscriptionTagError("invalid_tag")
+    if (new Set(bindings.map((binding) => binding.sourceKey)).size !== bindings.length)
+      throw new SubscriptionTagError("invalid_source_keys")
+    for (const binding of bindings) {
+      sourceKeys([binding.sourceKey])
+      binding.names.forEach(tagName)
+    }
+    return this.transaction(() => {
+      const ownerId = this.ownerId()
+      const revision = this.expectRevision(expectedRevision)
+      const now = new Date().toISOString()
+      let changedBindings = 0
+      let createdTags = 0
+      for (const binding of bindings) {
+        const ids = [...new Set(binding.names.map(tagName))].map((name) => {
+          const existing = this.db
+            .prepare("SELECT id FROM subscription_tags WHERE owner_id=? AND name=?")
+            .get(ownerId, name)
+          if (existing) return String(existing.id)
+          const id = randomUUID()
+          this.db
+            .prepare("INSERT INTO subscription_tags VALUES(?,?,?,?,?)")
+            .run(id, ownerId, name, now, now)
+          createdTags++
+          return id
+        })
+        const previous = this.db
+          .prepare(
+            "SELECT tag_id FROM managed_source_tag_bindings WHERE owner_id=? AND manager=? AND source_key=?",
+          )
+          .all(ownerId, manager, binding.sourceKey)
+        for (const row of previous) {
+          const id = String(row.tag_id)
+          if (ids.includes(id)) continue
+          this.db
+            .prepare(
+              "DELETE FROM managed_source_tag_bindings WHERE owner_id=? AND manager=? AND source_key=? AND tag_id=?",
+            )
+            .run(ownerId, manager, binding.sourceKey, id)
+          // 其他管理器仍持有的标签不能一起删掉。
+          if (
+            !this.db
+              .prepare(
+                "SELECT 1 FROM managed_source_tag_bindings WHERE owner_id=? AND source_key=? AND tag_id=?",
+              )
+              .get(ownerId, binding.sourceKey, id)
+          )
+            changedBindings += Number(
+              this.db
+                .prepare(
+                  "DELETE FROM source_tag_bindings WHERE owner_id=? AND source_key=? AND tag_id=?",
+                )
+                .run(ownerId, binding.sourceKey, id).changes,
+            )
+        }
+        for (const id of ids) {
+          const result = this.db
+            .prepare("INSERT OR IGNORE INTO source_tag_bindings VALUES(?,?,?,?)")
+            .run(ownerId, binding.sourceKey, id, now)
+          changedBindings += Number(result.changes)
+          // 已存在的非受管理标签属于手工数据，不夺取它的所有权。
+          if (result.changes || previous.some((row) => row.tag_id === id))
+            this.db
+              .prepare("INSERT OR IGNORE INTO managed_source_tag_bindings VALUES(?,?,?,?)")
+              .run(ownerId, manager, binding.sourceKey, id)
+        }
+      }
+      return {
+        revision: changedBindings || createdTags ? this.bumpRevision(revision) : revision,
+        changedBindings,
+        createdTags,
       }
     })
   }

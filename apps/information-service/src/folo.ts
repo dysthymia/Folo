@@ -2,6 +2,10 @@ import type { EntryListRequest } from "@follow-app/client-sdk"
 import { FollowClient } from "@follow-app/client-sdk"
 import { z } from "zod"
 
+import { inspectMaterialContext, requiredMaterialLinks } from "./material-context"
+import type { PublicArticle } from "./public-article"
+import { PublicArticleError, readPublicArticle } from "./public-article"
+
 export type Source = {
   key: string
   kind: "feed" | "list" | "inbox" | "x_search"
@@ -12,6 +16,19 @@ export type Source = {
   siteUrl?: string | null
   feedUrl?: string | null
   platform?: string | null
+  // 生成综述来源只用于阅读投影，禁止重新进入原文采集。
+  origin?: "original" | "generated"
+  xUserId?: string | null
+  xUsername?: string | null
+}
+
+export type LinkedMaterial = {
+  url: string
+  resolvedUrl: string | null
+  title: string | null
+  content: string | null
+  status: "complete" | "failed" | "missing"
+  failure: string | null
 }
 
 export type SourceEntry = {
@@ -29,8 +46,17 @@ export type SourceEntry = {
   language?: string | null
   updatedAt?: string | null
   collected?: boolean | null
+  // 图片与一般视频附件分开计数，避免普通附件误触图片补读保护。
+  imageCount?: number | null
   mediaLength?: number | null
   attachmentsDuration?: number | null
+  // 原帖与依赖的公开正文分别保留；content 同时包含明确来源标记，供证据处理与阅读使用。
+  originalContent?: string | null
+  linkedMaterials?: LinkedMaterial[]
+  // 只有实际读取过的引用、串文、图片和外链上下文才能标为 complete。
+  context?: Partial<
+    Record<"quote" | "thread" | "images" | "links", "complete" | "missing" | "failed">
+  >
 }
 
 export type Page = {
@@ -130,7 +156,7 @@ function toEntry(source: Source, row: z.infer<typeof entryRowSchema>): SourceEnt
   if (row.feeds.type !== expectedKind || (source.kind !== "list" && row.feeds.id !== source.id)) {
     throw new FoloReadError("invalid-response")
   }
-  return {
+  const entry: SourceEntry = {
     id: row.entries.id,
     sourceKey: source.key,
     // 保留 List 条目的实际来源身份，分类上下文仍由 sourceKey 区分。
@@ -146,6 +172,10 @@ function toEntry(source: Source, row: z.infer<typeof entryRowSchema>): SourceEnt
     language: row.entries.language ?? null,
     updatedAt: row.entries.updatedAt ?? null,
     collected: row.collections === undefined || row.collections === null ? null : true,
+    imageCount:
+      row.entries.media?.filter(
+        (media) => media && typeof media === "object" && Reflect.get(media, "type") === "photo",
+      ).length ?? null,
     mediaLength:
       row.entries.media === undefined || row.entries.media === null
         ? null
@@ -153,12 +183,30 @@ function toEntry(source: Source, row: z.infer<typeof entryRowSchema>): SourceEnt
     // 官方附件 duration_in_seconds 为秒；未知附件时保持 null，不能当作 0 秒。
     attachmentsDuration: attachmentDuration(row.entries.attachments),
   }
+  // Feed 正文已包含的嵌入引用/完整串文可直接核验，不把下载图片误认为已读图片。
+  const verified = inspectMaterialContext(entry).verified
+  if (Object.keys(verified).length) entry.context = verified
+  return entry
 }
 
 export class FoloReader {
   private readonly client: FollowClient
+  private readonly publicArticle: (
+    url: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<PublicArticle>
+  private readonly linkedReads = new Map<
+    string,
+    { startedAt: number; promise: Promise<PublicArticle> }
+  >()
 
-  constructor(options: { apiUrl: string; token: string; fetch?: typeof fetch }) {
+  constructor(options: {
+    apiUrl: string
+    token: string
+    fetch?: typeof fetch
+    publicArticle?: typeof readPublicArticle
+  }) {
+    this.publicArticle = options.publicArticle ?? readPublicArticle
     let apiUrl: URL
     let token = options.token
     try {
@@ -307,7 +355,12 @@ export class FoloReader {
 
   async page(source: Source, options: { cursor?: string; limit: number }): Promise<Page> {
     // 外部搜索使用独立官方适配器，不能把虚拟来源 ID 发给 Folo API。
-    if (source.kind === "x_search") throw new FoloReadError("invalid-input")
+    if (
+      source.origin === "generated" ||
+      source.key.startsWith("generated:") ||
+      source.kind === "x_search"
+    )
+      throw new FoloReadError("invalid-input")
     if (
       !Number.isInteger(options.limit) ||
       options.limit < 1 ||
@@ -337,8 +390,50 @@ export class FoloReader {
     }
   }
 
-  async detail(source: Source, entry: SourceEntry): Promise<SourceEntry> {
-    if (source.kind === "x_search") throw new FoloReadError("invalid-input")
+  // 显式研究选材可读取已读原文；先核验当前订阅及真实归属，绝不依赖调用方伪造 sourceKey。
+  async entry(source: Source, entryId: string): Promise<SourceEntry> {
+    if (
+      source.origin === "generated" ||
+      source.key.startsWith("generated:") ||
+      source.kind === "x_search" ||
+      !identifier.safeParse(entryId).success ||
+      !entryId.trim() ||
+      source.key !== `${source.kind}/${source.id}`
+    )
+      throw new FoloReadError("invalid-input")
+    const subscribed = (await this.sources()).find(
+      (item) => item.key === source.key && item.kind === source.kind && item.id === source.id,
+    )
+    if (!subscribed) throw new FoloReadError("invalid-input")
+    const response = await this.request(() =>
+      subscribed.kind === "inbox"
+        ? this.client.api.entries.inbox.get({ id: entryId })
+        : this.client.api.entries.get({ id: entryId }),
+    )
+    const row = data(entryRowSchema, response)
+    if (row.entries.id !== entryId) throw new FoloReadError("invalid-response")
+    if (subscribed.kind === "list") {
+      if (row.feeds.type !== "feed") throw new FoloReadError("invalid-input")
+      const members = await this.listMembers(subscribed.id)
+      // 已返回的成员是正向归属证据；未返回目标 feed 时即使清单不完整也拒绝，不扫描历史猜测。
+      if (!members.feedIds.includes(row.feeds.id)) throw new FoloReadError("invalid-input")
+    } else if (row.feeds.type !== subscribed.kind || row.feeds.id !== subscribed.id) {
+      throw new FoloReadError("invalid-input")
+    }
+    return this.hydrateLinkedMaterials(toEntry(subscribed, row))
+  }
+
+  async detail(
+    source: Source,
+    entry: SourceEntry,
+    options: { signal?: AbortSignal; includeLinkedMaterials?: boolean } = {},
+  ): Promise<SourceEntry> {
+    if (
+      source.origin === "generated" ||
+      source.key.startsWith("generated:") ||
+      source.kind === "x_search"
+    )
+      throw new FoloReadError("invalid-input")
     if (entry.sourceKey !== source.key) throw new FoloReadError("invalid-input")
     const response = await this.request(() =>
       source.kind === "inbox"
@@ -348,7 +443,101 @@ export class FoloReader {
     const result = toEntry(source, data(entryRowSchema, response))
     if (result.id !== entry.id) throw new FoloReadError("invalid-response")
     // 详情接口没有阅读状态，不能把之前读过的文章重置成未读。
-    return { ...result, read: entry.read }
+    const detail = { ...result, read: entry.read }
+    // 后台先完成官方正文提取，再统一补外链，避免同一轮失败立即重复请求。
+    return options.includeLinkedMaterials === false
+      ? detail
+      : this.hydrateLinkedMaterials(detail, options.signal)
+  }
+
+  // 补读至多两个去重目标，保留原帖并附真实 URL/状态；网页文字仅作证据，不产生执行权限。
+  async hydrateLinkedMaterials(entry: SourceEntry, signal?: AbortSignal): Promise<SourceEntry> {
+    const urls = requiredMaterialLinks(entry)
+    if (!urls.length) {
+      if (!entry.context?.links) return entry
+      // 链接状态是正文依赖的派生结果；完整正文恢复后清除旧误判，抓取记录仍保留供审计。
+      const context = { ...entry.context }
+      delete context.links
+      return { ...entry, context }
+    }
+    const originalContent = entry.originalContent ?? entry.content ?? ""
+    const linkedMaterials: LinkedMaterial[] = []
+    for (const [index, url] of urls.entries()) {
+      signal?.throwIfAborted()
+      const existing = entry.linkedMaterials?.find(
+        (material) => material.url === url && material.status === "complete" && material.content,
+      )
+      if (existing) {
+        linkedMaterials.push(existing)
+        continue
+      }
+      if (index >= 2) {
+        linkedMaterials.push({
+          url,
+          resolvedUrl: null,
+          title: null,
+          content: null,
+          status: "missing",
+          failure: "link_budget",
+        })
+        continue
+      }
+      try {
+        let cached = this.linkedReads.get(url)
+        if (!cached || Date.now() - cached.startedAt > 60_000) {
+          cached = { startedAt: Date.now(), promise: this.publicArticle(url, { signal }) }
+          this.linkedReads.set(url, cached)
+          if (this.linkedReads.size > 100)
+            this.linkedReads.delete(this.linkedReads.keys().next().value!)
+        }
+        const article = await cached.promise
+        if (!article.text.trim()) throw new PublicArticleError("empty")
+        linkedMaterials.push({
+          url,
+          resolvedUrl: article.url,
+          title: article.title,
+          content: article.text,
+          status: "complete",
+          failure: null,
+        })
+      } catch (error) {
+        // 普通失败在本轮/一分钟内复用，避免同一失败 URL 反复消耗八秒；取消不缓存。
+        if (signal?.aborted) this.linkedReads.delete(url)
+        signal?.throwIfAborted()
+        linkedMaterials.push({
+          url,
+          resolvedUrl: null,
+          title: null,
+          content: null,
+          status: "failed",
+          failure: error instanceof PublicArticleError ? error.code : "network",
+        })
+      }
+    }
+    const escape = (value: string) =>
+      value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+    const content =
+      originalContent +
+      linkedMaterials
+        .map(
+          (material) =>
+            `<section data-folo-linked-material><p>关联材料来源：<a href="${escape(material.resolvedUrl ?? material.url)}">${escape(material.resolvedUrl ?? material.url)}</a>；获取状态：${material.status}${material.failure ? ` (${escape(material.failure)})` : ""}</p>${material.content ? `<pre>${escape(material.content)}</pre>` : ""}</section>`,
+        )
+        .join("\n")
+    const hydrated = {
+      ...entry,
+      originalContent,
+      content,
+      linkedMaterials,
+      context: { ...entry.context },
+    }
+    hydrated.context.links =
+      inspectMaterialContext(hydrated).verified.links === "complete" ? "complete" : "missing"
+    return hydrated
   }
 
   async readability(entryId: string): Promise<string | null> {

@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite"
 
 import { afterEach, describe, expect, it } from "vitest"
 
+import type { EventIdentity } from "./processing-event"
 import type { StoryRevisionDraft } from "./story-store"
 import { sourceSpanFragmentId, StoryStore, StoryStoreError } from "./story-store"
 
@@ -117,6 +118,45 @@ afterEach(() => {
 })
 
 describe("Story 持久化与版本", () => {
+  it("发布边界重查成员身份，旧无身份、并发版本冲突和原文外quote均不能追加", () => {
+    const { db, store } = fixture()
+    const event = (inputSeq: number, version = "1"): EventIdentity => {
+      const quote = `证据片段 ${inputSeq}`
+      return {
+        kind: "event",
+        subject: { value: "issuer", quote },
+        action: { value: "product_release", quote },
+        object: { value: "model", quote },
+        version: { value: version, quote },
+        round: null,
+        anchor: null,
+      }
+    }
+    const identifiedDraft = { ...draft([1, 2]), eventIdentity: event(1) }
+    expect(() => store.create(identifiedDraft)).toThrow("invalid_reference")
+    const identify = (seq: number, identity: EventIdentity) =>
+      db
+        .prepare("UPDATE entry_decisions SET body=? WHERE id=?")
+        .run(JSON.stringify({ semantic: { event: identity } }), `decision-${seq}`)
+    identify(1, event(1))
+    identify(2, event(2))
+    const created = store.create(identifiedDraft)
+    // 模型完成后、事务发布前持久化身份发生变化，也必须阻断写入。
+    identify(2, event(2, "2"))
+    expect(() => store.appendRevision(created.storyId, 1, identifiedDraft)).toThrow(
+      "invalid_reference",
+    )
+    expect(store.currentSnapshot(created.storyId)?.revision).toBe(1)
+    expect(store.resolveLink(created.storyId)).toMatchObject({
+      kind: "current",
+      revision: { revision: 1 },
+    })
+    identify(2, { ...event(2), subject: { value: "issuer", quote: "原文外引用" } })
+    expect(() => store.appendRevision(created.storyId, 1, identifiedDraft)).toThrow(
+      "invalid_reference",
+    )
+  })
+
   it("仅接受真实 input/decision 与对应的内容版本、句段引用和事实依赖", () => {
     const { store } = fixture()
     const invalidDecision = draft([1, 2])
@@ -219,6 +259,32 @@ describe("Story 持久化与版本", () => {
     )
   })
 
+  it("增加转载证据不刷新未读，但事实内容和依赖变化会刷新", () => {
+    const { store } = fixture()
+    const initial = store.create(draft([1, 2]))
+    store.markRead(initial.storyId, "reader")
+    const repeated = draft([1, 2, 3])
+    repeated.facts = draft([1, 2]).facts
+    repeated.facts[0]!.citationIds.push("citation-3")
+    const second = store.appendRevision(initial.storyId, 1, repeated)
+    expect(second.substantiveRevision).toBe(1)
+    expect(store.readStatus(initial.storyId, "reader").unread).toBe(false)
+    const changed = {
+      ...repeated,
+      facts: repeated.facts.map((fact) => ({
+        ...fact,
+        id: `new-${fact.id}`,
+        dependsOnFactIds: fact.dependsOnFactIds.map((id) => `new-${id}`),
+      })),
+    }
+    const renamed = store.appendRevision(initial.storyId, 2, changed)
+    expect(renamed.substantiveRevision).toBe(1)
+    changed.facts[0]!.text = "截止日期提前"
+    const important = store.appendRevision(initial.storyId, 3, changed)
+    expect(important.substantiveRevision).toBe(4)
+    expect(store.readStatus(initial.storyId, "reader").unread).toBe(true)
+  })
+
   it("合并保留 ID、历史链接和独立阅读回执，且新 revision 覆盖双方材料", () => {
     const { store } = fixture()
     const keepId = "00000000-0000-4000-8000-000000000011"
@@ -226,6 +292,7 @@ describe("Story 持久化与版本", () => {
     const kept = store.create(draft([1, 2]), keepId)
     const merged = store.create(draft([3, 4]), mergedId)
     store.markRead(mergedId, "reader")
+    store.setCollected(mergedId, "reader", true)
 
     const result = store.merge({
       keepStoryId: keepId,
@@ -236,6 +303,7 @@ describe("Story 持久化与版本", () => {
     })
 
     expect(result.revision.revision).toBe(2)
+    expect(store.isCollected(keepId, "reader")).toBe(true)
     expect(store.resolveLink(mergedId)).toMatchObject({ kind: "merged", mergedInto: keepId })
     expect(store.readStatus(keepId, "reader").unread).toBe(true)
     expect(store.currentSnapshot(keepId)?.members.map((member) => member.inputSeq)).toEqual([
@@ -248,6 +316,7 @@ describe("Story 持久化与版本", () => {
     expect(store.currentSnapshot(mergedId)?.members.map((member) => member.inputSeq)).toEqual([
       3, 4,
     ])
+    expect(store.isCollected(keepId, "reader")).toBe(true)
     expect(store.resolveLink(mergedId)).toMatchObject({ kind: "current" })
     // 恢复内容与原实质版本相同，不制造新的未读提醒。
     expect(store.readStatus(mergedId, "reader").unread).toBe(false)
@@ -261,6 +330,7 @@ describe("Story 持久化与版本", () => {
     const parent = store.create(draft([1, 2, 3, 4]), parentId)
     store.markRead(parentId, "reader")
 
+    store.setCollected(parentId, "reader", true)
     const result = store.split({
       storyId: parentId,
       expectedCurrentRevision: parent.revision,
@@ -271,6 +341,8 @@ describe("Story 持久化与版本", () => {
     })
 
     expect(result.childIds).toEqual([firstChildId, secondChildId])
+    expect(store.isCollected(firstChildId, "reader")).toBe(true)
+    expect(store.isCollected(secondChildId, "reader")).toBe(true)
     expect(store.resolveLink(parentId)).toMatchObject({ kind: "split", splitInto: result.childIds })
     expect(store.canAggregate("aggregation-rule", "scope-v1", [1, 3])).toBe(false)
     expect(() => store.create(draft([1, 3]))).toThrow("invalid_reference")

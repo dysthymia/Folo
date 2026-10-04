@@ -21,7 +21,7 @@ export type ProcessingScheduleInput = {
 export type ProcessingScheduleConfig = {
   /** 运行范围描述符（§2 D4）。旧记录读为 fixed。 */
   scope: ScheduleScope
-  /** 已解析的实际范围名单；fixed 与描述符一致，all/category 由 client 落库。 */
+  /** 已解析的实际范围名单；fixed 与描述符一致，all/category 在后台按订阅快照解析。 */
   sourceKeys: string[]
   historySince: string
   timeZone: string
@@ -197,8 +197,8 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
       // 描述符是 fixed 的权威名单：顶层扁平字段与它不一致时以描述符为准，避免两份名单漂移。
       scope = { mode: "fixed", sourceKeys: resolvedKeys }
     } else {
-      // all / category 的已解析名单由 client 落库；服务端只校验 + 排序，不做独立分类解析。
-      resolvedKeys = sourceKeys(input.sourceKeys, scope.mode === "rules")
+      // 动态范围允许当前为空，保存时的旧名单只用于兼容，后台 snapshot 会重新解析。
+      resolvedKeys = sourceKeys(input.sourceKeys, true)
     }
   } else if (Array.isArray(input.sourceKeys)) {
     resolvedKeys = sourceKeys(input.sourceKeys)
@@ -307,7 +307,7 @@ export class ProcessingScheduleStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly owner: () => string | null,
-    private readonly resolveRuleSources?: () => string[],
+    private readonly resolveRuleSources?: (scope: ScheduleScope) => string[],
   ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS processing_schedule (
@@ -359,8 +359,8 @@ export class ProcessingScheduleStore {
     if (String(row.owner_id) !== ownerId) throw new ProcessingScheduleError("owner_mismatch")
     const config = normalizeConfig(JSON.parse(String(row.body)))
     // 每次读取按当前规则与订阅解析，让后来新增的匹配来源自动进入下一轮。
-    if (config.scope.mode === "rules" && this.resolveRuleSources)
-      config.sourceKeys = this.resolveRuleSources()
+    if (config.scope.mode !== "fixed" && this.resolveRuleSources)
+      config.sourceKeys = this.resolveRuleSources(config.scope)
     return { revision: Number(row.revision), config }
   }
 
@@ -550,13 +550,24 @@ export class ProcessingScheduleStore {
         .get(ownerId)
       if (!row) return null
       const id = String(row.id)
+      const current = this.snapshot()
+      // 手动排队先保存意图，首次领取才用 worker 已刷新的清单冻结；租约恢复不扩大旧批次。
+      const refreshScope =
+        row.started_at === null &&
+        current.revision === Number(row.config_revision) &&
+        current.config?.scope.mode !== "fixed"
+      const frozenKeys =
+        refreshScope && current.config
+          ? current.config.sourceKeys
+          : sourceKeys(JSON.parse(String(row.source_keys)))
+      if (!frozenKeys.length) return null
       const leaseToken = randomUUID()
       const leaseUntil = new Date(Date.parse(at) + leaseMs).toISOString()
       const result = this.db
         .prepare(
-          "UPDATE processing_schedule_triggers SET status='running',lease_token=?,lease_until=?,started_at=? WHERE id=? AND status='pending'",
+          "UPDATE processing_schedule_triggers SET status='running',lease_token=?,lease_until=?,started_at=?,source_keys=? WHERE id=? AND status='pending'",
         )
-        .run(leaseToken, leaseUntil, at, id)
+        .run(leaseToken, leaseUntil, at, JSON.stringify(frozenKeys), id)
       if (result.changes !== 1) return null
       return this.triggerFromRow(
         this.db.prepare("SELECT * FROM processing_schedule_triggers WHERE id=?").get(id)!,
@@ -580,6 +591,17 @@ export class ProcessingScheduleStore {
         .run(status, at, error, id, this.ownerId(), leaseToken)
       return result.changes === 1
     })
+  }
+
+  hasPendingTrigger(): boolean {
+    // 空闲轮询只查一行，避免每秒加载完整运行历史。
+    return Boolean(
+      this.db
+        .prepare(
+          "SELECT 1 FROM processing_schedule_triggers WHERE owner_id=? AND status='pending' LIMIT 1",
+        )
+        .get(this.ownerId()),
+    )
   }
 
   triggers(): ProcessingTrigger[] {

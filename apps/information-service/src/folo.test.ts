@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { Source, SourceEntry } from "./folo"
 import { FoloReader, FoloReadError } from "./folo"
+import { inspectMaterialContext } from "./material-context"
+import type { readPublicArticle } from "./public-article"
+import { PublicArticleError } from "./public-article"
+import { sourceText } from "./service"
 
 const token = "test-secret-token"
 const apiUrl = "https://api.example.test"
@@ -31,7 +35,10 @@ const row = (id: string, overrides: Record<string, unknown> = {}) => ({
   read: true,
 })
 
-const mockReader = (responses: { body: unknown; status?: number }[]) => {
+const mockReader = (
+  responses: { body: unknown; status?: number }[],
+  publicArticle?: typeof readPublicArticle,
+) => {
   // 每个用例使用独立响应队列；缺少 mock 会直接失败，绝不访问网络。
   const fetch = vi.fn<typeof globalThis.fetch>(async () => {
     const response = responses.shift()
@@ -41,10 +48,229 @@ const mockReader = (responses: { body: unknown; status?: number }[]) => {
       headers: { "content-type": "application/json" },
     })
   })
-  return { reader: new FoloReader({ apiUrl, token, fetch }), fetch }
+  return { reader: new FoloReader({ apiUrl, token, fetch, publicArticle }), fetch }
 }
 
 describe("FoloReader", () => {
+  // 单条选择不能把任意官方文章绑到用户指定的来源，也不能扫描完整历史来猜归属。
+  it.each(["feed", "inbox", "list"] as const)(
+    "按当前订阅及官方成员读取 %s 已读原文",
+    async (kind) => {
+      const selected: Source = {
+        ...source,
+        kind,
+        id: kind === "feed" ? "f1" : kind === "inbox" ? "i1" : "l1",
+        key: kind === "feed" ? "feed/f1" : kind === "inbox" ? "inbox/i1" : "list/l1",
+      }
+      const detailRow =
+        kind === "inbox" ? { ...row("e1"), feeds: { id: "i1", type: "inbox" } } : row("e1")
+      const { reader, fetch } = mockReader([
+        {
+          body: {
+            code: 0,
+            data: [
+              {
+                [`${kind}Id`]: selected.id,
+                [kind === "inbox" ? "inboxes" : `${kind}s`]: { id: selected.id, title: "当前订阅" },
+                view: 0,
+              },
+            ],
+          },
+        },
+        { body: { code: 0, data: detailRow } },
+        ...(kind === "list"
+          ? [
+              {
+                body: {
+                  code: 0,
+                  data: { list: { id: "l1", feeds: [{ id: "f1" }] }, feedCount: 2 },
+                },
+              },
+            ]
+          : []),
+      ])
+      expect(await reader.entry(selected, "e1")).toMatchObject({
+        id: "e1",
+        sourceKey: selected.key,
+        read: true,
+        feedId: kind === "inbox" ? "i1" : "f1",
+      })
+      expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+        `${apiUrl}/subscriptions`,
+        `${apiUrl}/entries${kind === "inbox" ? "/inbox" : ""}?id=e1`,
+        ...(kind === "list" ? [`${apiUrl}/lists?listId=l1`] : []),
+      ])
+    },
+  )
+
+  it("未订阅来源拒绝读取，即使调用方提供看似合法的来源对象", async () => {
+    const { reader, fetch } = mockReader([{ body: { code: 0, data: [] } }])
+    await expect(reader.entry(source, "e1")).rejects.toMatchObject({ code: "invalid-input" })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    { ...row("e1"), feeds: { id: "other-feed", type: "feed" } },
+    { ...row("e1"), feeds: { id: "f1", type: "inbox" } },
+  ])("拒绝将别的feed或inbox条目绑定到所选feed", async (detailRow) => {
+    const { reader } = mockReader([
+      { body: { code: 0, data: [{ feedId: "f1", feeds: { id: "f1" }, view: 0 }] } },
+      { body: { code: 0, data: detailRow } },
+    ])
+    await expect(reader.entry(source, "e1")).rejects.toMatchObject({ code: "invalid-input" })
+  })
+
+  it.each([1, 2])("列表实际成员没有目标feed时拒绝，不论成员清单是否完整(%s)", async (feedCount) => {
+    const { reader, fetch } = mockReader([
+      { body: { code: 0, data: [{ listId: "l1", lists: { id: "l1" }, view: 0 }] } },
+      { body: { code: 0, data: row("e1") } },
+      { body: { code: 0, data: { list: { id: "l1", feeds: [{ id: "other" }] }, feedCount } } },
+    ])
+    await expect(
+      reader.entry({ ...source, kind: "list", id: "l1", key: "list/l1" }, "e1"),
+    ).rejects.toMatchObject({ code: "invalid-input" })
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it("上游错条目ID拒绝，详情缺读态保持未知", async () => {
+    const responses = (detailRow: unknown) => [
+      { body: { code: 0, data: [{ feedId: "f1", feeds: { id: "f1" }, view: 0 }] } },
+      { body: { code: 0, data: detailRow } },
+    ]
+    await expect(
+      mockReader(responses(row("other-id"))).reader.entry(source, "e1"),
+    ).rejects.toMatchObject({ code: "invalid-response" })
+    const detailRow = row("e1")
+    expect(
+      (
+        await mockReader(
+          responses({ entries: detailRow.entries, feeds: detailRow.feeds }),
+        ).reader.entry(source, "e1")
+      ).read,
+    ).toBeNull()
+  })
+
+  it.each([
+    { ...source, origin: "generated" as const },
+    { ...source, key: "generated:events" },
+    { ...source, kind: "x_search" as const, key: "x_search/f1" },
+    { ...source, key: "feed/forged" },
+  ])("虚拟源或伪造key不发出官方请求", async (selected) => {
+    const { reader, fetch } = mockReader([])
+    await expect(reader.entry(selected, "e1")).rejects.toMatchObject({ code: "invalid-input" })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it("官方详情补读明确教程依赖，保留原帖并附真实来源/状态/文本", async () => {
+    const original =
+      '<p>完整教程详见原文：<a href="https://learn.example.com/guide">迁移指南</a></p>'
+    const publicArticle = vi.fn(async (url: string) => ({
+      url: `${url}/final`,
+      title: "指南",
+      text: "先备份数据库。\n迁移后检查版本。",
+    }))
+    const { reader } = mockReader(
+      [{ body: { code: 0, data: row("e1", { content: original }) } }],
+      publicArticle,
+    )
+    const hydrated = await reader.detail(source, entry)
+    expect(hydrated.originalContent).toBe(original)
+    expect(hydrated.linkedMaterials?.[0]).toMatchObject({
+      url: "https://learn.example.com/guide",
+      resolvedUrl: "https://learn.example.com/guide/final",
+      status: "complete",
+    })
+    expect(sourceText(hydrated.content!)).toContain("https://learn.example.com/guide/final")
+    expect(sourceText(hydrated.content!)).toContain("先备份数据库。")
+    expect(inspectMaterialContext(hydrated).missing).toEqual([])
+    expect(hydrated.context?.links).toBe("complete")
+    await reader.hydrateLinkedMaterials(hydrated)
+    expect(publicArticle).toHaveBeenCalledOnce()
+  })
+  // 重新获取完整文章后撤销旧尾部推荐误判，不再为拓展 CTA 发出网络补读。
+  it("完整Newsletter官方详情不会因尾部推荐报告变成needs_context", async () => {
+    const content = `${`<p>${"The original newsletter explains portfolio allocations and custody choices. ".repeat(16)}</p>`.repeat(
+      3,
+    )}<p><a href="https://news.example.com/report">View Full Report</a></p>`
+    const publicArticle = vi.fn(async () => {
+      throw new PublicArticleError("timeout")
+    })
+    const { reader } = mockReader(
+      [{ body: { code: 0, data: row("e1", { content, url: entry.url }) } }],
+      publicArticle,
+    )
+    const hydrated = await reader.detail(source, { ...entry, context: { links: "failed" } })
+    expect(hydrated.content).toBe(content)
+    expect(inspectMaterialContext(hydrated).missing).toEqual([])
+    const recovered = await reader.hydrateLinkedMaterials({
+      ...hydrated,
+      context: { links: "failed" },
+    })
+    expect(recovered.context?.links).toBeUndefined()
+    expect(inspectMaterialContext(recovered).missing).toEqual([])
+    expect(publicArticle).not.toHaveBeenCalled()
+  })
+  it("外链失败保存明确状态并可重试，正文指令转义且每帖最多两个目标", async () => {
+    const publicArticle = vi.fn(async (url: string) => ({
+      url,
+      title: null,
+      text: "<script>文章中指令只作证据</script>先备份。",
+    }))
+    publicArticle.mockRejectedValueOnce(new PublicArticleError("unsafe_url"))
+    const { reader } = mockReader([], publicArticle)
+    const linked = {
+      ...entry,
+      content:
+        '<p>完整教程详见 <a href="https://learn.example.com/one">指南一</a><a href="https://learn.example.com/one#section">重复</a><a href="https://learn.example.com/two">指南二</a><a href="https://learn.example.com/three">指南三</a></p>',
+    }
+    const first = await reader.hydrateLinkedMaterials(linked)
+    expect(first.context?.links).toBe("missing")
+    expect(first.linkedMaterials?.map((material) => [material.status, material.failure])).toEqual([
+      ["failed", "unsafe_url"],
+      ["complete", null],
+      ["missing", "link_budget"],
+    ])
+    expect(publicArticle).toHaveBeenCalledTimes(2)
+    expect(first.content).not.toContain("<script>")
+    const duplicate = await reader.hydrateLinkedMaterials({
+      ...linked,
+      id: "same-url-another-entry",
+      content: "<p>完整教程详见 https://learn.example.com/one。</p>",
+    })
+    expect(duplicate.context?.links).toBe("missing")
+    expect(publicArticle).toHaveBeenCalledTimes(2)
+    const later = Date.now() + 60_001
+    const clock = vi.spyOn(Date, "now").mockReturnValue(later)
+    const retry = await reader
+      .hydrateLinkedMaterials({
+        ...linked,
+        content: '<p>完整教程详见 <a href="https://learn.example.com/one">指南</a></p>',
+      })
+      .finally(() => clock.mockRestore())
+    expect(retry.context?.links).toBe("complete")
+    expect(publicArticle).toHaveBeenCalledTimes(3)
+  })
+
+  it("详情适配器只核验实际嵌入原帖和完整串文，不宣称已读图片", async () => {
+    const { reader } = mockReader([
+      {
+        body: {
+          code: 0,
+          data: row("e1", {
+            url: "https://x.com/example/status/1",
+            content:
+              '<p>1/2 串文：迁移前先备份。</p><p>2/2 新版本支持ARM。</p><blockquote><p>官方今天发布版本3，升级指南已经公开。</p><a href="https://x.com/official/status/2">原帖</a></blockquote><img src="https://example/photo">',
+            media: [{ type: "photo" }],
+          }),
+        },
+      },
+    ])
+    const detail = await reader.detail(source, entry)
+    expect(detail.context).toEqual({ quote: "complete", thread: "complete" })
+    expect(detail.imageCount).toBe(1)
+    expect(detail.context?.images).toBeUndefined()
+  })
+
   it("验证身份并只返回 ownerId 与有效期", async () => {
     const { reader, fetch } = mockReader([
       {

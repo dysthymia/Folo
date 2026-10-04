@@ -63,6 +63,8 @@ function fixture() {
   const state = new SourceSyncStore(db)
   const store = {
     ownerId: "owner",
+    sources: vi.fn(() => []),
+    sourceSync: state,
     // 真实 Store 负责同时更新主来源表和来源同步快照；替身保持同一契约。
     replaceSources: vi.fn((sources: Source[], syncedAt?: string) => {
       if (syncedAt) state.replaceSources(sources, syncedAt)

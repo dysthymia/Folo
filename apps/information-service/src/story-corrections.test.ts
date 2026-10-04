@@ -48,7 +48,7 @@ function fixture() {
     )
   }
   const stories = new StoryStore(db)
-  return { stories, corrections: new StoryCorrectionService(stories) }
+  return { db, stories, corrections: new StoryCorrectionService(stories) }
 }
 
 function draft(inputSeqs: number[], title = "原 Story"): StoryRevisionDraft {
@@ -197,6 +197,75 @@ describe("人工 Story 纠正编排", () => {
     stories.undoCorrection(result.correction.id)
     expect(stories.resolveLink(parentId)).toMatchObject({ kind: "current" })
     expect(stories.canAggregate("rule", "scope", [1, 2])).toBe(true)
+  })
+
+  it("repairing冻结版本只允许显式全部独立，预览只读、旧链接收藏保留且不能复活失效成员", () => {
+    const { db, stories, corrections } = fixture()
+    const storyId = "00000000-0000-4000-8000-000000000107"
+    stories.create(draft([1, 2]), storyId)
+    stories.setCollected(storyId, "reader", true)
+    db.prepare("UPDATE processing_inputs SET current=0 WHERE seq=1").run()
+    expect(stories.resolveLink(storyId)).toMatchObject({ kind: "repairing" })
+    const before = db.prepare("SELECT total_changes() AS count").get()
+    expect(
+      processingApi(apiStore(stories), "GET", `/stories/${storyId}/split-preview`, null),
+    ).toEqual({
+      storyId,
+      status: "repairing",
+      expectedRevision: 1,
+      inputSeqs: [1, 2],
+      members: [
+        {
+          inputSeq: 1,
+          sourceKey: "feed/1",
+          itemId: "entry-1",
+          title: "entry-1",
+          url: null,
+          current: false,
+          withdrawn: false,
+        },
+        {
+          inputSeq: 2,
+          sourceKey: "feed/2",
+          itemId: "entry-2",
+          title: "entry-2",
+          url: null,
+          current: true,
+          withdrawn: false,
+        },
+      ],
+    })
+    expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(before)
+    expect(() => corrections.split({ storyId, expectedRevision: 1, groups: [[1, 2]] })).toThrow(
+      "invalid_reference",
+    )
+    expect(() =>
+      corrections.split({ storyId, expectedRevision: 2, groups: [], independentInputSeqs: [1, 2] }),
+    ).toThrow("revision_conflict")
+    expect(() =>
+      corrections.split({ storyId, expectedRevision: 1, groups: [], independentInputSeqs: [1] }),
+    ).toThrow("invalid_story")
+    const result = corrections.split({
+      storyId,
+      expectedRevision: 1,
+      groups: [],
+      independentInputSeqs: [1, 2],
+    })
+    expect(stories.resolveLink(storyId)).toMatchObject({
+      kind: "split",
+      splitInto: [],
+      independentInputSeqs: [1, 2],
+    })
+    expect(stories.isCollected(storyId, "reader")).toBe(true)
+    expect(stories.revision(storyId, 1)?.body).toBe(draft([1, 2]).body)
+    expect(db.prepare("SELECT current FROM processing_inputs WHERE seq=1").get()).toMatchObject({
+      current: 0,
+    })
+    expect(stories.canAggregate("rule", "scope", [1, 2])).toBe(false)
+    expect(() => stories.undoCorrection(result.correction.id)).toThrow("invalid_reference")
+    expect(() =>
+      corrections.split({ storyId, expectedRevision: 1, groups: [], independentInputSeqs: [1, 2] }),
+    ).toThrow("story_not_active")
   })
 
   it("拒绝单篇、重叠或不完整分组，不伪造单源综合 Story", () => {

@@ -14,6 +14,8 @@ export function resolveAIRuleSourceKeys(
   return store
     .sources()
     .filter((source) => {
+      // 派生综述只参与阅读，不能被原文规则重新选中。
+      if (source.origin === "generated" || source.key.startsWith("generated:")) return false
       const context = processingRuleInput(
         store,
         source.key,

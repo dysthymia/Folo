@@ -1,0 +1,288 @@
+import { z } from "zod"
+
+import type { EvidenceCatalog } from "./processing-evidence"
+
+const identityValue = z.string().trim().min(1).max(300)
+const actionValue = z.enum([
+  "announcement",
+  "product_release",
+  "campaign",
+  "security_incident",
+  "regulatory_action",
+  "legal_case",
+  "public_statement",
+  "death",
+  "market_event",
+  "transaction",
+  "election",
+])
+const evidenceValue = z
+  .object({ value: identityValue, quote: z.string().min(1).max(4000) })
+  .strict()
+const anchorKind = z.enum(["event_date", "event_time", "official_reference"])
+const anchorZone = z.string().trim().min(1).max(80).nullable().optional()
+
+// 名称只允许原文可追溯的规范实体；优先使用材料明确提供的稳定URL/ID，不按主题或标题聚类。
+export const eventIdentitySchema = z
+  .object({
+    kind: z.enum(["event", "analysis", "tutorial"]),
+    subject: evidenceValue,
+    action: evidenceValue.extend({ value: actionValue }),
+    object: evidenceValue,
+    version: evidenceValue.nullable(),
+    round: evidenceValue.nullable(),
+    anchor: evidenceValue.extend({ kind: anchorKind, timeZone: anchorZone }).nullable(),
+  })
+  .strict()
+export type EventIdentity = z.infer<typeof eventIdentitySchema>
+
+const selectedValue = z
+  .object({ value: identityValue, evidenceId: z.string().min(1).max(80) })
+  .strict()
+export const eventSelectionSchema = z
+  .object({
+    kind: z.enum(["event", "analysis", "tutorial"]),
+    subject: selectedValue,
+    action: selectedValue.extend({ value: actionValue }),
+    object: selectedValue,
+    version: selectedValue.nullable(),
+    round: selectedValue.nullable(),
+    anchor: selectedValue.extend({ kind: anchorKind, timeZone: anchorZone }).nullable(),
+  })
+  .strict()
+export type EventSelection = z.infer<typeof eventSelectionSchema>
+
+export function eventSelectionForCatalog(catalog: EvidenceCatalog) {
+  const ids = catalog.fragments.map((fragment) => fragment.evidenceId)
+  if (!ids.length) return z.null()
+  const value = selectedValue.extend({ evidenceId: z.enum(ids as [string, ...string[]]) })
+  return eventSelectionSchema
+    .extend({
+      subject: value,
+      action: value.extend({ value: actionValue }),
+      object: value,
+      version: value.nullable(),
+      round: value.nullable(),
+      anchor: value.extend({ kind: anchorKind, timeZone: anchorZone }).nullable(),
+    })
+    .nullable()
+}
+
+// 编号必须来自本次原文（或已验证长文分块），模型不能自由生成身份字段的quote。
+export function materializeEvent(
+  catalog: EvidenceCatalog,
+  event: EventSelection | null,
+): EventIdentity | null {
+  if (!event) return null
+  const restore = (field: z.infer<typeof selectedValue>) => {
+    const quote = catalog.resolve(field.evidenceId)
+    if (quote === null) throw new Error("invalid_event_evidence")
+    return { value: field.value, quote }
+  }
+  return eventIdentitySchema.parse({
+    kind: event.kind,
+    subject: restore(event.subject),
+    action: restore(event.action),
+    object: restore(event.object),
+    version: event.version ? restore(event.version) : null,
+    round: event.round ? restore(event.round) : null,
+    anchor: event.anchor
+      ? { ...restore(event.anchor), kind: event.anchor.kind, timeZone: event.anchor.timeZone }
+      : null,
+  })
+}
+
+function canonical(value: string) {
+  const normalized = value.trim().normalize("NFKC")
+  // 只去跟踪参数，保留公告ID等有身份含义的查询参数；URL路径大小写不能被误合并。
+  if (/^https?:\/\//iu.test(normalized)) {
+    try {
+      const url = new URL(normalized)
+      url.hash = ""
+      for (const key of [...url.searchParams.keys()])
+        if (/^utm_|^(?:fbclid|gclid)$/iu.test(key)) url.searchParams.delete(key)
+      url.searchParams.sort()
+      if (["twitter.com", "x.com", "www.twitter.com", "www.x.com"].includes(url.hostname)) {
+        const post = /^\/[^/]+\/status\/(\d+)/u.exec(url.pathname)
+        if (post) return `https://x.com/status/${post[1]}`
+      }
+      return url.toString().replace(/\/$/u, "")
+    } catch {
+      return normalized
+    }
+  }
+  return normalized.toLowerCase()
+}
+
+function calendarDate(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return null
+  const time = Date.parse(`${value}T00:00:00Z`)
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value ? time : null
+}
+
+function zoneOffset(zone: string): number | null {
+  if (zone === "UTC" || zone === "Z") return 0
+  const match = /^(?:UTC)?([+-])(\d{2}):(\d{2})$/u.exec(zone)
+  if (!match) return null
+  const hours = Number(match[2])
+  const minutes = Number(match[3])
+  if (hours > 14 || minutes > 59 || (hours === 14 && minutes !== 0)) return null
+  return (match[1] === "+" ? 1 : -1) * (hours * 60 + minutes) * 60_000
+}
+
+// 只换算原文明确提供的时区；夏令时按本地两次午夜分别计算，不假定每天都是24小时。
+function midnightInZone(day: number, zone: string): number | null {
+  const offset = zoneOffset(zone)
+  if (offset !== null) return day - offset
+  if (!/^[A-Za-z_]+(?:\/[A-Za-z_+-]+)+$/u.test(zone)) return null
+  try {
+    const format = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+    let instant = day
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const parts = format.formatToParts(instant)
+      const number = (key: Intl.DateTimeFormatPartTypes) =>
+        Number(parts.find((part) => part.type === key)?.value)
+      const local = Date.UTC(
+        number("year"),
+        number("month") - 1,
+        number("day"),
+        number("hour"),
+        number("minute"),
+        number("second"),
+      )
+      if (local === day) return instant
+      instant += day - local
+    }
+  } catch {
+    // 无效时区或午夜不存在时保持未知，不猜算发生时间。
+  }
+  return null
+}
+
+function eventInstant(value: string): number | null {
+  const match =
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/u.exec(
+      value,
+    )
+  if (
+    !match ||
+    calendarDate(match[1]!) === null ||
+    Number(match[2]) > 23 ||
+    Number(match[3]) > 59 ||
+    Number(match[4] ?? "0") > 59 ||
+    zoneOffset(match[5]!) === null
+  )
+    return null
+  const time = Date.parse(value)
+  return Number.isFinite(time) ? time : null
+}
+
+function occurrenceRange(anchor: NonNullable<EventIdentity["anchor"]>): [number, number] | null {
+  if (anchor.kind === "event_time") {
+    const instant = eventInstant(anchor.value)
+    return instant === null ? null : [instant, instant + 1]
+  }
+  if (anchor.kind !== "event_date" || !anchor.timeZone) return null
+  const day = calendarDate(anchor.value)
+  if (day === null) return null
+  const start = midnightInZone(day, anchor.timeZone)
+  const end = midnightInZone(day + 86_400_000, anchor.timeZone)
+  return start === null || end === null || start >= end ? null : [start, end]
+}
+
+export function traceableEvent(event: unknown, text: string): EventIdentity | null {
+  const parsed = eventIdentitySchema.safeParse(event)
+  if (!parsed.success || parsed.data.kind !== "event") return null
+  const fields = [
+    parsed.data.subject,
+    parsed.data.action,
+    parsed.data.object,
+    parsed.data.version,
+    parsed.data.round,
+    parsed.data.anchor,
+  ]
+  const original = text.replace(/\s+/gu, " ")
+  if (fields.some((field) => field && !original.includes(field.quote.replace(/\s+/gu, " "))))
+    return null
+  // 无发生锚点、官方原帖、版本或轮次时仍可独立阅读，不能把泛主题当成同事件身份。
+  if (!parsed.data.version && !parsed.data.round && !parsed.data.anchor) return null
+  if (parsed.data.anchor?.kind === "event_date") {
+    if (calendarDate(parsed.data.anchor.value) === null) return null
+    if (parsed.data.anchor.timeZone && !occurrenceRange(parsed.data.anchor)) return null
+  }
+  if (parsed.data.anchor?.kind === "event_time" && eventInstant(parsed.data.anchor.value) === null)
+    return null
+  if (
+    parsed.data.anchor?.kind === "official_reference" &&
+    !/^https?:\/\//u.test(parsed.data.anchor.value)
+  )
+    return null
+  return parsed.data
+}
+
+// 已知版本/轮次/发生区间冲突一律拒绝；截止、资格和领取条件不属于事件身份，允许更新。
+export function compatibleEvents(left: EventIdentity, right: EventIdentity): boolean {
+  if (left.kind !== "event" || right.kind !== "event") return false
+  if (
+    ["subject", "action", "object"].some((key) => {
+      const field = key as "subject" | "action" | "object"
+      return canonical(left[field].value) !== canonical(right[field].value)
+    })
+  )
+    return false
+  for (const key of ["version", "round"] as const) {
+    if (left[key] && right[key] && canonical(left[key].value) !== canonical(right[key].value))
+      return false
+  }
+  const leftRange = left.anchor ? occurrenceRange(left.anchor) : null
+  const rightRange = right.anchor ? occurrenceRange(right.anchor) : null
+  const sharedOccurrence =
+    !!leftRange && !!rightRange && leftRange[0] < rightRange[1] && rightRange[0] < leftRange[1]
+  if (leftRange && rightRange && !sharedOccurrence) return false
+  // 必须共享至少一种发生锚点，不能靠“同主体同动作”拼接不同次公告。
+  return (
+    sharedOccurrence ||
+    ["version", "round"].some((key) => {
+      const field = key as "version" | "round"
+      return (
+        !!left[field] &&
+        !!right[field] &&
+        canonical(left[field].value) === canonical(right[field].value)
+      )
+    }) ||
+    (!!left.anchor &&
+      !!right.anchor &&
+      left.anchor.kind === right.anchor.kind &&
+      left.anchor.kind !== "event_time" &&
+      canonical(left.anchor.value) === canonical(right.anchor.value))
+  )
+}
+
+// 单篇展示仅检查身份完整性；原文quote的归属仍由请求证据目录和聚合持久化边界核验。
+export function hasConfirmedEvent(event: unknown): boolean {
+  const parsed = eventIdentitySchema.safeParse(event)
+  if (!parsed.success) return false
+  const fields = [
+    parsed.data.subject,
+    parsed.data.action,
+    parsed.data.object,
+    parsed.data.version,
+    parsed.data.round,
+    parsed.data.anchor,
+  ]
+  return (
+    traceableEvent(
+      parsed.data,
+      fields.flatMap((field) => (field ? [field.quote] : [])).join("\n"),
+    ) !== null
+  )
+}

@@ -3,15 +3,21 @@ import type { ConditionSet } from "@follow/information-core"
 import type { AIConfigStore } from "./ai-config"
 import { expandXContexts } from "./content-identity"
 import type { FoloReader } from "./folo"
+import { inspectMaterialContext, missingMaterialContext } from "./material-context"
 import { runSemanticDedupe } from "./processing-dedupe"
+import type { EntryProcessingResult } from "./processing-engine"
 import { runEntryProcessing, settleReadStates } from "./processing-engine"
+import { fairProcessingBatches } from "./processing-priority"
 import { resolveAIRuleSourceKeys, runnableReleasedConfig } from "./processing-rule-scope"
 import type { ProcessingTriggerStatus } from "./processing-schedule"
-import { acquireSources } from "./processing-source-sync"
+import { acquireSources, refreshSourceSnapshot } from "./processing-source-sync"
 import { errorCode, sourceText } from "./service"
 import type { Store } from "./store"
 import { runStoryAggregation } from "./story-engine"
 import { runStoryRepair } from "./story-repair"
+
+// 空闲轮询每秒运行，但订阅发现按分钟刷新；待处理的显式批次仍立即刷新。
+const inventoryRefreshTimes = new WeakMap<Store, number>()
 
 export type ProcessingWorkerOptions = {
   store: Store
@@ -29,6 +35,15 @@ export type ProcessingWorkerOptions = {
 export async function runProcessingWorker(options: ProcessingWorkerOptions, signal: AbortSignal) {
   const { store } = options
   if (!store.ownerId || signal.aborted) return null
+  if (!store.schedule.snapshot().config || !store.automation.releases().length) return null
+  // 零匹配也必须先发现新增订阅，不能被旧规则范围提前截断。
+  const now = Date.now()
+  const hasPendingTrigger = store.schedule
+    .triggers()
+    .some((trigger) => trigger.status === "pending")
+  if (!hasPendingTrigger && now - (inventoryRefreshTimes.get(store) ?? 0) < 60_000) return null
+  inventoryRefreshTimes.set(store, now)
+  const inventory = await refreshSourceSnapshot(store, options.reader, signal)
   const ruleSources =
     store.schedule.snapshot().config?.scope.mode === "rules" ? resolveAIRuleSourceKeys(store) : null
   // 规则停用或暂时没有匹配来源时，旧队列也不能重新触发模型。
@@ -55,6 +70,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
             store,
             reader: options.reader,
             state: store.sourceSync,
+            inventory,
             sourceKeys: foloSourceKeys,
             membershipListKeys: referencedListKeys(store),
             historySince: trigger.historySince,
@@ -89,23 +105,95 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         store.automation.invalidateSources([...new Set(changedSources)]),
       )
     // 已读条目在抓详情之前就退出队列：材料水合与可读性提取都不该为它们白跑一遍。
-    settleReadStates(store)
-    const material = await hydrateMaterials(
-      options,
-      trigger.sourceKeys,
-      trigger.historySince,
-      trigger.cutoffAt,
-      signal,
+    const pendingBeforeRead = new Set(
+      store.automation
+        .inputs()
+        .filter(
+          (input) =>
+            input.status === "pending" &&
+            trigger.sourceKeys.includes(input.sourceKey) &&
+            Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
+            Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
+        )
+        .map((input) => input.seq),
     )
-    const entries = await (options.processEntries ?? runEntryProcessing)({
-      store,
-      aiConfig: options.aiConfig,
-      runtimeDir: options.runtimeDir,
-      sourceKeys: trigger.sourceKeys,
-      historySince: trigger.historySince,
-      cutoffAt: trigger.cutoffAt,
-      signal,
-    })
+    const readSettlement = settleReadStates(store)
+    const readSkipped = readSettlement.skip.filter((seq) => pendingBeforeRead.has(seq)).length
+    const hydrationInputs = store.automation
+      .inputs()
+      .filter(
+        (input) =>
+          trigger.sourceKeys.includes(input.sourceKey) &&
+          input.status === "pending" &&
+          Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
+          Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
+      )
+    // 水合与模型共用公平批次，第2位保留最早普通材料，不按最新发布时间反复挤掉积压。
+    const batches = fairProcessingBatches(hydrationInputs).map((batch) =>
+      batch.map((input) => input.seq),
+    )
+    if (!batches.length) batches.push([])
+    const material = { complete: 0, missing: 0, failed: 0 }
+    let entries: EntryProcessingResult = {
+      completed: 0,
+      pending: 0,
+      failures: [],
+      usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+    }
+    // 紧迫条目优先按小批补读并正式发布，不等待所有普通材料串行水合完成。
+    for (const batch of batches) {
+      if (signal.aborted) break
+      const hydrated = await hydrateMaterials(
+        options,
+        trigger.sourceKeys,
+        trigger.historySince,
+        trigger.cutoffAt,
+        signal,
+        batch,
+      )
+      material.complete += hydrated.complete
+      material.missing += hydrated.missing
+      material.failed += hydrated.failed
+      const result = await (options.processEntries ?? runEntryProcessing)({
+        store,
+        aiConfig: options.aiConfig,
+        runtimeDir: options.runtimeDir,
+        sourceKeys: trigger.sourceKeys,
+        inputSeqs: batch.length ? hydrated.inputSeqs : undefined,
+        historySince: trigger.historySince,
+        cutoffAt: trigger.cutoffAt,
+        signal,
+        onProgress: (progress) => {
+          const combined = mergeEntryResults(entries, progress)
+          if (combined.metrics) {
+            combined.metrics.readSkipped += readSkipped
+            combined.metrics.budgetDeferred += sources.filter(
+              (source) => source.coverage === "budget",
+            ).length
+          }
+          store.processingState.report(trigger.id, {
+            inventory: {
+              snapshot: inventory.snapshot,
+              failure: inventory.failure,
+              syncedAt: inventory.syncedAt,
+            },
+            sources,
+            material: { ...material },
+            entries: combined,
+            phase: "entries",
+            progressAt: new Date().toISOString(),
+          })
+        },
+      })
+      entries = mergeEntryResults(entries, result)
+    }
+    if (entries.metrics) {
+      // 已读跳过与来源分页预算分别计数，不混入模型失败或噪声统计。
+      entries.metrics.readSkipped += readSkipped
+      entries.metrics.budgetDeferred += sources.filter(
+        (source) => source.coverage === "budget",
+      ).length
+    }
     // 每个已发布版本按自己的综合指令执行，不能把新草稿混进旧版本决策。
     const decisions = store.processingState.published()
     const releasedRuleSets = store.automation.releases().map((release) => ({
@@ -163,6 +251,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       signal,
     })
     const failure =
+      inventory.failure !== null ||
       repair.failures.length > 0 ||
       sources.some((source) => source.failure) ||
       material.failed > 0 ||
@@ -184,10 +273,17 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       ? "cancelled"
       : failure
         ? "retry_wait"
-        : pending
-          ? "deferred_budget"
-          : "succeeded"
+        : material.missing > 0
+          ? "needs_context"
+          : pending
+            ? "deferred_budget"
+            : "succeeded"
     store.processingState.report(trigger.id, {
+      inventory: {
+        snapshot: inventory.snapshot,
+        failure: inventory.failure,
+        syncedAt: inventory.syncedAt,
+      },
       sources,
       material,
       entries,
@@ -216,6 +312,7 @@ async function hydrateMaterials(
   historySince: string,
   cutoffAt: string,
   signal: AbortSignal,
+  inputSeqs?: readonly number[],
 ) {
   const { store } = options
   const sources = new Map(store.sources().map((source) => [source.key, source]))
@@ -225,21 +322,28 @@ async function hydrateMaterials(
     .filter(
       (input) =>
         selected.has(input.sourceKey) &&
+        (inputSeqs === undefined || inputSeqs.includes(input.seq)) &&
         input.status === "pending" &&
         Date.parse(input.body.publishedAt) >= Date.parse(historySince) &&
         Date.parse(input.body.publishedAt) <= Date.parse(cutoffAt),
     )
+  // 显式批次保持上游顺序，不能在补正文后重新按紧迫程度覆盖普通项的保底位置。
+  const orderedInputs = inputSeqs
+    ? inputs.sort((left, right) => inputSeqs.indexOf(left.seq) - inputSeqs.indexOf(right.seq))
+    : fairProcessingBatches(inputs).flat()
+  const currentSeqs = new Set(orderedInputs.map((input) => input.seq))
   let complete = 0
   let missing = 0
   let failed = 0
   let reader: FoloReader | undefined
-  for (const input of inputs) {
+  for (const input of orderedInputs) {
     signal.throwIfAborted()
-    if (["complete", "missing"].includes(store.processingState.material(input) ?? "")) continue
+    // 待补材料允许下一轮有限重试；完整材料无需再次抓取。
+    if (store.processingState.material(input) === "complete") continue
     const source = sources.get(input.sourceKey)
     if (!source) continue
     if (source.kind === "x_search") {
-      const state = sourceText(input.body.content ?? "") ? "complete" : "missing"
+      const state = missingMaterialContext(input.body).length ? "missing" : "complete"
       store.processingState.setMaterial(input, state)
       if (state === "complete") complete++
       else missing++
@@ -247,13 +351,22 @@ async function hydrateMaterials(
     }
     try {
       reader ??= await options.reader()
-      const entry = await reader.detail(source, input.body)
-      if (source.kind !== "inbox" && !sourceText(entry.content ?? ""))
+      let entry = await reader.detail(source, input.body, { signal, includeLinkedMaterials: false })
+      if (
+        source.kind !== "inbox" &&
+        (!sourceText(entry.content ?? "") || missingMaterialContext(entry).includes("text"))
+      )
         entry.content = await reader.readability(entry.id)
-      // 详情与正文提取完成后才记录材料状态；简介不会被当作完整正文长度。
+      entry = await reader.hydrateLinkedMaterials(entry, signal)
+      // 详情与正文提取完成后核验实际嵌入材料；只保存有正文依据的 complete。
+      const inspection = inspectMaterialContext(entry)
+      if (Object.keys(inspection.verified).length)
+        entry.context = { ...entry.context, ...inspection.verified }
       store.saveEntry(entry)
       const current = store.automation.current(entry.sourceKey, entry.id)!
-      const state = sourceText(entry.content ?? "") ? "complete" : "missing"
+      currentSeqs.delete(input.seq)
+      currentSeqs.add(current.seq)
+      const state = missingMaterialContext(entry).length ? "missing" : "complete"
       store.processingState.setMaterial(current, state)
       if (current.seq !== input.seq) store.stories.invalidateInputs([input.seq])
       if (state === "complete") complete++
@@ -263,7 +376,34 @@ async function hydrateMaterials(
       failed++
     }
   }
-  return { complete, missing, failed }
+  return { complete, missing, failed, inputSeqs: [...currentSeqs] }
+}
+
+// 各水合小批只处理自己的当前输入版本；累计调用/用量而不复算此前发布的条目。
+function mergeEntryResults(
+  left: EntryProcessingResult,
+  right: EntryProcessingResult,
+): EntryProcessingResult {
+  const metrics = right.metrics
+    ? { ...right.metrics }
+    : left.metrics
+      ? { ...left.metrics }
+      : undefined
+  if (metrics && left.metrics && right.metrics) {
+    for (const key of Object.keys(metrics) as Array<keyof typeof metrics>)
+      metrics[key] = left.metrics[key] + right.metrics[key]
+  }
+  return {
+    completed: left.completed + right.completed,
+    pending: left.pending + right.pending,
+    failures: [...left.failures, ...right.failures],
+    metrics,
+    usage: {
+      inputTokens: left.usage.inputTokens + right.usage.inputTokens,
+      outputTokens: left.usage.outputTokens + right.usage.outputTokens,
+      cachedInputTokens: left.usage.cachedInputTokens + right.usage.cachedInputTokens,
+    },
+  }
 }
 
 function contextFingerprint(store: Store, sourceKey: string, body: import("./folo").SourceEntry) {

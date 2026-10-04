@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import { afterEach, describe, expect, it } from "vitest"
 
 import type { SourceEntry } from "./folo"
+import type { GeneratedFeedPage } from "./generated-feeds"
 import { processingApi } from "./processing-api"
 import type { ProcessingEntryRole } from "./processing-reading-store"
 import { Store } from "./store"
@@ -188,6 +189,7 @@ describe("时间线角色投影", () => {
         relatedEntryIds: [],
         storyId: null,
         storyTitle: null,
+        materialCount: 1,
       },
       {
         itemId: "never",
@@ -197,6 +199,7 @@ describe("时间线角色投影", () => {
         relatedEntryIds: [],
         storyId: null,
         storyTitle: null,
+        materialCount: 1,
       },
     ])
   })
@@ -330,6 +333,7 @@ describe("时间线角色投影", () => {
         relatedEntryIds: ["two"],
         storyId,
         storyTitle: "同事件综述",
+        materialCount: 2,
       },
       {
         itemId: "two",
@@ -339,6 +343,7 @@ describe("时间线角色投影", () => {
         relatedEntryIds: [`x:${post}`],
         storyId,
         storyTitle: "同事件综述",
+        materialCount: 2,
       },
       {
         itemId: `x:${post}`,
@@ -348,6 +353,7 @@ describe("时间线角色投影", () => {
         relatedEntryIds: ["two"],
         storyId,
         storyTitle: "同事件综述",
+        materialCount: 2,
       },
     ])
   })
@@ -763,5 +769,270 @@ describe("稳定阅读快照", () => {
     expect(
       processingApi(store, "GET", `/processing/stories/${randomUUID()}/digest`, {}),
     ).toMatchObject({ status: "missing", revision: null, sourceCount: 0, sentences: [] })
+  })
+})
+
+// 生成源复用实际发布决定和 StoryStore，验证跨范围可达性、稳定分页与独立回执。
+describe("私人事件综述投影", () => {
+  function generatedPage(store: Store, query: Record<string, unknown> = {}) {
+    return processingApi(
+      store,
+      "POST",
+      "/processing/generated-feed/items",
+      query,
+    ) as GeneratedFeedPage
+  }
+
+  it("返回私人生成源且一事件一条目；材料计数不依赖客户端已加载原文", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const id = createAggregateStory(store, [first, second], "AI 发布")
+    expect(processingApi(store, "GET", "/processing/generated-feeds", {})).toEqual({
+      feeds: [{ id: "generated:events", origin: "generated", title: "事件综述", private: true }],
+    })
+    expect(generatedPage(store).items).toEqual([
+      expect.objectContaining({
+        id,
+        storyId: id,
+        kind: "story",
+        origin: "generated",
+        materialCount: 2,
+        read: false,
+      }),
+    ])
+    expect(generatedPage(store, { search: "无匹配" }).total).toBe(0)
+    expect(generatedPage(store, { search: "AI 发布" }).total).toBe(1)
+  })
+
+  it("服务端统一排序分页，后台新结果只提示而不插入冻结列表", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const first = generatedPage(store, { mode: "smart", limit: 1 })
+    expect(first.items.map((item) => item.id)).toEqual(["two"])
+    publishInput(store, entry("new", "2026-01-03T00:00:00.000Z"))
+    const next = generatedPage(store, { mode: "smart", limit: 1, cursor: first.nextCursor })
+    expect(next.items.map((item) => item.id)).toEqual(["one"])
+    expect(next.latestAvailable).toBe(true)
+    expect(next.nextCursor).toBeNull()
+    expect(
+      generatedPage(store, { mode: "smart", refresh: true }).items.map((item) => item.id),
+    ).toEqual(["new", "two", "one"])
+    expect(() => generatedPage(store, { mode: "stories", cursor: first.nextCursor })).toThrow(
+      "invalid_pagination",
+    )
+  })
+
+  it("后台新决定即使 hide 也不撤掉冻结行，人工 hide 即时撤掉", () => {
+    const store = fixture()
+    publishRelease(store)
+    const original = entry("one", "2026-01-01T00:00:00.000Z")
+    const input = publishInput(store, original)
+    const page = generatedPage(store, { mode: "smart" })
+    const decisionId = page.items[0]!.kind === "entry" ? page.items[0]!.decisionId : null
+    store.automation.invalidateSources(["feed/f1"])
+    const fresh = store.automation.assign(input.seq)
+    store.automation.complete(fresh, { ...decision(original, input.seq), status: "hide" })
+    const unchanged = generatedPage(store, { mode: "smart", snapshotId: page.snapshotId })
+    expect(unchanged.items[0]).toMatchObject({ id: "one", decisionId })
+    expect(unchanged.latestAvailable).toBe(true)
+    store.processingState.setOverride(input.seq, "hide", 0)
+    expect(generatedPage(store, { mode: "smart", snapshotId: page.snapshotId }).items).toEqual([])
+  })
+
+  it("全部和分类有本范围 Story 才折叠；单来源保留关联原文且搜索无入口时不隐藏", () => {
+    const store = fixture()
+    store.replaceSources([
+      { ...source, category: "AI" },
+      { ...source, key: "feed/f2", id: "f2", category: "其他" },
+    ])
+    publishRelease(store)
+    const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    // 测试引用 helper 以 itemId 还原摘引，跨来源不修改正文。
+    const second = publishInput(store, {
+      ...entry("two", "2026-01-02T00:00:00.000Z"),
+      sourceKey: "feed/f2",
+    })
+    const id = createAggregateStory(store, [first, second], "事件")
+    expect(generatedPage(store, { mode: "smart" }).items.map((item) => item.id)).toEqual([id])
+    expect(
+      generatedPage(store, { mode: "smart", category: { view: 0, name: "AI" } }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([id])
+    const sourcePage = generatedPage(store, { mode: "smart", sourceKeys: ["feed/f1"] })
+    expect(sourcePage.items.map((item) => item.id)).toEqual([id, "one"])
+    expect(sourcePage.items.find((item) => item.kind === "entry")).toMatchObject({ storyIds: [id] })
+    expect(
+      generatedPage(store, { mode: "smart", search: "来源 one" }).items.map((item) => item.id),
+    ).toEqual(["one"])
+  })
+
+  it("普通 view 包含 List-only 和 Inbox，隔离其他视图与未知来源", () => {
+    const store = fixture()
+    const sources = [
+      source,
+      { ...source, key: "list/l1", kind: "list" as const, id: "l1" },
+      { ...source, key: "inbox/i1", kind: "inbox" as const, id: "i1" },
+      { ...source, key: "feed/f2", id: "f2", view: 1 },
+    ]
+    store.replaceSources(sources)
+    publishRelease(store)
+    publishInput(store, entry("feed", "2026-01-01T00:00:00.000Z"))
+    publishInput(store, { ...entry("list-only", "2026-01-02T00:00:00.000Z"), sourceKey: "list/l1" })
+    publishInput(store, {
+      ...entry("inbox-only", "2026-01-03T00:00:00.000Z"),
+      sourceKey: "inbox/i1",
+    })
+    publishInput(store, {
+      ...entry("other-view", "2026-01-04T00:00:00.000Z"),
+      sourceKey: "feed/f2",
+    })
+    publishInput(store, {
+      ...entry("unknown", "2026-01-05T00:00:00.000Z"),
+      sourceKey: "feed/unknown",
+    })
+    const page = generatedPage(store, { mode: "smart", view: 0, limit: 1 })
+    expect(page.total).toBe(3)
+    expect(page.items.map((item) => item.id)).toEqual(["inbox-only"])
+    expect(generatedPage(store, { mode: "smart", view: 1 }).items.map((item) => item.id)).toEqual([
+      "other-view",
+    ])
+    expect(
+      generatedPage(store, { mode: "smart", view: "all" }).items.map((item) => item.id),
+    ).toEqual(["other-view", "inbox-only", "list-only", "feed"])
+    expect(() => generatedPage(store, { mode: "smart", view: 1, cursor: page.nextCursor })).toThrow(
+      "invalid_pagination",
+    )
+    // 分页仍按初始视图名单和排序读取，不会把后续同步的新来源插到当前页。
+    store.replaceSources([...sources, { ...source, key: "list/new", kind: "list", id: "new" }])
+    publishInput(store, { ...entry("new-list", "2026-01-06T00:00:00.000Z"), sourceKey: "list/new" })
+    const next = generatedPage(store, { mode: "smart", view: 0, cursor: page.nextCursor, limit: 5 })
+    expect(next.items.map((item) => item.id)).toEqual(["list-only", "feed"])
+    expect(next.latestAvailable).toBe(true)
+    expect(
+      generatedPage(store, { mode: "smart", view: 0, refresh: true }).items.map((item) => item.id),
+    ).toEqual(["new-list", "inbox-only", "list-only", "feed"])
+  })
+
+  it("分类与固定来源优先于普通 view，局部 Story 可达才折叠", () => {
+    const store = fixture()
+    store.replaceSources([
+      { ...source, category: "AI" },
+      { ...source, key: "list/l1", kind: "list", id: "l1", view: 1, category: "其他" },
+    ])
+    publishRelease(store)
+    const first = publishInput(store, entry("feed", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, {
+      ...entry("list-only", "2026-01-02T00:00:00.000Z"),
+      sourceKey: "list/l1",
+    })
+    const id = createAggregateStory(store, [first, second], "跨视图事件")
+    expect(generatedPage(store, { mode: "smart", view: 0 }).items.map((item) => item.id)).toEqual([
+      id,
+    ])
+    expect(generatedPage(store, { mode: "smart", view: 1 }).items.map((item) => item.id)).toEqual([
+      id,
+    ])
+    expect(
+      generatedPage(store, { mode: "smart", view: 1, category: { view: 0, name: "AI" } }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([id])
+    expect(
+      generatedPage(store, { mode: "smart", view: 0, sourceKeys: ["list/l1"] }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([id, "list-only"])
+    expect(
+      generatedPage(store, {
+        mode: "smart",
+        view: 0,
+        sourceKeys: ["list/l1"],
+        search: "来源 list-only",
+      }).items.map((item) => item.id),
+    ).toEqual(["list-only"])
+  })
+
+  it("人工隐藏和恢复立即作用于冻结候选，撤回的 Story 不再可读", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"), {
+      status: "hide",
+    })
+    const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const page = generatedPage(store, { mode: "smart" })
+    expect(page.items.map((item) => item.id)).toEqual(["two"])
+    store.processingState.setOverride(first.seq, "restore", 0)
+    store.processingState.setOverride(second.seq, "hide", 0)
+    expect(
+      generatedPage(store, { mode: "smart", snapshotId: page.snapshotId }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["one"])
+    store.processingState.setOverride(second.seq, "automatic", 1)
+    const id = createAggregateStory(store, [first, second], "待撤回事件")
+    const stories = generatedPage(store, { refresh: true })
+    expect(stories.items.map((item) => item.id)).toEqual([id])
+    store.stories.withdrawMaterial(first.seq, "来源失效")
+    expect(generatedPage(store, { snapshotId: stories.snapshotId }).items).toEqual([])
+  })
+
+  it("综述读态收藏独立，纯引用版本不制造未读，事实改变提示重要更新", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const id = createAggregateStory(store, [first, second], "事件")
+    processingApi(store, "POST", `/processing/stories/${id}/reader-state`, {
+      read: true,
+      collected: true,
+      revision: 1,
+    })
+    expect(store.entry("feed/f1", "one")?.read).toBe(false)
+    expect(generatedPage(store, { collectedOnly: true }).items[0]).toMatchObject({
+      read: true,
+      collected: true,
+    })
+    expect(generatedPage(store, { unreadOnly: true }).items).toEqual([])
+    const revision = store.stories.currentSnapshot(id)!
+    store.stories.appendRevision(id, 1, {
+      ...revision,
+      title: "事件措辞调整",
+      body: "展示调整",
+      instructionFingerprint: "新版指令",
+    })
+    expect(generatedPage(store, { refresh: true }).items[0]).toMatchObject({
+      revision: 2,
+      read: true,
+      hasImportantUpdate: false,
+    })
+    expect(
+      processingApi(store, "POST", `/processing/stories/${id}/digest`, { revision: 1 }),
+    ).toMatchObject({ revision: 1, title: "事件", body: revision.body })
+    expect(processingApi(store, "GET", `/processing/stories/${id}/reader-state`, {})).toMatchObject(
+      { read: true, collected: true, link: { kind: "current", revision: { revision: 2 } } },
+    )
+    store.stories.appendRevision(id, 2, {
+      ...revision,
+      facts: revision.facts.map((fact) => ({ ...fact, text: "参与截止时间已提前" })),
+    })
+    expect(generatedPage(store, { refresh: true }).items[0]).toMatchObject({
+      revision: 3,
+      read: false,
+      hasImportantUpdate: true,
+      collected: true,
+    })
+    processingApi(store, "POST", `/processing/stories/${id}/reader-state`, {
+      read: false,
+      collected: false,
+    })
+    expect(generatedPage(store, { refresh: true }).items[0]).toMatchObject({
+      read: false,
+      collected: false,
+    })
   })
 })

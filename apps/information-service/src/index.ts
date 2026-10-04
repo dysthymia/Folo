@@ -14,6 +14,7 @@ import { FoloReader } from "./folo"
 import { diagnosticsApi } from "./processing-diagnostics"
 import { ProcessingTrial } from "./processing-trial"
 import { runProcessingWorker } from "./processing-worker"
+import { ResearchSelectionService } from "./research-selection"
 import { createInformationServer, verifyWebBuild } from "./server"
 import { errorCode, InformationService, readCredential } from "./service"
 import { Store } from "./store"
@@ -174,6 +175,14 @@ async function main() {
             },
             mainWebRoot,
             [
+              // 手工历史选材使用独立研究记录，不进入日常调度或改变原文读态。
+              new ResearchSelectionService({
+                store,
+                aiConfig,
+                runtimeDir: join(dataDir, "runtime"),
+                getReader: reader,
+                signal: controller.signal,
+              }),
               externalApi({ store, configPath: join(dataDir, "external-config.json") }),
               diagnosticsApi(store, join(dataDir, "runtime", "codex-usage.jsonl")),
               createXApi({

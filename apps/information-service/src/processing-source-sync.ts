@@ -83,6 +83,10 @@ export class SourceSyncStore {
     private readonly virtualSources: () => Source[] = () => [],
   ) {
     db.exec(`
+      CREATE TABLE IF NOT EXISTS source_sync_inventory (
+        id INTEGER PRIMARY KEY CHECK(id=1), synced_at TEXT NOT NULL,
+        snapshot TEXT NOT NULL, failure TEXT
+      );
       CREATE TABLE IF NOT EXISTS source_sync_states (
         source_key TEXT PRIMARY KEY, cursor TEXT, history_since TEXT NOT NULL,
         last_success_at TEXT, coverage TEXT NOT NULL, coverage_boundary TEXT,
@@ -105,6 +109,28 @@ export class SourceSyncStore {
     // 旧库增量增加可选 owner_id，不重建或清空已有 List 成员快照。
     if (!membershipColumns.includes("owner_id"))
       db.exec("ALTER TABLE source_sync_list_memberships ADD COLUMN owner_id TEXT")
+  }
+
+  inventoryStatus(): {
+    syncedAt: string
+    snapshot: "fresh" | "previous"
+    failure: string | null
+  } | null {
+    const row = this.db.prepare("SELECT * FROM source_sync_inventory WHERE id=1").get()
+    return row
+      ? {
+          syncedAt: String(row.synced_at),
+          snapshot: String(row.snapshot) as "fresh" | "previous",
+          failure: row.failure === null ? null : String(row.failure),
+        }
+      : null
+  }
+
+  recordInventory(syncedAt: string, snapshot: "fresh" | "previous", failure: string | null) {
+    // 零匹配没有运行报告时，仍保存刷新失败与旧快照来源供对账查看。
+    this.db
+      .prepare("INSERT OR REPLACE INTO source_sync_inventory VALUES(1,?,?,?)")
+      .run(syncedAt, snapshot, failure)
   }
 
   replaceSources(sources: Source[], syncedAt: string) {
@@ -356,12 +382,51 @@ function listId(listKey: string): string {
   return listKey.startsWith("list/") ? listKey.slice("list/".length) : listKey
 }
 
+export type SourceInventoryRefresh = {
+  sources: Source[]
+  reader: FoloReader | null
+  syncedAt: string
+  failure: string | null
+  snapshot: "fresh" | "previous"
+}
+
+// 先刷新订阅清单，再解析规则与冻结范围；失败保留旧快照并明确记录来源。
+export async function refreshSourceSnapshot(
+  store: Store,
+  getReader: () => Promise<FoloReader>,
+  signal?: AbortSignal,
+): Promise<SourceInventoryRefresh> {
+  signal?.throwIfAborted()
+  const syncedAt = new Date().toISOString()
+  try {
+    const reader = await getReader()
+    const session = await reader.session()
+    if (session.ownerId !== store.ownerId) throw new SourceSyncError("invalid_input")
+    const sources = await reader.sources()
+    signal?.throwIfAborted()
+    store.replaceSources(sources, syncedAt)
+    store.sourceSync.recordInventory(syncedAt, "fresh", null)
+    return { sources, reader, syncedAt, failure: null, snapshot: "fresh" }
+  } catch (error) {
+    signal?.throwIfAborted()
+    store.sourceSync.recordInventory(syncedAt, "previous", syncFailure(error))
+    return {
+      sources: store.sources(),
+      reader: null,
+      syncedAt,
+      failure: syncFailure(error),
+      snapshot: "previous",
+    }
+  }
+}
+
 export async function acquireSources(
   input: {
     store: Store
     reader: () => Promise<FoloReader>
     state: SourceSyncStore
     sourceKeys: string[]
+    inventory?: SourceInventoryRefresh
     membershipListKeys?: string[]
     historySince: string
     pageBudget?: number
@@ -388,28 +453,25 @@ export async function acquireSources(
     if (signal?.aborted) throw new SourceSyncError("aborted")
   }
   abort()
-  const reader = await input.reader()
-  abort()
-  const now = new Date().toISOString()
-  let sources: Source[]
-  try {
-    // 同一轮只核验一次账号、拉取一次订阅与 List 元数据，后续每页不重复请求。
-    const session = await reader.session()
-    if (input.store.ownerId !== session.ownerId) throw new SourceSyncError("invalid_input")
-    sources = await reader.sources()
-    // Store 内部把两份来源快照一起提交，避免此处嵌套 BEGIN 使首批同步立刻失败。
-    input.store.replaceSources(sources, now)
-  } catch (error) {
-    const failure = syncFailure(error)
+  // worker 已在选源前刷新时直接复用同一结果，避免同轮重复拉取。
+  const inventory =
+    input.inventory ?? (await refreshSourceSnapshot(input.store, input.reader, signal))
+  const now = inventory.syncedAt
+  if (inventory.failure || !inventory.reader) {
+    const failure = inventory.failure ?? "sync_failed"
     for (const sourceKey of sourceKeys) input.state.fail(sourceKey, historySince, now, failure)
     return sourceKeys.map((sourceKey) => ({
       sourceKey,
       pages: 0,
       entries: 0,
-      coverage: "failed",
+      coverage: "failed" as const,
       failure,
     }))
   }
+  const reader = inventory.reader
+  const sources = inventory.sources.filter(
+    (source) => source.origin !== "generated" && !source.key.startsWith("generated:"),
+  )
   const selected = sourceKeys
     .map((sourceKey, index) => ({
       sourceKey,

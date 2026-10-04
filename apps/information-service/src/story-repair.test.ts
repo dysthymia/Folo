@@ -86,7 +86,7 @@ function add(
       description: null,
     },
   }
-  return {
+  const result: PublishedDecision = {
     input,
     decisionId,
     decision: {
@@ -110,10 +110,34 @@ function add(
       sourceRole: "source",
       context: { source_id: sourceKey, contextId: sourceKey },
       facts: [{ text: content, quote: content, kind: "fact" as const }],
-      semantic: null,
+      semantic: {
+        entryId: itemId,
+        title: itemId,
+        summary: content,
+        disposition: "keep" as const,
+        reason: "可核对",
+        aggregation: true,
+        rewrite: true,
+        labels: [],
+        facts: [],
+        event: {
+          kind: "event" as const,
+          subject: { value: "OpenAI", quote: content },
+          action: { value: "product_release" as const, quote: content },
+          object: { value: "GPT", quote: content },
+          version: { value: "5.2", quote: content },
+          round: null,
+          anchor: null,
+        },
+      },
       reused: false,
     },
   } satisfies PublishedDecision
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(result.decision),
+    decisionId,
+  )
+  return result
 }
 
 function draft(items: PublishedDecision[]): StoryRevisionDraft {
@@ -217,6 +241,7 @@ function addSemantic(decision: PublishedDecision) {
       rewrite: true,
       labels: [],
       facts: decision.decision.facts,
+      event: decision.decision.semantic?.event,
     },
   }
 }
@@ -286,6 +311,93 @@ describe("Story repair", () => {
     expect(stories.currentSnapshot(original.storyId)?.members.map((item) => item.inputSeq)).toEqual(
       [1, 2],
     )
+  })
+
+  it("旧Story已有明确观点成员时提示事件不兼容，不反复标为未知待补", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const items = [add(db, 1), add(db, 2), add(db, 3)]
+    items[0]!.decision.semantic!.event = {
+      ...items[0]!.decision.semantic!.event!,
+      kind: "analysis",
+    }
+    const original = stories.create(draft(items))
+    stories.removeMember(original.storyId, 1, 3)
+    let calls = 0
+    const result = await runStoryRepair({
+      decisions: items,
+      ruleSets: [rules()],
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: async () => {
+        calls++
+        throw new Error("不应执行模型")
+      },
+    })
+    expect(result.pending).toEqual([
+      { storyId: original.storyId, reason: "incompatible_event_identity" },
+    ])
+    expect(calls).toBe(0)
+  })
+
+  it("旧决定缺身份等待核对，当前材料重新识别后沿用旧链接修复", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const items = [
+      add(db, 1, "v1", true, "第一份事件证据"),
+      add(db, 2, "v1", true, "第二份事件证据"),
+      add(db, 3, "v1", true, "撤回证据"),
+    ]
+    const events = items.map((item) => item.decision.semantic)
+    for (const item of items) {
+      item.decision.semantic = null
+      db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+        JSON.stringify(item.decision),
+        item.decisionId,
+      )
+    }
+    const original = stories.create(draft(items))
+    stories.removeMember(original.storyId, 1, 3)
+    let calls = 0
+    const options = {
+      decisions: items,
+      ruleSets: [rules()],
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        calls++
+        const value = output([1, 2], ["第一份事件证据", "第二份事件证据"])
+        expect(request.validate(value)).toBe(true)
+        return {
+          result: value as T,
+          model: request.model,
+          durationMs: 1,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
+    }
+    const deferred = await runStoryRepair(options)
+    expect(deferred.pending).toEqual([
+      { storyId: original.storyId, reason: "event_identity_unknown" },
+    ])
+    expect(calls).toBe(0)
+    expect(stories.resolveLink(original.storyId).kind).toBe("repairing")
+    // 模拟显式选材核对产出新的可追溯决定；这里仅写测试内存库，实际迁移不自动调用模型。
+    for (const [index, item] of items.entries()) {
+      item.decision.semantic = events[index]!
+      db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+        JSON.stringify(item.decision),
+        item.decisionId,
+      )
+    }
+    const repaired = await runStoryRepair(options)
+    expect(repaired.repaired).toEqual([{ storyId: original.storyId, revision: 2 }])
+    expect(calls).toBe(1)
+    expect(stories.resolveLink(original.storyId).kind).toBe("current")
+    expect(stories.currentSnapshot(original.storyId)?.eventIdentity?.version?.value).toBe("5.2")
   })
 
   it("修复时拒绝跨候选 evidenceId，不能借另一篇材料的原文引用", async () => {
@@ -381,6 +493,39 @@ describe("Story repair", () => {
     expect(result.pending).toEqual([])
     expect(result.repaired).toEqual([{ storyId: original.storyId, revision: 2 }])
     expect(stories.currentSnapshot(original.storyId)?.appliedRuleSetVersion).toBe(2)
+  })
+
+  it("隐藏独立入口的旧决定在新版本仍允许综合时可修复 Story", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const old: PublishedDecision = add(db, 1, "v1", true, "旧版本证据", 1)
+    addSemantic(old)
+    old.decision = {
+      ...old.decision,
+      status: "hide",
+      policy: { ...old.decision.policy, standalone: "never", rewrite: "deny" },
+      semantic: { ...old.decision.semantic!, disposition: "hide" },
+    }
+    const current = add(db, 2, "v1", true, "新版本证据", 2)
+    const removed = add(db, 3, "v1", true, "待移除证据", 2)
+    const original = stories.create(draft([old, current, removed]))
+    stories.removeMember(original.storyId, 1, 3)
+    const result = await runStoryRepair({
+      decisions: [old, current, removed],
+      ruleSets: [rules(), rules()],
+      releasedRuleSets: [
+        { version: 1, config: rules() },
+        { version: 2, config: rules() },
+      ],
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: execute(output([1, 2], ["旧版本证据", "新版本证据"])),
+    })
+    expect(result.repaired).toEqual([{ storyId: original.storyId, revision: 2 }])
+    expect(
+      stories.currentSnapshot(original.storyId)?.members.map((member) => member.inputSeq),
+    ).toEqual([1, 2])
   })
 
   it("混合 release 不沿用旧 allow，按目标版本将失去资格的成员移出修复", async () => {

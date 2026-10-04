@@ -9,6 +9,7 @@ import { AIConfigStore } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
 import type { CodexJsonOptions } from "./codex"
 import type { PublishedDecision } from "./processing-decision"
+import type { EventIdentity } from "./processing-event"
 import { runStoryAggregation } from "./story-engine"
 import { StoryStore } from "./story-store"
 
@@ -107,7 +108,7 @@ function published(
     JSON.stringify({ status: "keep" }),
     saved.receivedAt,
   )
-  return {
+  const result = {
     input: saved,
     decisionId,
     decision: {
@@ -127,11 +128,86 @@ function published(
       sourceRole: seq === 1 ? "official" : "reporting",
       context: { source_id: `source-${seq}`, contextId: `context-${seq}` },
       facts: [{ text: `事实 ${seq}`, quote: `来源 ${seq} 的可核查事实。`, kind: "fact" as const }],
-      semantic: null,
+      semantic: {
+        entryId: saved.itemId,
+        title: "事件",
+        summary: "摘要",
+        disposition: "keep" as const,
+        reason: "可核对",
+        aggregation: true,
+        rewrite: true,
+        labels: [],
+        facts: [],
+        event: fixtureEvent(`来源 ${seq} 的可核查事实。`),
+      },
       reused: false,
       ...overrides,
     },
   } satisfies PublishedDecision
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(result.decision),
+    decisionId,
+  )
+  return result
+}
+
+// 旧测试关注引用/版本行为，提供同一已确认事件；专项回归另用中英文实际原文与不同事件。
+function fixtureEvent(quote: string): EventIdentity {
+  const field = (value: string) => ({ value, quote })
+  return {
+    kind: "event",
+    subject: field("OpenAI"),
+    action: { value: "product_release", quote },
+    object: field("GPT"),
+    version: field("5.2"),
+    round: null,
+    anchor: null,
+  }
+}
+
+function casePublished(
+  db: DatabaseSync,
+  seq: number,
+  original: string,
+  event: EventIdentity | null,
+) {
+  const item = published(db, seq)
+  item.input.body.content = `<p>${original}</p>`
+  item.input.body.title = original.slice(0, 100)
+  item.decision.facts = [{ text: original, quote: original, kind: "fact" }]
+  item.decision.semantic = event ? { ...item.decision.semantic!, event } : null
+  db.prepare("UPDATE processing_inputs SET body=? WHERE seq=?").run(
+    JSON.stringify(item.input.body),
+    seq,
+  )
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(item.decision),
+    item.decisionId,
+  )
+  return item
+}
+
+function caseEvent(
+  original: string,
+  subject: string,
+  action: EventIdentity["action"]["value"],
+  object: string,
+  discriminator: { version?: string; round?: string; date?: string; reference?: string },
+): EventIdentity {
+  const field = (value: string) => ({ value, quote: original })
+  return {
+    kind: "event",
+    subject: field(subject),
+    action: { value: action, quote: original },
+    object: field(object),
+    version: discriminator.version ? field(discriminator.version) : null,
+    round: discriminator.round ? field(discriminator.round) : null,
+    anchor: discriminator.date
+      ? { ...field(discriminator.date), kind: "event_date" }
+      : discriminator.reference
+        ? { ...field(discriminator.reference), kind: "official_reference" }
+        : null,
+  }
 }
 
 function rules(actions: RuleSet["rules"][number]["actions"], order = 0): RuleSet {
@@ -256,6 +332,266 @@ afterEach(() => {
 })
 
 describe("Story 模型聚合", () => {
+  it.each([
+    [
+      "ASvanevik 于2026-09-26发表代理式交易将成常态的预测。",
+      "Hsin-Ju Chuang 的死因于2026-09-26确认为自杀。",
+      "ASvanevik",
+      "public_statement",
+      "agent_trading_prediction",
+      "Hsin-Ju Chuang",
+      "death",
+      "cause_of_death",
+    ],
+    [
+      "SEC Uyeda 于2026-09-26解释撤销加密案件。",
+      "2026-09-26 BTC跌破80427美元将触发多单清算。",
+      "SEC",
+      "legal_case",
+      "crypto_case_withdrawals",
+      "BTC",
+      "market_event",
+      "liquidation_threshold",
+    ],
+    [
+      "SEC Uyeda 于2026-09-26解释撤销加密案件。",
+      "2026-09-26 ETH跌破2576美元将触发多单清算。",
+      "SEC",
+      "legal_case",
+      "crypto_case_withdrawals",
+      "ETH",
+      "market_event",
+      "liquidation_threshold",
+    ],
+  ] as const)(
+    "真实误合并回归：%s 与 %s 不进入同一模型分组",
+    async (
+      firstText,
+      secondText,
+      firstSubject,
+      firstAction,
+      firstObject,
+      secondSubject,
+      secondAction,
+      secondObject,
+    ) => {
+      const { db, stories, aiConfig, runtimeDir } = fixture()
+      const decisions = [
+        casePublished(
+          db,
+          1,
+          firstText,
+          caseEvent(firstText, firstSubject, firstAction, firstObject, { date: "2026-09-26" }),
+        ),
+        casePublished(
+          db,
+          2,
+          secondText,
+          caseEvent(secondText, secondSubject, secondAction, secondObject, { date: "2026-09-26" }),
+        ),
+      ]
+      let calls = 0
+      const result = await runStoryAggregation({
+        decisions,
+        ruleSet: rules([aggregateAction()]),
+        stories,
+        aiConfig,
+        runtimeDir,
+        signal: new AbortController().signal,
+        execute: async () => {
+          calls++
+          throw new Error("must_not_call")
+        },
+      })
+      expect(calls).toBe(0)
+      expect(result.created).toEqual([])
+      expect(db.prepare("SELECT COUNT(*) AS count FROM stories").get()?.count).toBe(0)
+      expect(result.pending).toHaveLength(2)
+    },
+  )
+
+  it("中英文同一官方发布无发生日期也可聚合；可核对版本相同，不依赖标题主题", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const originals = [
+      "OpenAI 发布 GPT 5.2，官方公告 https://openai.com/index/gpt-5-2/。",
+      "GPT 5.2 is released by OpenAI. Official post https://openai.com/index/gpt-5-2/.",
+    ]
+    const decisions = originals.map((text, index) =>
+      casePublished(
+        db,
+        index + 1,
+        text,
+        caseEvent(text, "OpenAI", "product_release", "GPT", {
+          version: "5.2",
+          reference: "https://openai.com/index/gpt-5-2/",
+        }),
+      ),
+    )
+    // 两份不同语言原文各有独立证据；模型只生成综述，不能替服务端决定身份兼容。
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([modelOutput()]),
+    })
+    expect(result.created).toHaveLength(1)
+    const current = stories.currentSnapshot(result.created[0]!.storyId)!
+    expect(current.eventIdentity?.version?.value).toBe("5.2")
+    expect(current.sourceSpans.map((span) => span.quote)).toEqual(originals)
+  })
+
+  it.each(["deadline", "round", "version", "legacy"] as const)("更新核验：%s", async (change) => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const config = rules([aggregateAction()])
+    const initial = [
+      "Alpha 活动第一轮v1领取已开放，截止10月4日。",
+      "Alpha 第一轮v1官方公告确认领取，截止10月4日。",
+    ]
+    const identity = (text: string) =>
+      caseEvent(text, "Alpha", "campaign", "claim_campaign", { round: "1", version: "v1" })
+    const previous = initial.map((text, index) =>
+      casePublished(db, index + 1, text, identity(text)),
+    )
+    const initialResult = await runStoryAggregation({
+      decisions: previous,
+      ruleSet: config,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([modelOutput()]),
+    })
+    const storyId = initialResult.created[0]!.storyId
+    if (change === "legacy") {
+      // 只改内存测试库，模拟历史决定缺事件字段；记录/链接必须保留而不自动续写。
+      for (const item of previous)
+        db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+          JSON.stringify({ ...item.decision, semantic: null }),
+          item.decisionId,
+        )
+    }
+    const text =
+      change === "round"
+        ? "Alpha 活动第二轮v1领取开放。"
+        : change === "version"
+          ? "Alpha 第一轮v2正式发布。"
+          : "Alpha 第一轮v1领取截止延长到10月5日，资格已调整。"
+    const event = identity(text)
+    if (change === "round") event.round!.value = "2"
+    if (change === "version") event.version!.value = "v2"
+    const next = casePublished(db, 3, text, event)
+    let calls = 0
+    const output = {
+      groups: [
+        {
+          ...modelOutput(storyId).groups[0]!,
+          sentences: [{ text, sources: [{ inputSeq: 3, evidenceId: evidenceId(3) }] }],
+        },
+      ],
+    }
+    const result = await runStoryAggregation({
+      decisions: [next],
+      ruleSet: config,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        calls++
+        expect(request.validate(output)).toBe(true)
+        return {
+          result: output as T,
+          model: request.model,
+          durationMs: 1,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
+    })
+    expect(calls).toBe(change === "deadline" ? 1 : 0)
+    expect(result.updated).toHaveLength(change === "deadline" ? 1 : 0)
+    expect(stories.currentSnapshot(storyId)!.revision).toBe(change === "deadline" ? 2 : 1)
+    expect(stories.resolveLink(storyId).kind).toBe("current")
+  })
+
+  it("模型指定另一真实事件的旧Story也不能绕过更新校验", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const first = ["Alpha 第一轮领取开放。", "Alpha 第一轮公告确认领取开放。"].map((text, index) =>
+      casePublished(
+        db,
+        index + 1,
+        text,
+        caseEvent(text, "Alpha", "campaign", "claim", { round: "1" }),
+      ),
+    )
+    const old = await runStoryAggregation({
+      decisions: first,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([modelOutput()]),
+    })
+    const storyId = old.created[0]!.storyId
+    const next = ["Alpha 第二轮领取开放。", "Alpha 第二轮公告确认领取开放。"].map((text, index) =>
+      casePublished(
+        db,
+        index + 3,
+        text,
+        caseEvent(text, "Alpha", "campaign", "claim", { round: "2" }),
+      ),
+    )
+    const malicious = {
+      groups: pairsOutput([3, 4]).groups.map((group) => ({ ...group, existingStoryId: storyId })),
+    }
+    const result = await runStoryAggregation({
+      decisions: next,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([malicious]),
+    })
+    expect(result.updated).toEqual([])
+    expect(result.created).toEqual([])
+    expect(result.failures[0]?.reason).toBe("invalid_model_output")
+    expect(stories.currentSnapshot(storyId)!.revision).toBe(1)
+  })
+
+  it("已识别观点和教程正常保留独立，不进入同事件模型或未知待补计数", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = ["analysis", "tutorial"].map((kind, index) => {
+      const item = published(db, index + 1)
+      item.decision.semantic!.event = {
+        ...item.decision.semantic!.event!,
+        kind: kind as "analysis" | "tutorial",
+      }
+      return item
+    })
+    let calls = 0
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: async () => {
+        calls++
+        throw new Error("不应执行模型")
+      },
+    })
+    expect(result.created).toEqual([])
+    expect(result.pending).toEqual([])
+    expect(calls).toBe(0)
+    expect(decisions.every((item) => item.decision.status === "keep")).toBe(true)
+  })
+
   it("明确折叠但允许综合的材料仍可参与 Story", async () => {
     const { db, stories, aiConfig, runtimeDir } = fixture()
     const result = await runStoryAggregation({
@@ -461,6 +797,7 @@ describe("Story 模型聚合", () => {
     }
     duplicate.decision = {
       ...duplicate.decision,
+      semantic: first.decision.semantic,
       context: {
         ...duplicate.decision.context,
         source_id: first.decision.context.source_id,

@@ -12,6 +12,7 @@ import { FoloChat } from "./chat"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
 import { ProcessingTrial } from "./processing-trial"
+import { ResearchSelectionError } from "./research-selection"
 import { createInformationServer, verifyWebBuild } from "./server"
 import { Store } from "./store"
 import { WebAuthError } from "./web-auth"
@@ -27,11 +28,21 @@ describe("information HTTP server", () => {
   let chat: FoloChat
   let trial: ProcessingTrial
   const authenticate = vi.fn<(token: string) => Promise<void>>()
+  const researchHandler =
+    vi.fn<
+      (
+        method: string,
+        path: string,
+        body: unknown,
+        signal?: AbortSignal,
+      ) => Promise<object | undefined>
+    >()
 
   const productionHtml =
     '<!doctype html><html><body><div id="root"></div><script type="module" src="/assets/app.js"></script></body></html>'
 
   beforeEach(async () => {
+    researchHandler.mockReset().mockResolvedValue(undefined)
     directory = await mkdtemp(join(tmpdir(), "folo-information-server-"))
     webRoot = join(directory, "web")
     await mkdir(join(webRoot, "assets"), { recursive: true })
@@ -92,7 +103,10 @@ describe("information HTTP server", () => {
         trial,
       },
       undefined,
-      [externalApi({ store, configPath: join(directory, "integrations.json") })],
+      [
+        externalApi({ store, configPath: join(directory, "integrations.json") }),
+        { handle: researchHandler },
+      ],
     )
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject)
@@ -154,6 +168,95 @@ describe("information HTTP server", () => {
       400,
     )
     expect(store.automation.draft().revision).toBe(0)
+  })
+
+  it("选材研究使用有正文的授权POST，不能被只读协议或跨域请求触发", async () => {
+    const body = {
+      target: { kind: "selection", entries: [{ sourceKey: "feed/1", entryId: "entry-1" }] },
+    }
+    const endpoint = "/information/v1/research-selections/preview"
+    researchHandler.mockResolvedValue({ preview: { selectionCount: 1, estimatedModelCalls: 0 } })
+    expect(
+      (
+        await request(endpoint, {
+          method: "POST",
+          headers: { ...signedHeaders, Origin: "http://evil.example" },
+          body,
+        })
+      ).status,
+    ).toBe(403)
+    expect(
+      (
+        await request(endpoint, {
+          method: "POST",
+          headers: { ...signedHeaders, "X-Folo-Read": "1" },
+          body,
+        })
+      ).status,
+    ).toBe(400)
+    expect(researchHandler).not.toHaveBeenCalled()
+    const result = await request(endpoint, { method: "POST", headers: signedHeaders, body })
+    expect(result.status).toBe(200)
+    expect(researchHandler).toHaveBeenCalledWith(
+      "POST",
+      "/research-selections/preview",
+      body,
+      expect.any(AbortSignal),
+    )
+  })
+
+  it("选材失效和账号变化明确返回冲突，未知材料返回找不到", async () => {
+    for (const [code, status] of [
+      ["stale_selection", 409],
+      ["owner_changed", 409],
+      ["invalid_target", 404],
+      ["material_missing", 400],
+    ] as const) {
+      researchHandler.mockRejectedValueOnce(new ResearchSelectionError(code))
+      const result = await request("/information/v1/research-selections/run", {
+        method: "POST",
+        headers: signedHeaders,
+        body: {},
+      })
+      expect(result.status).toBe(status)
+      expect(JSON.parse(result.body)).toEqual({ error: code })
+    }
+  })
+
+  it("浏览器断开选材研究POST会取消模型执行", async () => {
+    let started!: () => void, cancelled!: () => void
+    const ready = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const aborted = new Promise<void>((resolve) => {
+      cancelled = resolve
+    })
+    researchHandler.mockImplementation(async (_method, _path, _body, signal) => {
+      started()
+      await new Promise<void>((resolve) =>
+        signal!.addEventListener(
+          "abort",
+          () => {
+            cancelled()
+            resolve()
+          },
+          { once: true },
+        ),
+      )
+      throw new ResearchSelectionError("owner_changed")
+    })
+    const req = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: "/information/v1/research-selections/run",
+      method: "POST",
+      headers: signedHeaders,
+    })
+    req.on("error", () => {})
+    req.end("{}")
+    await ready
+    req.destroy()
+    await aborted
   })
 
   it("外接配置复用主站授权，保存私有密钥后不通过响应泄露", async () => {

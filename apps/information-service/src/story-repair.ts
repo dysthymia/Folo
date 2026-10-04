@@ -8,6 +8,8 @@ import type { AIConfigStore } from "./ai-config"
 import type { CodexUsage } from "./codex"
 import { runCodexJson } from "./codex"
 import type { PublishedDecision } from "./processing-decision"
+import { compatibleEvents, traceableEvent } from "./processing-event"
+import { sourceText } from "./service"
 import type { RepairingStory, StoryRevisionDraft, StoryStore } from "./story-store"
 import { sourceSpanFragmentId } from "./story-store"
 
@@ -59,7 +61,13 @@ export type StoryRepairResult = {
   }>
   pending: Array<{
     storyId: string
-    reason: "rule_unavailable" | "scope_unknown" | "excluded" | "aborted"
+    reason:
+      | "rule_unavailable"
+      | "scope_unknown"
+      | "excluded"
+      | "aborted"
+      | "event_identity_unknown"
+      | "incompatible_event_identity"
   }>
   failures: Array<{ storyId: string; reason: "model_failed" | "invalid_model_output" }>
   usage: CodexUsage
@@ -116,6 +124,37 @@ export async function runStoryRepair(options: StoryRepairOptions): Promise<Story
     if (selected.unknown) {
       result.pending.push({ storyId: target.story.id, reason: "scope_unknown" })
       continue
+    }
+    // 补修也不能绕过事件边界；显式重新识别后的当前原文可恢复旧链接，旧无身份决定等待核对。
+    if (action.action.mode === "same_event") {
+      if (
+        selected.candidates.some((item) => {
+          const kind = item.decision.semantic?.event?.kind
+          return kind === "analysis" || kind === "tutorial"
+        })
+      ) {
+        // 明确非事件的旧成员需要人工拆分，不能误报为缺上下文后反复重识别。
+        result.pending.push({ storyId: target.story.id, reason: "incompatible_event_identity" })
+        continue
+      }
+      const events = selected.candidates.map((item) =>
+        traceableEvent(
+          item.decision.semantic?.event,
+          sourceText(item.input.body.content ?? item.input.body.description ?? ""),
+        ),
+      )
+      if (events.some((event) => !event)) {
+        result.pending.push({ storyId: target.story.id, reason: "event_identity_unknown" })
+        continue
+      }
+      if (
+        events.some((event, index) =>
+          events.slice(0, index).some((prior) => !compatibleEvents(event!, prior!)),
+        )
+      ) {
+        result.pending.push({ storyId: target.story.id, reason: "incompatible_event_identity" })
+        continue
+      }
     }
     if (selected.candidates.length < 2) {
       options.stories.deferRepairAsIndependent(
@@ -276,7 +315,10 @@ function policyAtTarget(
   const semantic = candidate.decision.semantic
   const aggregation =
     instructions.policy.aggregation ??
-    (semantic && semantic.disposition !== "hide" && semantic.aggregation ? "allow" : "deny")
+    // 隐藏独立入口不剥夺综合资格；上下文不完整仍不能进入修复。
+    (semantic && semantic.disposition !== "needs_context" && semantic.aggregation
+      ? "allow"
+      : "deny")
   const semanticRewrite =
     semantic && semantic.disposition !== "hide" && semantic.rewrite ? "allow" : "deny"
   // 旧决定曾因长文或其他安全边界禁止改写时保持 quote-only；目标规则不能凭修复流程扩大权限。
@@ -396,6 +438,9 @@ function draftFromRepair(
     }
   })
   return {
+    ...(action.mode === "same_event"
+      ? { eventIdentity: candidates[0]!.decision.semantic!.event! }
+      : {}),
     title: output.title,
     body: sentences.map((sentence) => sentence.text).join("\n\n"),
     aggregationRuleId: target.story.aggregationRuleId,

@@ -5,6 +5,19 @@ import type { PresentationPolicy } from "@follow/information-core"
 
 import type { AutomationStore } from "./automation-store"
 import { contentIdentity } from "./content-identity"
+import type { Source } from "./folo"
+import type {
+  GeneratedFeedQuery,
+  GeneratedFeedScope,
+  GeneratedReaderItem,
+  GeneratedReaderProjection,
+} from "./generated-feeds"
+import {
+  GENERATED_EVENTS_FEED_ID,
+  generatedEventsFeed,
+  GeneratedFeedStore,
+  matchesGeneratedItem,
+} from "./generated-feeds"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
 import type { ProcessingDedupeStore } from "./processing-dedupe"
 import { activeDedupeActions } from "./processing-dedupe"
@@ -117,6 +130,7 @@ export type ProcessingEntryRole = {
   relatedEntryIds: string[]
   storyId: string | null
   storyTitle: string | null
+  materialCount?: number
 }
 export type ResearchPackReference = {
   inputSeq: number
@@ -228,6 +242,7 @@ function isUuid(value: string): boolean {
 
 // 阅读快照只保存不可变指针和展示顺序，正文与决定仍从已验证的当前版本读取。
 export class ProcessingReadingStore {
+  private readonly generated: GeneratedFeedStore
   constructor(
     private readonly db: DatabaseSync,
     private readonly ownerId: () => string | null,
@@ -267,6 +282,13 @@ export class ProcessingReadingStore {
       CREATE INDEX IF NOT EXISTS processing_reading_snapshot_view
         ON processing_reading_snapshot_members(snapshot_id, kind, hidden, represented, ordinal);
     `)
+    this.generated = new GeneratedFeedStore(
+      db,
+      ownerId,
+      stories,
+      (query) => this.generatedProjection(query),
+      (item) => this.generatedLiveState(item),
+    )
     // 早期快照表没有 pending 占位状态；迁移只追加列，不修改已固定成员。
     const columns = new Set(
       db
@@ -276,6 +298,247 @@ export class ProcessingReadingStore {
     )
     if (!columns.has("entry_status"))
       db.exec("ALTER TABLE processing_reading_snapshot_members ADD COLUMN entry_status TEXT")
+  }
+
+  generatedFeeds() {
+    this.requireOwner()
+    return { feeds: [generatedEventsFeed] }
+  }
+
+  generatedPage(query: GeneratedFeedQuery) {
+    this.requireOwner()
+    try {
+      return this.generated.page(query)
+    } catch (error) {
+      if (error instanceof Error && error.message === "invalid_generated_cursor")
+        throw new ProcessingReadingError("invalid_pagination")
+      if (error instanceof Error && error.message === "generated_snapshot_not_found")
+        throw new ProcessingReadingError("snapshot_not_found")
+      throw error
+    }
+  }
+
+  generatedStoryState(
+    storyId: string,
+    changes?: { read?: boolean; collected?: boolean; revision?: number },
+  ) {
+    return this.generated.readerState(storyId, changes)
+  }
+
+  // 快照资格只受显式纠错或来源撤回影响；后台模型新决定不能改变已经固定的行。
+  private generatedLiveState(item: GeneratedReaderItem) {
+    if (item.kind === "story") {
+      const revision = this.stories.currentSnapshot(item.storyId)
+      const frozen = this.stories.revision(item.storyId, item.revision)
+      return {
+        allowed: Boolean(
+          revision &&
+          frozen &&
+          this.generatedRevisionSafe(frozen) &&
+          item.sourceKeys.every((key) => this.sourceAvailable(key)),
+        ),
+        restored: false,
+        read: item.read,
+        collected: item.collected,
+      }
+    }
+    const override = this.db
+      .prepare("SELECT mode FROM processing_source_item_overrides WHERE source_key=? AND item_id=?")
+      .get(item.sourceKey, item.id)
+    const entry = this.db
+      .prepare("SELECT body FROM entries WHERE source_key=? AND id=?")
+      .get(item.sourceKey, item.id)
+    const state = entry
+      ? (JSON.parse(String(entry.body)) as { read?: boolean | null; collected?: boolean | null })
+      : { read: item.read, collected: item.collected }
+    return {
+      allowed:
+        this.sourceAvailable(item.sourceKey) &&
+        override?.mode !== "hide" &&
+        !this.stories.isMaterialWithdrawn(item.inputSeq),
+      restored: override?.mode === "restore",
+      read: state?.read === true,
+      collected: state?.collected === true,
+    }
+  }
+
+  // 冻结正文也要即时尊重成员撤回、人工移除和原文内容换代。
+  private generatedRevisionSafe(revision: StoryRevision) {
+    return revision.members.every((member) => {
+      const input = this.db
+        .prepare("SELECT current FROM processing_inputs WHERE seq=?")
+        .get(member.inputSeq)
+      const excluded = this.db
+        .prepare(
+          "SELECT 1 FROM story_member_exclusions WHERE story_id=? AND input_seq=? AND active=1",
+        )
+        .get(revision.storyId, member.inputSeq)
+      return input?.current === 1 && !excluded && !this.stories.isMaterialWithdrawn(member.inputSeq)
+    })
+  }
+
+  // 原文与 Story 在同一个范围内排序、过滤和折叠，不在浏览器拼接两个分页结果。
+  private generatedProjection(query: GeneratedFeedScope): GeneratedReaderProjection {
+    const ownerId = this.requireOwner()
+    const sources = this.db
+      .prepare("SELECT body FROM sources WHERE active=1")
+      .all()
+      .map((row) => JSON.parse(String(row.body)) as Source)
+    const sourceByKey = new Map(sources.map((source) => [source.key, source]))
+    const scoped = (sourceKey: string) => {
+      if (sourceKey.startsWith("generated:")) return false
+      if (query.sourceKeys && !query.sourceKeys.includes(sourceKey)) return false
+      if (query.category) {
+        const source = sourceByKey.get(sourceKey)
+        if (
+          !source ||
+          source.view !== query.category.view ||
+          source.category !== query.category.name
+        )
+          return false
+      }
+      // 固定来源和分类已明确指定范围；仅普通视图从服务端已同步清单动态解析。
+      if (!query.sourceKeys && !query.category && typeof query.view === "number") {
+        const source = sourceByKey.get(sourceKey)
+        if (!source || source.view !== query.view) return false
+      }
+      return this.sourceAvailable(sourceKey)
+    }
+    const inputs = this.automation
+      .inputs()
+      .filter((input) => input.current && scoped(input.sourceKey))
+    const published = this.processingState.published().filter((item) => item.input.current)
+    const allDecisions = new Map(published.map((item) => [item.input.seq, item]))
+    const overrides = new Map(this.processingState.overrides().map((item) => [item.inputSeq, item]))
+    const scopedSeqs = new Set(inputs.map((input) => input.seq))
+    const storyIdsBySeq = new Map<number, string[]>()
+    const storyItems: GeneratedReaderItem[] = []
+    const storyMembers = new Map<string, number[]>()
+    for (const { story, revision } of this.currentStories(allDecisions)) {
+      if (!revision.members.some((member) => scopedSeqs.has(member.inputSeq))) continue
+      const members = revision.members.flatMap((member) => {
+        const published = allDecisions.get(member.inputSeq)
+        return published ? [published] : []
+      })
+      const status = this.stories.readStatus(story.id, ownerId)
+      // 材料数由服务器按原文身份计数，同一原帖跨订阅上下文不会重复计数。
+      const materialCount = new Set(members.map((item) => contentIdentity(item.input.body))).size
+      const item: GeneratedReaderItem = {
+        kind: "story",
+        origin: "generated",
+        generatedFeedId: GENERATED_EVENTS_FEED_ID,
+        id: story.id,
+        storyId: story.id,
+        revision: revision.revision,
+        substantiveRevision: revision.substantiveRevision,
+        title: revision.title,
+        summary: revision.body,
+        publishedAt: story.createdAt,
+        updatedAt: story.updatedAt,
+        read: !status.unread,
+        collected: this.stories.isCollected(story.id, ownerId),
+        hasImportantUpdate: status.unread && status.readSubstantiveRevision > 0,
+        materialCount,
+        topics: [...new Set(members.flatMap((item) => item.decision.labels))].sort(),
+        sourceKeys: [...new Set(members.map((item) => item.input.sourceKey))].sort(),
+      }
+      for (const member of members)
+        storyIdsBySeq.set(member.input.seq, [
+          ...(storyIdsBySeq.get(member.input.seq) ?? []),
+          story.id,
+        ])
+      if (matchesGeneratedItem(item, query)) {
+        storyItems.push(item)
+        storyMembers.set(
+          story.id,
+          members.map((member) => member.input.seq),
+        )
+      }
+    }
+    const ready = inputs.flatMap((input): GeneratedReaderItem[] => {
+      const result = allDecisions.get(input.seq)
+      if (!result || result.decision.status === "needs_context") return []
+      const latestEntry = this.db
+        .prepare("SELECT body FROM entries WHERE source_key=? AND id=?")
+        .get(input.sourceKey, input.itemId)
+      const state = latestEntry
+        ? (JSON.parse(String(latestEntry.body)) as {
+            read?: boolean | null
+            collected?: boolean | null
+          })
+        : input.body
+      const item: GeneratedReaderItem = {
+        kind: "entry",
+        origin: "original",
+        id: input.itemId,
+        inputSeq: input.seq,
+        sourceKey: input.sourceKey,
+        decisionId: result.decisionId,
+        title: result.decision.title ?? input.body.title,
+        summary: result.decision.summary ?? "",
+        publishedAt: input.body.publishedAt,
+        updatedAt: input.body.updatedAt ?? input.body.publishedAt,
+        read: state.read === true,
+        collected: state.collected === true,
+        materialCount: 1,
+        topics: result.decision.labels,
+        sourceKeys: [input.sourceKey],
+        storyIds: storyIdsBySeq.get(input.seq) ?? [],
+      }
+      return matchesGeneratedItem(item, query) ? [item] : []
+    })
+    const reservoir = [...storyItems, ...ready]
+    const visible = ready.filter(
+      (item) =>
+        item.kind === "entry" &&
+        !this.entryHidden(overrides.get(item.inputSeq), allDecisions.get(item.inputSeq)?.decision),
+    )
+    // 单一来源页保留原文与关联；全部和分类只在当前投影已包含 Story 时折叠其成员。
+    const preserveSourceEntries = query.sourceKeys?.length === 1 && !query.category
+    const represented = new Set(preserveSourceEntries ? [] : [...storyMembers.values()].flat())
+    let entries = visible.filter(
+      (item) =>
+        item.kind === "entry" &&
+        (!represented.has(item.inputSeq) ||
+          overrides.get(item.inputSeq)?.mode === "restore" ||
+          allDecisions.get(item.inputSeq)?.decision.policy.standalone === "always"),
+    )
+    // 语义重复只在保留项也确实位于本阅读范围、筛选及快照时才折叠。
+    if (!preserveSourceEntries) {
+      const visibleSeqs = new Set(
+        entries.flatMap((item) => (item.kind === "entry" ? [item.inputSeq] : [])),
+      )
+      const merged = new Set(
+        this.dedupe
+          .merges(this.activeDedupeFingerprints())
+          .filter((merge) => visibleSeqs.has(merge.keep.seq) && visibleSeqs.has(merge.hide.seq))
+          .map((merge) => merge.hide.seq),
+      )
+      entries = entries.filter(
+        (item) =>
+          item.kind !== "entry" ||
+          !merged.has(item.inputSeq) ||
+          overrides.get(item.inputSeq)?.mode === "restore" ||
+          allDecisions.get(item.inputSeq)?.decision.policy.standalone === "always",
+      )
+    }
+    const compare = (left: GeneratedReaderItem, right: GeneratedReaderItem) =>
+      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
+      left.kind.localeCompare(right.kind) ||
+      left.id.localeCompare(right.id) ||
+      left.sourceKeys.join().localeCompare(right.sourceKeys.join())
+    const counts = {
+      pending: inputs.filter((input) => ["pending", "running"].includes(input.status)).length,
+      failed: inputs.filter((input) => input.status === "failed").length,
+      needsContext: inputs.filter(
+        (input) => allDecisions.get(input.seq)?.decision.status === "needs_context",
+      ).length,
+    }
+    return {
+      items: (query.mode === "stories" ? storyItems : [...storyItems, ...entries]).sort(compare),
+      reservoir: (query.mode === "stories" ? storyItems : reservoir).sort(compare),
+      counts,
+    }
   }
 
   // 首次读取固定一份快照；后续自动读取同一份，只有调用 refresh 才会吸收后台新结果。
@@ -497,7 +760,7 @@ export class ProcessingReadingStore {
    * 时间线内联综述摘要。判定口径与 `researchPack` 完全一致（同一个 `resolveLink` 与
    * `revisionAvailable`），只是把引用按句子分组，并补上更新时间与来源数。
    */
-  storyDigest(storyId: string): StoryDigest {
+  storyDigest(storyId: string, requestedRevision?: number): StoryDigest {
     this.requireOwner()
     if (!isUuid(storyId)) throw new ProcessingReadingError("invalid_snapshot")
     const unavailable = (status: "repairing" | "missing"): StoryDigest => ({
@@ -515,13 +778,22 @@ export class ProcessingReadingStore {
     const link = this.stories.resolveLink(storyId)
     if (link.kind === "missing") return unavailable("missing")
     if (link.kind !== "current") return unavailable("repairing")
+    // 正文跟随列表冻结版本；材料撤回或输入失效时仍即时拒绝旧版本阅读。
+    const revision =
+      requestedRevision === undefined
+        ? link.revision
+        : this.stories.revision(storyId, requestedRevision)
+    if (!revision) return unavailable("missing")
+    if (!this.generatedRevisionSafe(revision)) return unavailable("repairing")
+    if (revision.sourceSpans.some((span) => this.stories.isMaterialWithdrawn(span.inputSeq)))
+      return unavailable("repairing")
     const decisionBySeq = new Map(
       this.processingState.published().map((published) => [published.input.seq, published]),
     )
-    if (!this.revisionAvailable(link.revision, decisionBySeq)) return unavailable("repairing")
+    if (!this.revisionAvailable(revision, decisionBySeq)) return unavailable("repairing")
 
     const sourceBySeq = new Map<number, StoryDigestSource>()
-    for (const span of link.revision.sourceSpans) {
+    for (const span of revision.sourceSpans) {
       if (sourceBySeq.has(span.inputSeq)) continue
       const input = decisionBySeq.get(span.inputSeq)?.input
       if (!input) continue
@@ -533,12 +805,12 @@ export class ProcessingReadingStore {
         url: input.body.url,
       })
     }
-    const spanById = new Map(link.revision.sourceSpans.map((span) => [span.id, span]))
-    const sentences = link.revision.sentences.map((sentence) => ({
+    const spanById = new Map(revision.sourceSpans.map((span) => [span.id, span]))
+    const sentences = revision.sentences.map((sentence) => ({
       id: sentence.id,
       text: sentence.text,
       citations: sentence.citationIds.flatMap((citationId) => {
-        const citation = link.revision.citations.find((item) => item.id === citationId)
+        const citation = revision.citations.find((item) => item.id === citationId)
         const span = citation ? spanById.get(citation.sourceSpanId) : undefined
         const input = span ? decisionBySeq.get(span.inputSeq)?.input : undefined
         if (!citation || !span || !input) return []
@@ -556,11 +828,16 @@ export class ProcessingReadingStore {
     return {
       status: "ready",
       storyId,
-      revision: link.revision.revision,
-      title: link.revision.title,
-      body: link.revision.body,
-      updatedAt: link.story.updatedAt,
-      sourceCount: sourceBySeq.size,
+      revision: revision.revision,
+      title: revision.title,
+      body: revision.body,
+      updatedAt: revision.createdAt,
+      sourceCount: new Set(
+        [...sourceBySeq.keys()].flatMap((seq) => {
+          const input = decisionBySeq.get(seq)?.input
+          return input ? [contentIdentity(input.body)] : []
+        }),
+      ).size,
       sources: [...sourceBySeq.values()],
       sentences,
       uncitedSentenceCount: sentences.filter((sentence) => sentence.citations.length === 0).length,
@@ -825,7 +1102,19 @@ export class ProcessingReadingStore {
       }
     }
 
-    return [...roles.values()].sort((left, right) => left.inputSeq - right.inputSeq)
+    return [...roles.values()]
+      .map((role) => ({
+        ...role,
+        materialCount: role.storyId
+          ? new Set(
+              (this.stories.currentSnapshot(role.storyId)?.members ?? []).flatMap((member) => {
+                const input = inputBySeq.get(member.inputSeq)
+                return input ? [contentIdentity(input.body)] : []
+              }),
+            ).size
+          : role.relatedEntryIds.length + 1,
+      }))
+      .sort((left, right) => left.inputSeq - right.inputSeq)
   }
 
   /**

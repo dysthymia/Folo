@@ -32,6 +32,8 @@ describe("规则 AI 试运行", () => {
     aggregation: false,
     rewrite: true,
     labels: [],
+    // 试运行与正式请求使用同一必填身份契约；未知事件显式返回null。
+    event: null,
     facts: [{ text: "原文明确支持的事实。", evidenceId: "E000001", kind: "fact" }],
   }
   beforeEach(async () => {

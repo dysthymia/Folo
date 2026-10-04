@@ -411,6 +411,11 @@ export class AutomationStore {
           entry.updatedAt ?? null,
           entry.mediaLength ?? null,
           entry.attachmentsDuration ?? null,
+          // 上下文补齐会产生新材料版本，避免沿用旧待补状态。
+          entry.context ?? null,
+          entry.imageCount ?? null,
+          // 外链正文与明确获取状态也是材料版本，失败不能沿用旧完整快照。
+          entry.linkedMaterials ?? null,
           entry.collected ?? null,
           // List 返回的原始 feed 身份补齐后需要重新匹配来源条件。
           entry.feedId,

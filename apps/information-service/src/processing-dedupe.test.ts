@@ -182,6 +182,8 @@ describe("语义去重的服务端执行与角色落地", () => {
         relatedEntryIds: ["newer"],
         storyId: null,
         storyTitle: null,
+        // 服务端材料计数包含保留条目本身，不依赖客户端已加载数量。
+        materialCount: 2,
       },
       {
         itemId: "newer",
@@ -191,6 +193,8 @@ describe("语义去重的服务端执行与角色落地", () => {
         relatedEntryIds: ["older"],
         storyId: null,
         storyTitle: null,
+        // 服务端材料计数包含保留条目本身，不依赖客户端已加载数量。
+        materialCount: 2,
       },
     ])
 

@@ -32,6 +32,11 @@ if database.exists():
         for table in ("processing_inputs", "processing_schedule_triggers"):
             if table in tables and connection.execute(f"SELECT COUNT(*) FROM {table} WHERE status='running'").fetchone()[0]:
                 raise SystemExit("有信息处理任务正在运行，请等待完成后再安装。")
+        # 显式选材研究也会付费调用模型，不能因更新服务中断正在执行的研究。
+        if "research_records" in tables and connection.execute(
+            "SELECT COUNT(*) FROM research_records WHERE json_extract(body, '$.target.kind')='selection' AND json_extract(body, '$.status')='running'"
+        ).fetchone()[0]:
+            raise SystemExit("有选材研究正在运行，请等待完成后再安装。")
 support = home / "Library/Application Support/FoloLocal"
 logs = home / "Library/Logs/FoloInformation"
 for directory in (support, logs, home / "Library/LaunchAgents"):

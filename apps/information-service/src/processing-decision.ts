@@ -2,6 +2,11 @@ import type { PresentationPolicy, RuleInput } from "@follow/information-core"
 import { z } from "zod"
 
 import type { ProcessingInput } from "./automation-store"
+import {
+  eventIdentitySchema,
+  eventSelectionForCatalog,
+  eventSelectionSchema,
+} from "./processing-event"
 import type { EvidenceCatalog } from "./processing-evidence"
 import { evidenceFactSelectionSchema, evidenceFactsSelectionSchema } from "./processing-evidence"
 
@@ -18,6 +23,7 @@ const entryModelBaseSchema = z.object({
 })
 export const entryModelOutputSchema = entryModelBaseSchema
   .extend({
+    event: eventIdentitySchema.nullable().optional(),
     facts: z
       .array(
         z
@@ -53,7 +59,10 @@ export function applyEntryDisplay(
 }
 // 模型只选择证据编号；持久化前由服务端还原为上面的既有 quote 结构。
 export const entryModelSelectionSchema = entryModelBaseSchema
-  .extend({ facts: z.array(evidenceFactSelectionSchema).max(30) })
+  .extend({
+    event: eventSelectionSchema.nullable(),
+    facts: z.array(evidenceFactSelectionSchema).max(30),
+  })
   .strict()
 export type EntryModelSelection = z.infer<typeof entryModelSelectionSchema>
 
@@ -62,6 +71,7 @@ export function createEntryModelSelectionSchema(entryId: string, catalog: Eviden
   return entryModelBaseSchema
     .extend({
       entryId: z.enum([entryId]),
+      event: eventSelectionForCatalog(catalog),
       facts: evidenceFactsSelectionSchema(catalog, 30),
     })
     .strict()

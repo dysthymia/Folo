@@ -3,6 +3,7 @@ import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
 import type { SourceEntry } from "./folo"
+import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingFeedbackApi } from "./processing-feedback-api"
@@ -250,6 +251,25 @@ export function processingApi(
   if (feedback !== undefined) return feedback
   const research = researchApi(store, method, path, body)
   if (research !== undefined) return research
+  if (path === "/processing/generated-feeds" && method === "GET")
+    return store.reading.generatedFeeds()
+  if (path === "/processing/generated-feed/items" && (method === "POST" || method === "GET"))
+    return store.reading.generatedPage(generatedFeedQuerySchema.parse(body ?? {}))
+  const storyReaderPath = /^\/processing\/stories\/([^/]+)\/reader-state$/.exec(path)
+  if (storyReaderPath && (method === "POST" || method === "GET")) {
+    const changes =
+      method === "POST"
+        ? z
+            .object({
+              read: z.boolean().optional(),
+              collected: z.boolean().optional(),
+              revision: positiveInteger.optional(),
+            })
+            .strict()
+            .parse(body)
+        : undefined
+    return store.reading.generatedStoryState(storyReaderPath[1]!, changes)
+  }
   if (path === "/schedule") {
     if (method === "GET") return store.schedule.snapshot()
     if (method === "PUT") {
@@ -308,9 +328,14 @@ export function processingApi(
   if (researchPackPath && method === "GET")
     return store.reading.researchPack(researchPackPath[1]!) satisfies ResearchPackResponse
   const storyDigestPath = /^\/processing\/stories\/([^/]+)\/digest$/.exec(path)
-  if (storyDigestPath && method === "GET")
-    // 时间线内联综述：口径与 research-pack 一致，补充更新时间与按句分组的引用。
-    return store.reading.storyDigest(storyDigestPath[1]!) satisfies StoryDigestResponse
+  if (storyDigestPath && (method === "GET" || method === "POST")) {
+    // 指定版本读取正文，避免后台追加版本改变正在阅读的内容。
+    const requested =
+      method === "POST"
+        ? z.object({ revision: positiveInteger.optional() }).strict().parse(body).revision
+        : undefined
+    return store.reading.storyDigest(storyDigestPath[1]!, requested) satisfies StoryDigestResponse
+  }
   if (path === "/processing/roles" && method === "GET")
     // 时间线角色投影不受计划范围限制：时间线覆盖全部订阅，只取当前 input。
     return { roles: store.reading.roles() } satisfies ProcessingEntryRolesResponse
@@ -489,6 +514,12 @@ export function processingApi(
       .parse(body)
     owner(store)
     return new StoryCorrectionService(store.stories).merge(input)
+  }
+  const splitPreviewPath = /^\/stories\/([^/]+)\/split-preview$/.exec(path)
+  if (splitPreviewPath && method === "GET") {
+    // 人工确认前只读返回冻结成员，不触发重处理、恢复旧正文或改变Story状态。
+    owner(store)
+    return store.stories.independentSplitPreview(z.uuid().parse(splitPreviewPath[1]))
   }
   const splitPath = /^\/stories\/([^/]+)\/split$/.exec(path)
   if (splitPath && method === "POST") {

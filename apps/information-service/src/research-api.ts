@@ -61,13 +61,16 @@ export function researchApi(
             return `- ${citation.id}：句子 ${citation.sentenceId} → 材料 ${span.inputSeq} / 片段 ${span.fragmentId}\n> ${span.quote.replaceAll("\n", "\n> ")}`
           })
           .join("\n")}`
-      } else {
+      } else if (request.target.kind === "entry") {
         const seq = request.target.inputSeq
         const published = decisions.find((decision) => decision.input.seq === seq)
         if (!published) throw new AutomationError("invalid_target")
         title = published.decision.title
         summary = published.decision.summary
         materials = [published]
+      } else {
+        // 显式历史选材由独立预览/执行入口核验，不能冒充已有正式处理结果准备包。
+        throw new AutomationError("invalid_target")
       }
       const markdown = [
         `# ${title}`,
