@@ -10,7 +10,7 @@ import {
 } from "./presets"
 
 describe("共享 Prompt 预设目录", () => {
-  it("完整提供 P00 至 P15 的稳定 ID、版本和中文元数据", () => {
+  it("保留 P00 至 P15 并增加个性化预设的稳定 ID、版本和中文元数据", () => {
     expect(presetIds).toEqual([
       "P00",
       "P01",
@@ -28,8 +28,17 @@ describe("共享 Prompt 预设目录", () => {
       "P13",
       "P14",
       "P15",
+      "G00",
+      "R10",
+      "R20",
+      "R30",
+      "R40",
+      "R50",
+      "R60",
+      "R90-C",
+      "R90-U",
     ])
-    expect(promptPresets).toHaveLength(16)
+    expect(promptPresets).toHaveLength(25)
     for (const item of promptPresets) {
       expect(item.version).toBe(1)
       expect(item.name).not.toBe("")
