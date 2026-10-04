@@ -32,6 +32,7 @@ import { useFeedSafeUrl } from "~/hooks/common/useFeedSafeUrl"
 import { useBlockActions } from "~/modules/ai-chat/store/hooks"
 import { BlockSliceAction } from "~/modules/ai-chat/store/slices/block.slice"
 import { COMMAND_ID } from "~/modules/command/commands/id"
+import { ResearchSelectionControls } from "~/modules/information/ResearchSelectionControls"
 
 import { setEntryContentScrollToTop } from "./atoms"
 import { ApplyEntryActions } from "./components/ApplyEntryActions"
@@ -217,6 +218,8 @@ const EntryContentImpl: Component<EntryContentProps> = ({
             >
               <ApplyEntryActions entryId={entryId} key={entryId} />
               <EntryPrintHeader entryId={entryId} />
+              {/* 原文选材独立于日常已读跳过，只有用户预览并执行后才做一次研究。 */}
+              <ResearchSelectionControls entryId={entryId} />
 
               {!content && !isInReadabilityMode ? (
                 <div className="center mt-16 min-w-0">

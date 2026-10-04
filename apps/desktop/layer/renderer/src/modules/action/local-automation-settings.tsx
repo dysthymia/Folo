@@ -14,8 +14,10 @@ import { useDialog } from "~/components/ui/modal/stacked/hooks"
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import { notifyLocalAutomationChanged } from "./local-automation-events"
 import { LocalAutomationPreferences } from "./local-automation-preferences"
+import { LocalAutomationQueue } from "./local-automation-queue"
 import { LocalRuleActions } from "./local-rule-actions"
 import { localRuleUsesAI, newLocalRule, replaceLocalRule } from "./local-rule-model"
+import { PersonalizedRulePackPanel } from "./personalized-rule-pack-panel"
 import type {
   EffectiveProcessing,
   ProcessingEditor,
@@ -50,7 +52,8 @@ export function LocalAutomationSettings() {
   const [upgrade, setUpgrade] = useState<RuleUpgrade | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [unsupported, setUnsupported] = useState<number | null>(null)
-  const [panel, setPanel] = useState<"rules" | "settings">("rules")
+  const [panel, setPanel] = useState<"rules" | "settings" | "templates" | "queue">("rules")
+  const [packSaved, setPackSaved] = useState(false)
   const [error, setError] = useState<"request" | "conflict" | "invalid" | "migration" | null>(null)
   const [status, setStatus] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -75,6 +78,8 @@ export function LocalAutomationSettings() {
     setUnsupported(null)
     setError(null)
     setStatus(false)
+    setPackSaved(false)
+    setPanel("rules")
     setLoading(true)
     setBusy(false)
     if (!ownerId) {
@@ -342,6 +347,32 @@ export function LocalAutomationSettings() {
             type="button"
             className={processingButtonClass}
             disabled={!editor || busy}
+            onClick={() =>
+              guarded(() => {
+                setPanel("templates")
+                setSelection(null)
+              })
+            }
+          >
+            {t("automation.pack.title")}
+          </button>
+          <button
+            type="button"
+            className={processingButtonClass}
+            disabled={!editor || busy}
+            onClick={() =>
+              guarded(() => {
+                setPanel("queue")
+                setSelection(null)
+              })
+            }
+          >
+            {t("processing.report.queue_title")}
+          </button>
+          <button
+            type="button"
+            className={processingButtonClass}
+            disabled={!editor || busy}
             onClick={create}
           >
             {t("automation.editor.create")}
@@ -385,6 +416,11 @@ export function LocalAutomationSettings() {
           {t("automation.editor.saved")}
         </p>
       )}
+      {packSaved && (
+        <p role="status" className="text-sm text-text-secondary">
+          {t("automation.pack.saved_draft")}
+        </p>
+      )}
       {upgrade?.required && (
         <div className="space-y-2 rounded-xl border border-orange p-4 text-sm">
           <p>{t("automation.editor.upgrade_scope", { count: upgrade.sourceCount })}</p>
@@ -420,6 +456,24 @@ export function LocalAutomationSettings() {
           migrationRequired={upgrade?.required ?? false}
         />
       )}
+      {editor && panel === "templates" && (
+        <PersonalizedRulePackPanel
+          key={ownerId}
+          editor={editor}
+          onClose={() => setPanel("rules")}
+          onSaved={(saved) => {
+            // 全包仅加入草稿；不把未审查的规则和私人全局偏好一次性发布。
+            setEditor({ ...editor, ...saved })
+            setPackSaved(true)
+            setPanel("rules")
+            const added = saved.config.rules.find(
+              (rule) => !editor.config.rules.some((existing) => existing.id === rule.id),
+            )
+            if (added) choose(added)
+          }}
+        />
+      )}
+      {panel === "queue" && <LocalAutomationQueue ownerId={ownerId} />}
       {editor && panel === "rules" && (
         <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
           <nav

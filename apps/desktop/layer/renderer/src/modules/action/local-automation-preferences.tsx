@@ -31,9 +31,11 @@ export function LocalAutomationPreferences({
   migrationRequired: boolean
 }) {
   const { t } = useTranslation("app")
-  const initial = effective?.config?.global.markdown ?? editor.config.global.markdown
+  // 展示已保存的草稿（含模板G00），启用比较单独使用发布版本，不用旧正文遮住待启用内容。
+  const initial = editor.config.global.markdown
   const [markdown, setMarkdown] = useState(initial)
   const [baseline, setBaseline] = useState(initial)
+  const [activeMarkdown, setActiveMarkdown] = useState(effective?.config?.global.markdown ?? null)
   const [schedule, setSchedule] = useState<ProcessingSchedule | null>(null)
   const [times, setTimes] = useState("")
   const [timeZone, setTimeZone] = useState("")
@@ -92,6 +94,7 @@ export function LocalAutomationPreferences({
       if (controller.signal.aborted) return
       onSaved(result)
       setBaseline(markdown)
+      setActiveMarkdown(result.effectiveConfig.global.markdown)
       setSaved(true)
     } catch {
       if (!controller.signal.aborted) setError(true)
@@ -158,7 +161,7 @@ export function LocalAutomationPreferences({
         <p className="text-xs text-text-secondary">{t("automation.editor.global_hint")}</p>
         <button
           type="button"
-          disabled={markdown === baseline}
+          disabled={markdown === activeMarkdown}
           className={processingButtonClass}
           onClick={() => void saveGlobal()}
         >

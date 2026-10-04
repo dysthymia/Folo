@@ -520,6 +520,12 @@ export async function readingRequest<T>(
   const parsed = schema.safeParse(await response.json())
   if (!parsed.success) throw new ReadingRequestError("request")
   signal.throwIfAborted()
+  // 人工纠错立即失效当前阅读投影；查询分页和后台新结果不触发列表换位。
+  if (
+    body !== undefined &&
+    /(?:\/override|\/undo|\/withdraw|\/remove-member|\/split|^stories\/merge)$/.test(path)
+  )
+    window.dispatchEvent(new Event("processing-reading-invalidated"))
   return parsed.data
 }
 
@@ -546,11 +552,13 @@ export const loadEntryOverrides = async (signal: AbortSignal) => {
 export const loadResearchPack = (storyId: string, signal: AbortSignal) =>
   readingRequest(`research-pack/${encodeURIComponent(storyId)}`, researchPackSchema, signal)
 
-export const loadStoryDigest = (storyId: string, signal: AbortSignal) =>
+// 指定修订时读取快照正文，后台新版本不能静默替换正在阅读的文章。
+export const loadStoryDigest = (storyId: string, signal: AbortSignal, revision?: number) =>
   readingRequest(
     `processing/stories/${encodeURIComponent(storyId)}/digest`,
     storyDigestSchema,
     signal,
+    revision ? { revision } : undefined,
   )
 
 export const mutationSchemas = {

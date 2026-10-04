@@ -28,6 +28,7 @@ import { useBackHome } from "~/hooks/biz/useNavigateEntry"
 import { useReduceMotion } from "~/hooks/biz/useReduceMotion"
 import { parseView, useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
 import { useTimelineList } from "~/hooks/biz/useTimelineList"
+import { GeneratedFeedLink } from "~/modules/information/GeneratedFeedLink"
 import { useSettingModal } from "~/modules/settings/modal/useSettingModal"
 
 import { WindowUnderBlur } from "../../components/ui/background"
@@ -150,6 +151,7 @@ export function SubscriptionColumn({
         <TabsRow />
       </div>
       <SubscriptionLimitNotice />
+      <GeneratedFeedLink />
       <div
         className={cn("relative mt-1 flex size-full", !shouldFreeUpSpace && "overflow-hidden")}
         ref={carouselRef}

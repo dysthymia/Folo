@@ -9,12 +9,29 @@ const isoDateTime = z.iso.datetime({ offset: true })
 const targetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("story"), storyId: z.uuid() }).strict(),
   z.object({ kind: z.literal("entry"), inputSeq: z.number().int().positive() }).strict(),
+  z
+    .object({
+      kind: z.literal("selection"),
+      entries: z
+        .array(
+          z
+            .object({
+              sourceKey: z.string().min(1),
+              entryId: z.string().min(1),
+              inputSeq: z.number().int().positive().optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(20),
+    })
+    .strict(),
 ])
 export const researchPackSchema = z
   .object({
     id: z.uuid(),
     revision: z.number().int().positive(),
-    status: z.enum(["prepared", "submitted", "completed"]),
+    status: z.enum(["prepared", "submitted", "completed", "running", "failed"]),
     target: targetSchema,
     question: z.string(),
     goal: z.string(),
@@ -25,6 +42,42 @@ export const researchPackSchema = z
     updatedAt: isoDateTime,
     submissionReference: z.string().nullable(),
     resultReference: z.string().nullable(),
+    // 一次性研究的真实结果与用量是可选字段，旧研究材料仍按原契约读取。
+    result: z
+      .object({
+        title: z.string(),
+        sentences: z.array(
+          z
+            .object({
+              id: z.string(),
+              text: z.string(),
+              citations: z.array(
+                z.object({ materialId: z.string().min(1), quote: z.string() }).strict(),
+              ),
+            })
+            .strict(),
+        ),
+        limitations: z.array(z.string()),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+    metrics: z
+      .object({
+        modelCalls: z.number().int().nonnegative(),
+        durationMs: z.number().nonnegative(),
+        usage: z
+          .object({
+            inputTokens: z.number().nonnegative(),
+            outputTokens: z.number().nonnegative(),
+            cachedInputTokens: z.number().nonnegative(),
+          })
+          .strict()
+          .nullable(),
+      })
+      .strict()
+      .optional(),
+    errorCode: z.string().nullable().optional(),
   })
   .strict()
 export const researchPacksResponseSchema = z.object({ packs: z.array(researchPackSchema) }).strict()

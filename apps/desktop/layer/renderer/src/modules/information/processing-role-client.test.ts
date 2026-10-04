@@ -15,6 +15,19 @@ import {
 } from "./processing-role-client"
 
 vi.mock("~/lib/auth", () => ({ oneTimeToken: { generate: vi.fn() } }))
+const account = vi.hoisted(() => ({
+  owner: "owner",
+  listener: null as null | ((state: { whoami: { id: string } }) => void),
+}))
+vi.mock("@follow/store/user/store", () => ({
+  useUserStore: {
+    getState: () => ({ whoami: { id: account.owner } }),
+    subscribe: (listener: typeof account.listener) => {
+      account.listener = listener
+      return () => {}
+    },
+  },
+}))
 
 const roles = [
   {
@@ -38,6 +51,8 @@ const roles = [
 ]
 
 afterEach(() => {
+  account.owner = "owner"
+  account.listener?.({ whoami: { id: account.owner } })
   vi.clearAllMocks()
   vi.unstubAllGlobals()
   entryProcessingRoleActions.clearServiceRoles()
@@ -47,8 +62,34 @@ afterEach(() => {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe("processing role client", () => {
+  it("账号切换会中止旧角色读取，等待旧轮询的人工刷新不继续发请求", async () => {
+    vi.mocked(oneTimeToken.generate).mockResolvedValue({ data: { token: "once" } } as Awaited<
+      ReturnType<typeof oneTimeToken.generate>
+    >)
+    let settle: (response: Response) => void = () => {}
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          settle = resolve
+        }),
+    )
+    vi.stubGlobal("fetch", fetcher)
+    const first = syncServiceProcessingRoles()
+    await flush()
+    const forced = refreshServiceProcessingRoles()
+    account.owner = "other"
+    account.listener?.({ whoami: { id: account.owner } })
+    settle(new Response(JSON.stringify({ roles })))
+    await Promise.all([first, forced])
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(resolveEntryProcessingRole("entry-c")).toBeNull()
+  })
   it("严格校验角色投影，拒绝未声明字段与非法角色类型", () => {
     expect(processingEntryRolesResponseSchema.safeParse({ roles }).success).toBe(true)
+    expect(
+      processingEntryRolesResponseSchema.safeParse({ roles: [{ ...roles[0], materialCount: 3 }] })
+        .success,
+    ).toBe(true)
     expect(
       processingEntryRolesResponseSchema.safeParse({ roles: [{ ...roles[0], unexpected: true }] })
         .success,

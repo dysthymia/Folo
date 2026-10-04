@@ -1,3 +1,4 @@
+import { useWhoami } from "@follow/store/user/hooks"
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -6,33 +7,59 @@ import { smartReadingPath } from "~/modules/information/reading-mode-link"
 
 import type { StoryDigest } from "./processing-reader-client"
 import { loadStoryDigest, ReadingRequestError } from "./processing-reader-client"
+import { StoryReadingActions } from "./StoryReadingActions"
 
 /**
  * 时间线内联综述摘要（§6 场景二）。
  *
  * 场景二判据要求「在 Blockchain 分类列表内直接看到整合条目，不跳页」，而且条目要显示
- * 来源数 ≥2、句段引用、更新时间。这里把综述正文、按句分组的引用与来源清单都放在
+ * 材料数量、句段引用、更新时间。这里把综述正文、按句分组的引用与来源清单都放在
  * 列表就地打开的面板里，只有需要修改综述时才去工作台。
  */
 export function StoryDigestPanel({
   storyId,
   storyTitle,
+  revision,
+  embedded = false,
 }: {
   storyId: string
   storyTitle?: string
+  revision?: number
+  embedded?: boolean
 }) {
   const { t } = useTranslation("app")
+  const owner = useWhoami()?.id
+  const context = JSON.stringify([owner, storyId, revision])
+  const [loadedContext, setLoadedContext] = useState<string | null>(null)
+  const [manualRevision, setManualRevision] = useState(0)
   const [digest, setDigest] = useState<StoryDigest | null>(null)
   const [busy, setBusy] = useState(true)
   const [failed, setFailed] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    const invalidate = () => {
+      // 人工撤回后先收起旧引用，重新核验当前版本；普通后台更新不替换正在读的正文。
+      controllerRef.current?.abort()
+      setDigest(null)
+      setLoadedContext(null)
+      setManualRevision((value) => value + 1)
+    }
+    window.addEventListener("processing-reading-invalidated", invalidate)
+    return () => window.removeEventListener("processing-reading-invalidated", invalidate)
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
     controllerRef.current = controller
     setBusy(true)
+    // 私人正文随账号隔离，相同深链不能沿用上一账号的缓存。
+    setDigest(null)
     setFailed(false)
-    loadStoryDigest(storyId, controller.signal)
+    if (!owner) {
+      setBusy(false)
+      return () => controller.abort()
+    }
+    loadStoryDigest(storyId, controller.signal, revision)
       .then((result) => {
         if (!controller.signal.aborted) setDigest(result)
       })
@@ -41,15 +68,19 @@ export function StoryDigestPanel({
         setFailed(cause instanceof ReadingRequestError && cause.kind === "authorization")
       })
       .finally(() => {
-        if (!controller.signal.aborted) setBusy(false)
+        if (!controller.signal.aborted) {
+          setLoadedContext(context)
+          setBusy(false)
+        }
       })
     return () => controller.abort()
-  }, [storyId])
+  }, [storyId, revision, owner, context, manualRevision])
 
-  if (busy) return <p className="text-sm text-text-secondary">{t("processing.digest.loading")}</p>
+  // 新账号或新版本的首帧也不能展示旧正文，不能只依赖effect稍后清空。
+  if (busy || loadedContext !== context)
+    return <p className="text-sm text-text-secondary">{t("processing.digest.loading")}</p>
   if (failed || !digest) return <p role="alert">{t("processing.reader.error.request")}</p>
-  if (digest.status !== "ready")
-    return <p className="text-sm text-text-secondary">{t("processing.digest.repairing")}</p>
+  if (digest.status !== "ready") return <StoryReadingActions storyId={storyId} unavailable />
 
   const updatedAt = new Date(digest.updatedAt)
 
@@ -58,7 +89,7 @@ export function StoryDigestPanel({
       <header className="space-y-1">
         <h3 className="text-base font-semibold">{digest.title || storyTitle}</h3>
         <p className="flex flex-wrap items-center gap-2 text-xs text-text-secondary">
-          {/* 场景二判据：来源数 ≥ 2 要能直接看到。 */}
+          {/* 材料数不等于独立发布者数量，避免把同账号多篇误作交叉证据。 */}
           <span data-story-source-count={digest.sourceCount}>
             {t("processing.digest.source_count", { count: digest.sourceCount })}
           </span>
@@ -72,6 +103,7 @@ export function StoryDigestPanel({
       </header>
 
       <p className="whitespace-pre-wrap leading-6">{digest.body}</p>
+      <StoryReadingActions storyId={storyId} />
 
       <section className="space-y-2">
         <h4 className="font-medium">{t("processing.digest.citations")}</h4>
@@ -140,12 +172,14 @@ export function StoryDigestPanel({
         </ul>
       </section>
 
-      <a
-        className="inline-block text-xs text-accent underline"
-        href={smartReadingPath(window.location.pathname + window.location.search, digest.storyId)}
-      >
-        {t("processing.digest.open_in_workspace")}
-      </a>
+      {!embedded && (
+        <a
+          className="inline-block text-xs text-accent underline"
+          href={smartReadingPath(window.location.pathname + window.location.search, digest.storyId)}
+        >
+          {t("processing.digest.open_in_workspace")}
+        </a>
+      )}
     </div>
   )
 }

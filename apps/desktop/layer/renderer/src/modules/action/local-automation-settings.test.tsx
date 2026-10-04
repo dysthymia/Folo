@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     deleteRule: vi.fn(),
     previewUpgrade: vi.fn(),
     upgradeRules: vi.fn(),
+    save: vi.fn(),
   },
   legacy: [] as unknown[],
   disable: vi.fn(),
@@ -102,6 +103,7 @@ beforeEach(() => {
     releases: [],
   })
   mocks.client.loadEffective.mockResolvedValue({ revision: 2, config: body, releaseVersion: 2 })
+  mocks.client.save.mockImplementation(async (config: RuleSet) => ({ revision: 3, config }))
   mocks.client.previewUpgrade.mockResolvedValue({
     required: false,
     supported: true,
@@ -132,6 +134,26 @@ const render = () =>
   })
 
 describe("single local automation editor", () => {
+  it("previews personalized templates and only saves drafts with real tag bindings", async () => {
+    await render()
+    await click("automation.pack.title")
+    expect(mocks.client.save).not.toHaveBeenCalled()
+    expect(container.textContent).toContain("automation.pack.missing_tags")
+    expect(container.textContent).toContain("automation.pack.omitted")
+    await click("automation.pack.add_draft")
+    const saved = mocks.client.save.mock.calls[0]![0] as RuleSet
+    // 缺真实标签时仅加入跨领域去噪和唯一同事件规则，已有私人规则完整保留。
+    expect(saved.rules.map((rule) => rule.id)).toEqual([
+      "first",
+      "second",
+      "personalized:R10",
+      "personalized:R90",
+    ])
+    expect(saved.rules.slice(0, 2)).toEqual(config().rules)
+    expect(saved.global.markdown).toContain("空投")
+    expect(mocks.client.activateRule).not.toHaveBeenCalled()
+    expect(container.textContent).toContain("automation.pack.saved_draft")
+  })
   it("preserves the legacy source boundary before allowing new activation", async () => {
     mocks.client.previewUpgrade.mockResolvedValue({
       required: true,

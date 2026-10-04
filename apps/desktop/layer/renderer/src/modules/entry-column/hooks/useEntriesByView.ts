@@ -259,7 +259,8 @@ const useLocalEntries = (): UseEntriesReturn => {
 }
 
 export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
-  const { view, listId } = useRouteParams()
+  const { view, listId, isCollection } = useRouteParams()
+  const isPreview = useIsPreviewFeed()
   const user = useWhoami()
 
   useLocalActionHydration(user?.id)
@@ -289,12 +290,20 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
   const entryIds = useMemo(() => {
     void processingRoleRevision
 
-    if (timelineContentMode === "original") return rawEntryIds
+    // 收藏与预览仍是原文范围，不能因处理模式隐藏已收藏或尚未订阅的内容。
+    if (timelineContentMode === "original" || isCollection || isPreview) return rawEntryIds
 
     return rawEntryIds.filter(
       (entryId) => !isEntryHiddenByProcessingRole(entryId, { localDedupe: semanticDedupeEnabled }),
     )
-  }, [rawEntryIds, semanticDedupeEnabled, processingRoleRevision, timelineContentMode])
+  }, [
+    rawEntryIds,
+    semanticDedupeEnabled,
+    processingRoleRevision,
+    timelineContentMode,
+    isCollection,
+    isPreview,
+  ])
 
   const isFetchingFirstPage = remoteQuery.isFetching && !remoteQuery.isFetchingNextPage
 

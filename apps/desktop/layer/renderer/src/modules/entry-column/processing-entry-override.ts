@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react"
+import { useWhoami } from "@follow/store/user/hooks"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import {
   loadEntryOverrides,
@@ -19,16 +20,31 @@ export type ProcessingEntryOverrideMode = "restore" | "hide" | "automatic"
  * 失败不再只置一个内部标志就作罢——角标会把 `failed` 显示出来，避免用户点了没反应又不知道为什么。
  */
 export function useProcessingEntryOverride() {
+  const owner = useWhoami()?.id
+  const ownerRef = useRef(owner)
+  ownerRef.current = owner
+  const requestRef = useRef<AbortController | null>(null)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    setBusy(false)
+    setFailed(false)
+    return () => requestRef.current?.abort()
+  }, [owner])
 
   const setMode = useCallback(
     async (inputSeq: number, mode: ProcessingEntryOverrideMode): Promise<boolean> => {
+      if (!owner) return false
+      requestRef.current?.abort()
       setBusy(true)
       setFailed(false)
       const controller = new AbortController()
+      requestRef.current = controller
+      const current = () => !controller.signal.aborted && ownerRef.current === owner
       try {
         const overrides = await loadEntryOverrides(controller.signal)
+        // 账号切换后不能用旧条目版本继续提交下一步人工覆盖。
+        if (!current()) return false
         const expectedRevision = overrides.get(inputSeq)?.override?.revision ?? 0
         await readingRequest(
           `processing/entries/${inputSeq}/override`,
@@ -36,16 +52,17 @@ export function useProcessingEntryOverride() {
           controller.signal,
           { mode, expectedRevision },
         )
-        await refreshServiceProcessingRoles()
-        return true
+        if (!current()) return false
+        await refreshServiceProcessingRoles(controller.signal)
+        return current()
       } catch {
-        setFailed(true)
+        if (current()) setFailed(true)
         return false
       } finally {
-        setBusy(false)
+        if (current()) setBusy(false)
       }
     },
-    [],
+    [owner],
   )
 
   return { setMode, busy, failed }
