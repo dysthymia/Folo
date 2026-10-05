@@ -51,6 +51,7 @@ export const defaultProcessingSchedule = (): ProcessingScheduleConfig => ({
   historySince: new Date().toISOString(),
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   enabled: false,
+  runOnListLoad: true,
   times: [...defaultTimes],
   pollIntervalMinutes: null,
   readyBy: null,
@@ -237,6 +238,16 @@ export function ProcessingRunSettings({
         />
         {t("processing.run.enabled")}
       </label>
+      {/* 读取列表只排队当前已加载条目，和定时执行共用授权及缓存。 */}
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={config.runOnListLoad !== false}
+          onChange={(event) => change({ runOnListLoad: event.target.checked })}
+        />
+        {t("processing.run.on_list_load")}
+      </label>
+      <p className="text-xs text-text-secondary">{t("processing.run.on_list_load_hint")}</p>
       <fieldset className="space-y-2" data-schedule-scope={runScope.mode}>
         <legend className="text-sm font-medium">{t("processing.run.scope")}</legend>
         <div className="flex flex-wrap gap-3 text-sm">

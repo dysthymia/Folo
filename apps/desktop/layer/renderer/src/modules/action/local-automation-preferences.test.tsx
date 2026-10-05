@@ -103,6 +103,7 @@ describe("公共要求草稿独立启用", () => {
           onDirty={onDirty}
           onBusy={onBusy}
           migrationRequired={false}
+          onHistory={vi.fn()}
         />,
       )
     })
@@ -153,6 +154,43 @@ describe("公共要求草稿独立启用", () => {
     expect(mocks.client.publish).not.toHaveBeenCalled()
     expect(mocks.client.saveSchedule).not.toHaveBeenCalled()
     expect(mocks.changed).not.toHaveBeenCalled()
+  })
+
+  it("列表触发开关纳入草稿保护并独立保存，不发布未审核规则", async () => {
+    const config = {
+      scope: { mode: "rules" },
+      sourceKeys: ["feed/1"],
+      historySince: "2026-10-01T00:00:00Z",
+      timeZone: "Asia/Shanghai",
+      enabled: true,
+      times: ["08:00"],
+      pollIntervalMinutes: null,
+      readyBy: null,
+      runOnListLoad: true,
+    }
+    mocks.client.loadSchedule.mockResolvedValueOnce({ revision: 2, config })
+    mocks.client.saveSchedule.mockResolvedValueOnce({
+      revision: 3,
+      config: { ...config, runOnListLoad: false },
+    })
+    await render(editorFor("已保存要求"), effectiveFor("已保存要求"))
+    const label = [...container.querySelectorAll("label")].find(
+      (item) => item.textContent === "processing.run.on_list_load",
+    )!
+    const checkbox = label.querySelector("input")!
+    expect(checkbox.checked).toBe(true)
+    await act(async () => checkbox.click())
+    expect(onDirty).toHaveBeenCalledWith(true)
+    const button = [...container.querySelectorAll("button")].find(
+      (item) => item.textContent === "automation.editor.save_schedule",
+    )!
+    await act(async () => button.click())
+    expect(mocks.client.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({ runOnListLoad: false, enabled: true, scope: { mode: "rules" } }),
+      2,
+      expect.any(AbortSignal),
+    )
+    expect(checkbox.checked).toBe(false)
   })
 
   it("草稿等于实际生效正文时无需重复启用，未发布时仍可启用", async () => {

@@ -8,7 +8,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { PersonalizedRulePackPanel } from "./personalized-rule-pack-panel"
 import type { ProcessingEditor } from "./processing-client"
 
-const { save } = vi.hoisted(() => ({ save: vi.fn() }))
+const { save, activateRules, ask } = vi.hoisted(() => ({
+  save: vi.fn(),
+  activateRules: vi.fn(),
+  ask: vi.fn(),
+}))
+vi.mock("~/components/ui/modal/stacked/hooks", () => ({ useDialog: () => ({ ask }) }))
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, values?: Record<string, unknown>) =>
@@ -19,7 +24,7 @@ vi.mock("../ai-chat/local-provider", () => ({ getOneTimeToken: vi.fn() }))
 vi.mock("./processing-condition-editor", () => ({ processingButtonClass: "button" }))
 vi.mock("./processing-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./processing-client")>()),
-  createProcessingClient: () => ({ save }),
+  createProcessingClient: () => ({ save, activateRules }),
 }))
 // 旧草稿已有领域规则，新标签只出现在实时目录中；不会靠新增规则掩盖范围修复。
 function fixture(): ProcessingEditor {
@@ -66,6 +71,8 @@ describe("已有个性化规则的条件差异草稿", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true
   })
   beforeEach(() => {
+    ask.mockReset()
+    activateRules.mockReset()
     save
       .mockReset()
       .mockImplementation(async (config, revision) => ({ config, revision: revision + 1 }))
@@ -87,7 +94,12 @@ describe("已有个性化规则的条件差异草稿", () => {
       onSaved = vi.fn()
     await act(async () =>
       root.render(
-        <PersonalizedRulePackPanel editor={editor} onSaved={onSaved} onClose={vi.fn()} />,
+        <PersonalizedRulePackPanel
+          editor={editor}
+          onSaved={onSaved}
+          onClose={vi.fn()}
+          onActivated={vi.fn()}
+        />,
       ),
     )
     const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!
@@ -119,7 +131,14 @@ describe("已有个性化规则的条件差异草稿", () => {
   it("复杂私人条件只能预览并提示原编辑器调整，切换草稿清除旧差异选择", async () => {
     const editor = fixture()
     const render = (next: ProcessingEditor) =>
-      root.render(<PersonalizedRulePackPanel editor={next} onSaved={vi.fn()} onClose={vi.fn()} />)
+      root.render(
+        <PersonalizedRulePackPanel
+          editor={next}
+          onSaved={vi.fn()}
+          onClose={vi.fn()}
+          onActivated={vi.fn()}
+        />,
+      )
     await act(async () => render(editor))
     await act(async () => container.querySelector<HTMLInputElement>("input")!.click())
     expect(saveButton().disabled).toBe(false)
@@ -133,5 +152,54 @@ describe("已有个性化规则的条件差异草稿", () => {
     expect(container.textContent).toContain("automation.pack.condition_manual_edit")
     expect(saveButton().disabled).toBe(true)
     expect(save).not.toHaveBeenCalled()
+  })
+  it("多选启用必须确认，且只传所选规则并保留私人Prompt", async () => {
+    const editor = fixture()
+    const onActivated = vi.fn()
+    const response = {
+      revision: 5,
+      config: editor.config,
+      effectiveConfig: editor.config,
+      release: { version: 2 },
+      schedule: { config: null },
+    }
+    activateRules.mockResolvedValue(response)
+    await act(async () =>
+      root.render(
+        <PersonalizedRulePackPanel
+          editor={editor}
+          onSaved={vi.fn()}
+          onClose={vi.fn()}
+          onActivated={onActivated}
+        />,
+      ),
+    )
+    const choices = [...container.querySelectorAll("section label")].filter((label) =>
+      label.querySelector("input"),
+    )
+    const choice = choices.find(
+      (label) =>
+        label.textContent ===
+        editor.config.rules.find((rule) => rule.id === "personalized:R40")!.name,
+    )!
+    await act(async () => choice.querySelector<HTMLInputElement>("input")!.click())
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent?.startsWith("automation.pack.activate_selected"))!
+        .click(),
+    )
+    expect(activateRules).not.toHaveBeenCalled()
+    expect(ask).toHaveBeenCalledOnce()
+    await act(async () => ask.mock.calls[0]?.[0].onConfirm())
+    const [rules, revision] = activateRules.mock.calls[0]!
+    expect(rules).toHaveLength(1)
+    expect(rules[0]).toMatchObject({
+      id: "personalized:R40",
+      enabled: true,
+      actions: [{ type: "ai_transform", prompt: "私人 Prompt" }],
+    })
+    expect(revision).toBe(4)
+    expect(save).not.toHaveBeenCalled()
+    expect(onActivated).toHaveBeenCalledWith(response)
   })
 })

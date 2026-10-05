@@ -6,6 +6,7 @@ import { setAISetting, useAISettingValue } from "~/atoms/settings/ai"
 import { createDefineSettingItem } from "../helper/builder"
 import { createSettingBuilder } from "../helper/setting-builder"
 import { ByokSection } from "./ai/byok"
+import { LocalProcessingModelSection } from "./ai/LocalProcessingModelSection"
 import { MCPServicesSection } from "./ai/mcp/MCPServicesSection"
 import { PanelStyleSection } from "./ai/PanelStyleSection"
 import { PersonalizePromptSection } from "./ai/PersonalizePromptSection"
@@ -30,6 +31,7 @@ export const SettingAI = () => {
     <div className="mt-4">
       <SettingBuilder
         settings={[
+          LocalProcessingModelSection,
           {
             type: "title",
             value: t("features.title"),

@@ -11,6 +11,21 @@ vi.mock("~/lib/auth", () => ({
 }))
 
 describe("本地 AI Provider", () => {
+  it("自定义提供商继续使用本机对话配置，不因新增提供商丢失模型", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        provider: "openai-compatible",
+        model: "custom-chat",
+        baseUrl: "https://models.example.test/v1",
+        hasApiKey: true,
+      }),
+    )
+    expect(await requestLocalAISettings(async () => "one-time", fetcher)).toEqual({
+      provider: "openai-compatible",
+      model: "custom-chat",
+      hasApiKey: true,
+    })
+  })
   it("只在 local.folo.is 启用", () => {
     expect(isLocalFoloHost("local.folo.is")).toBe(true)
     expect(isLocalFoloHost("app.folo.is")).toBe(false)

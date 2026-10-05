@@ -404,7 +404,14 @@ function CategoryReferenceSelect({
     ),
   ]
   const active = activeCategories.includes(serialized)
-  const identityStatus = active ? "active" : sourceInventoryKnown ? "missing" : "unknown"
+  // 新切换到分类字段时尚未选择身份，不能显示为已消失的历史分类。
+  const identityStatus = !value.value.name
+    ? "unselected"
+    : active
+      ? "active"
+      : sourceInventoryKnown
+        ? "missing"
+        : "unknown"
   const selectedLabel = value.value.name
     ? `${value.value.name} · ${t(viewLabels[value.value.view] ?? "processing.choose")}`
     : t("processing.choose")

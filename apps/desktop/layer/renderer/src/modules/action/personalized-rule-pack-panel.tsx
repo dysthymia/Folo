@@ -7,24 +7,31 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { useDialog } from "~/components/ui/modal/stacked/hooks"
+
 import { getOneTimeToken } from "../ai-chat/local-provider"
-import type { ProcessingEditor } from "./processing-client"
+import type { ProcessingEditor, RuleActivation } from "./processing-client"
 import { createProcessingClient, ProcessingRequestError } from "./processing-client"
 import { processingButtonClass } from "./processing-condition-editor"
 
 const client = createProcessingClient(getOneTimeToken)
 
-/** 按真实标签生成预览；保存只写草稿，逐条试运行与启用仍在原编辑器完成。 */
+/** 模板草稿与启用分开；批量启用只提交明确勾选的规则，不附带全局私人说明。 */
 export function PersonalizedRulePackPanel({
   editor,
   onSaved,
   onClose,
+  onActivated,
+  migrationRequired = false,
 }: {
   editor: ProcessingEditor
   onSaved: (saved: Pick<ProcessingEditor, "config" | "revision">) => void
   onClose: () => void
+  onActivated: (result: RuleActivation) => void
+  migrationRequired?: boolean
 }) {
   const { t } = useTranslation("app")
+  const { ask } = useDialog()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<"request" | "conflict" | null>(null)
   const requestRef = useRef<AbortController | null>(null)
@@ -37,6 +44,7 @@ export function PersonalizedRulePackPanel({
     [editor.config.ownerId, editor.subscriptionTags.tags],
   )
   const [selectedDiffs, setSelectedDiffs] = useState<Set<string>>(() => new Set())
+  const [selectedActivation, setSelectedActivation] = useState<Set<string>>(() => new Set())
   const diffs = useMemo(
     () => previewPersonalizedRuleConditions(editor.config, pack),
     [editor.config, pack],
@@ -61,11 +69,14 @@ export function PersonalizedRulePackPanel({
       .join("、")
   const existing = new Set(editor.config.rules.map((rule) => rule.id))
   const additions = candidate.rules.filter((rule) => !existing.has(rule.id))
+  const templateRules = candidate.rules.filter((rule) => rule.id.startsWith("personalized:"))
+  const selectedRules = templateRules.filter((rule) => selectedActivation.has(rule.id))
 
   useEffect(() => {
     // 切换账号或草稿时终止旧保存，迟到结果不能覆盖新的编辑对象。
     setBusy(false)
     setError(null)
+    setSelectedActivation(new Set())
     return () => requestRef.current?.abort()
   }, [editor.config.ownerId, editor.revision])
   const save = async () => {
@@ -87,6 +98,39 @@ export function PersonalizedRulePackPanel({
     } finally {
       if (!request.signal.aborted) setBusy(false)
     }
+  }
+  const activate = () => {
+    if (busy || migrationRequired || !selectedRules.length) return
+    ask({
+      title: t("automation.pack.activate_title", { count: selectedRules.length }),
+      message: `${selectedRules.map((rule) => rule.name).join("、")}\n${t("automation.pack.activate_hint")}`,
+      variant: "ask",
+      onConfirm: async () => {
+        const request = new AbortController()
+        requestRef.current = request
+        setBusy(true)
+        setError(null)
+        try {
+          // 服务端原子发布所选规则；未选规则与 G00 留在草稿中。
+          const result = await client.activateRules(
+            selectedRules.map((rule) => ({ ...rule, enabled: true })),
+            editor.revision,
+            crypto.randomUUID(),
+            request.signal,
+          )
+          if (!request.signal.aborted) onActivated(result)
+        } catch (cause) {
+          if (!request.signal.aborted)
+            setError(
+              cause instanceof ProcessingRequestError && cause.kind === "conflict"
+                ? "conflict"
+                : "request",
+            )
+        } finally {
+          if (!request.signal.aborted) setBusy(false)
+        }
+      },
+    })
   }
   return (
     <section
@@ -112,7 +156,7 @@ export function PersonalizedRulePackPanel({
       {additions.map((rule) => (
         <details key={rule.id} className="rounded-lg bg-fill-quinary p-3">
           <summary className="cursor-pointer text-sm">
-            {rule.name} · {t(rule.enabled ? "processing.enabled" : "automation.editor.disabled")}
+            {rule.name} · {t("automation.feedback.state_draft")}
           </summary>
           <p className="mt-3 text-xs text-text-secondary">
             {"all" in rule.when
@@ -213,6 +257,37 @@ export function PersonalizedRulePackPanel({
           {t(`automation.editor.error_${error}`)}
         </p>
       )}
+      <section className="space-y-3 rounded-lg border border-fill-secondary p-3">
+        <h4 className="text-sm font-semibold">{t("automation.pack.select_activate")}</h4>
+        <p className="text-xs text-text-secondary">{t("automation.pack.activate_hint")}</p>
+        {templateRules.map((rule) => (
+          <label key={rule.id} className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              disabled={busy || migrationRequired}
+              checked={selectedActivation.has(rule.id)}
+              onChange={(event) => {
+                const checked = event.currentTarget.checked
+                setSelectedActivation((previous) => {
+                  const next = new Set(previous)
+                  if (checked) next.add(rule.id)
+                  else next.delete(rule.id)
+                  return next
+                })
+              }}
+            />
+            {rule.name}
+          </label>
+        ))}
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={busy || migrationRequired || !selectedRules.length}
+          onClick={activate}
+        >
+          {t("automation.pack.activate_selected", { count: selectedRules.length })}
+        </button>
+      </section>
       <div className="flex gap-2">
         <button
           type="button"

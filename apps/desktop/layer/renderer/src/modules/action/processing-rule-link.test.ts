@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import {
   buildProcessingRuleUrl,
   findProcessingRuleForContext,
+  parseProcessingReadingReturn,
   parseProcessingRuleContext,
   prepareProcessingRuleContext,
   processingRuleCondition,
@@ -22,6 +23,17 @@ const rule = (when: AutomationRule["when"]): AutomationRule => ({
 })
 
 describe("processing rule context links", () => {
+  it("保留原阅读目标与筛选，并拒绝外站和管理路径返回", () => {
+    const returnTo = "/timeline/all/feed%2F1/entry-5?unreadOnly=true"
+    const url = new URL(
+      buildProcessingRuleUrl({ kind: "source", sourceId: "feed/1" }, returnTo),
+      "https://local.folo.is",
+    )
+    expect(parseProcessingReadingReturn(url.search)).toBe(returnTo)
+    expect(parseProcessingReadingReturn("?returnTo=https%3A%2F%2Fevil.test")).toBeNull()
+    expect(parseProcessingReadingReturn("?returnTo=%2Faction")).toBeNull()
+    expect(parseProcessingReadingReturn("?returnTo=%2F%2Fevil.test")).toBeNull()
+  })
   it("round-trips source, category and view contexts", () => {
     const contexts = [
       { kind: "source", sourceId: "feed/feed-1" },
@@ -115,5 +127,52 @@ describe("processing rule context links", () => {
       when: processingRuleCondition({ kind: "category", view: 0, name: "Blockchain" }),
     })
     expect(ruleSet.rules).toHaveLength(1)
+  })
+})
+
+describe("去重管理草稿", () => {
+  it("从后台已启用 AI 范围建立禁用草稿，排除未启用规则和未知范围", async () => {
+    const { prepareDedupeRule, buildDedupeManagementUrl } = await import("./processing-rule-link")
+    const enabled = rule({ all: true })
+    const disabled = { ...enabled, id: "disabled", enabled: false }
+    const config = {
+      formatVersion: 4 as const,
+      ownerId: "owner-1",
+      global: { markdown: "", version: 1 },
+      rules: [enabled, disabled],
+    }
+    const prepared = prepareDedupeRule(
+      config,
+      config,
+      [
+        { ruleId: enabled.id, sourceKeys: ["feed/authorized"] },
+        { ruleId: disabled.id, sourceKeys: ["feed/forbidden"] },
+      ],
+      "Dedupe",
+    )
+    expect(prepared).toMatchObject({
+      enabled: false,
+      actions: [{ type: "ai_dedupe", scope: { all: true } }],
+      when: {
+        anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: ["feed/authorized"] }] }],
+      },
+    })
+    expect(config.rules).toHaveLength(2)
+    expect(prepareDedupeRule(config, null, [], "Dedupe")).toBeNull()
+    expect(buildDedupeManagementUrl("rule/1")).toContain("ruleId=rule%2F1")
+  })
+  it("优先进入已有去重规则而不新造平行规则", async () => {
+    const { prepareDedupeRule } = await import("./processing-rule-link")
+    const existing = {
+      ...rule({ all: true }),
+      actions: [{ type: "ai_dedupe" as const, scope: { all: true as const } }],
+    }
+    const config = {
+      formatVersion: 4 as const,
+      ownerId: "owner-1",
+      global: { markdown: "", version: 1 },
+      rules: [existing],
+    }
+    expect(prepareDedupeRule(config, null, [], "Unused")).toEqual(existing)
   })
 })

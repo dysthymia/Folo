@@ -31,6 +31,24 @@ const sources = [
 ]
 
 describe("ProcessingConditionEditor List options", () => {
+  it("尚未选择分类时提示选择，不报告分类消失或待修复", () => {
+    const html = renderToStaticMarkup(
+      <ProcessingConditionEditor
+        value={{
+          anyOf: [
+            { allOf: [{ field: "category_ref", operator: "eq", value: { view: 0, name: "" } }] },
+          ],
+        }}
+        onChange={vi.fn()}
+        sources={sources}
+        sourceInventoryKnown
+      />,
+    )
+    expect(html).toContain("processing.choose")
+    expect(html).not.toContain("processing.category_identity_missing")
+    expect(html).not.toContain("processing.category_identity_repair")
+    expect(html).not.toContain("processing.category_identity_unknown")
+  })
   it("保留已消失分类旧值并明确标记待修复，未知清单不伪造缺失", () => {
     const categorySources = [
       {

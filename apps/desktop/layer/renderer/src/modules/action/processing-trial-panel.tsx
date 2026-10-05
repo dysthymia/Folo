@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next"
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import type { ProcessingTrialResult } from "./processing-client"
-import { createProcessingClient } from "./processing-client"
+import { createProcessingClient, ProcessingRequestError } from "./processing-client"
 import { processingButtonClass } from "./processing-condition-editor"
 
 const client = createProcessingClient(getOneTimeToken)
@@ -23,13 +23,15 @@ export function ProcessingTrialPanel({
   const { t } = useTranslation("app")
   const [result, setResult] = useState<ProcessingTrialResult | null>(null)
   const [busy, setBusy] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [failure, setFailure] = useState<"request" | "target_read" | "read_state_unknown" | null>(
+    null,
+  )
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
     // 样本或草稿变化即取消旧试运行，避免把不同条件的结果当作当前预览。
     controllerRef.current?.abort()
     setResult(null)
-    setFailed(false)
+    setFailure(null)
     setBusy(false)
     return () => controllerRef.current?.abort()
   }, [config, sourceKey, entryId])
@@ -38,13 +40,15 @@ export function ProcessingTrialPanel({
     const controller = new AbortController()
     controllerRef.current = controller
     setBusy(true)
-    setFailed(false)
+    setFailure(null)
     setResult(null)
     try {
       const output = await client.trial(config, sourceKey, entryId, controller.signal)
       if (!controller.signal.aborted) setResult(output)
-    } catch {
-      if (!controller.signal.aborted) setFailed(true)
+    } catch (cause) {
+      // 已读或未知读态是处理资格问题，明确说明原因，避免用户反复重试模型。
+      if (!controller.signal.aborted)
+        setFailure(cause instanceof ProcessingRequestError ? (cause.code ?? "request") : "request")
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
@@ -60,9 +64,15 @@ export function ProcessingTrialPanel({
       >
         {t(busy ? "processing.trial_running" : "processing.trial_run")}
       </button>
-      {failed && (
+      {failure && (
         <p role="alert" className="text-sm text-red">
-          {t("processing.trial_failed")}
+          {t(
+            failure === "target_read"
+              ? "processing.trial_read"
+              : failure === "read_state_unknown"
+                ? "processing.trial_read_unknown"
+                : "processing.trial_failed",
+          )}
         </p>
       )}
       {result && (

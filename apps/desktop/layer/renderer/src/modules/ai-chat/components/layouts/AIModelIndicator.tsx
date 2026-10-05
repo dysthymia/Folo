@@ -3,6 +3,7 @@ import { UserRolePriority } from "@follow/constants"
 import { useUserRole } from "@follow/store/user/hooks"
 import { cn } from "@follow/utils"
 import { Fragment, memo, useMemo } from "react"
+import { useTranslation } from "react-i18next"
 
 import {
   DropdownMenu,
@@ -78,6 +79,7 @@ const parseModelString = (modelString: string) => {
 }
 
 export const AIModelIndicator = memo(({ className, onModelChange }: AIModelIndicatorProps) => {
+  const { t } = useTranslation("app")
   const { data, changeModel } = useAIModel()
   const {
     defaultModel,
@@ -126,9 +128,14 @@ export const AIModelIndicator = memo(({ className, onModelChange }: AIModelIndic
 
   if (isLocalProvider) {
     return (
-      <a href="/information#model-settings" className="inline-flex" title="Open model settings">
+      <button
+        type="button"
+        onClick={() => settingModalPresent("ai")}
+        className="inline-flex"
+        title={t("automation.model.open", { ns: "app" })}
+      >
         {modelContent}
-      </a>
+      </button>
     )
   }
 

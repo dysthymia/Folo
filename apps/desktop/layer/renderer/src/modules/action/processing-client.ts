@@ -309,6 +309,8 @@ const scheduleConfigSchema = z
     historySince: isoDateTime,
     timeZone: z.string().min(1).max(100),
     enabled: z.boolean(),
+    // 旧服务尚无该字段时，列表触发按新版默认开启解释。
+    runOnListLoad: z.boolean().optional(),
     times: z
       .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u))
       .min(1)
@@ -363,10 +365,90 @@ const ruleUpgradeSchema = z
   .strict()
 export type RuleUpgrade = z.infer<typeof ruleUpgradeSchema>
 
+// 首屏共用一次账号核验，草稿、生效状态和迁移检查来自同一份本地快照。
+const automationEditorSchema = z
+  .object({
+    editor: processingEditorSchema,
+    effective: effectiveProcessingSchema,
+    upgrade: ruleUpgradeSchema,
+  })
+  .strict()
+
+// 概览来自服务端实际发布配置和输入状态，不按模板草稿推断处理范围。
+export const automationStatusSchema = z
+  .object({
+    sourceInventory: z
+      .object({ available: revisionSchema, covered: revisionSchema, unknown: revisionSchema })
+      .strict(),
+    counts: z
+      .object({
+        processed: revisionSchema,
+        pending: revisionSchema,
+        needsContext: revisionSchema,
+        uncovered: revisionSchema,
+      })
+      .strict(),
+    nextRunAt: z.string().nullable(),
+    timeZone: z.string().optional(),
+    nextScheduledStartLocal: z.string().nullable().optional(),
+    nextPollAt: isoDateTime.nullable().optional(),
+    scheduleEnabled: z.boolean(),
+    rules: z.array(
+      z
+        .object({
+          ruleId: identifierSchema,
+          sourceKeys: z.array(z.string()),
+          unknownSourceKeys: z.array(z.string()),
+          processed: revisionSchema,
+          lastProcessedAt: isoDateTime.nullable(),
+        })
+        .strict(),
+    ),
+  })
+  .strict()
+export type AutomationStatus = z.infer<typeof automationStatusSchema>
+const processingModelSettingsSchema = z
+  .object({
+    provider: z.enum(["qianwen", "codex", "openai-compatible"]),
+    model: z.string().min(1),
+    hasApiKey: z.boolean(),
+    baseUrl: z.string().optional(),
+    // 旧配置未保存强度时仍用 low；强度只属于 Codex 模型的执行配置。
+    reasoningEffort: z
+      .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+      .optional(),
+  })
+  .strict()
+export type ProcessingModelSettings = z.infer<typeof processingModelSettingsSchema>
+export type ProcessingReasoningEffort = NonNullable<ProcessingModelSettings["reasoningEffort"]>
+
+// 模型目录只接收公开能力字段，不向浏览器传递 CLI 配置或认证信息。
+const processingModelCatalogSchema = z
+  .object({
+    models: z.array(
+      z
+        .object({
+          id: z.string().min(1),
+          displayName: z.string().min(1),
+          description: z.string(),
+          reasoningEfforts: z.array(z.string()),
+          defaultReasoningEffort: z.string().nullable(),
+        })
+        .strict(),
+    ),
+    source: z.enum(["rpc", "cache"]),
+    fetchedAt: z.string().nullable(),
+    stale: z.boolean(),
+    available: z.boolean(),
+    error: z.string().optional(),
+  })
+  .strict()
+export type ProcessingModelCatalog = z.infer<typeof processingModelCatalogSchema>
+
 export const processingRunSchema = z
   .object({
     id: z.string().uuid(),
-    kind: z.enum(["scheduled", "catchup", "poll", "manual"]),
+    kind: z.enum(["scheduled", "catchup", "poll", "manual", "list_loaded"]),
     dedupeKey: z.string().min(1),
     configRevision: revisionSchema,
     sourceKeys: z.array(z.string().min(1)),
@@ -390,6 +472,9 @@ export const processingRunSchema = z
     startedAt: isoDateTime.nullable(),
     finishedAt: isoDateTime.nullable(),
     error: z.string().nullable(),
+    targets: z
+      .array(z.object({ sourceKey: z.string().min(1), itemId: z.string().min(1) }).strict())
+      .optional(),
   })
   .strict()
 
@@ -429,6 +514,16 @@ export type ProcessingEditor = z.infer<typeof processingEditorSchema>
 export type ProcessingPreview = z.infer<typeof previewSchema>
 export type ProcessingSchedule = z.infer<typeof scheduleSchema>
 export type ProcessingScheduleConfig = z.infer<typeof scheduleConfigSchema>
+// 列表只提交已加载元信息；正文由后台现有水合流程读取，避免另起一套模型执行器。
+export type ProcessingListEntry = {
+  id: string
+  sourceKey: string
+  title: string
+  publishedAt: string
+  url: string | null
+  read: boolean | null
+  description: string | null
+}
 export type ProcessingRun = z.infer<typeof processingRunSchema>
 export type ProcessingRelease = z.infer<typeof releaseResultSchema>
 export type ProcessingReleaseScope = z.infer<typeof releaseScopeSchema>
@@ -439,6 +534,7 @@ export type ProcessingInput = z.infer<typeof inputsSchema>["inputs"][number]
 export class ProcessingRequestError extends Error {
   constructor(
     public readonly kind: "authorization" | "conflict" | "referenced" | "invalid" | "request",
+    public readonly code?: "target_read" | "read_state_unknown",
   ) {
     super(kind)
   }
@@ -475,6 +571,10 @@ export function createProcessingClient(
     if (!response.ok) {
       const detail = await response.json().catch(() => null)
       const referenced = z.object({ error: z.literal("tag_referenced") }).safeParse(detail).success
+      // 只透传固定读态错误，试运行可以解释未读限制，不展示上游任意错误内容。
+      const readError = z
+        .object({ error: z.enum(["target_read", "read_state_unknown"]) })
+        .safeParse(detail)
       throw new ProcessingRequestError(
         [401, 403].includes(response.status)
           ? "authorization"
@@ -485,6 +585,7 @@ export function createProcessingClient(
               : response.status === 400
                 ? "invalid"
                 : "request",
+        readError.success ? readError.data.error : undefined,
       )
     }
     const parsed = schema.safeParse(await response.json())
@@ -493,6 +594,41 @@ export function createProcessingClient(
     return parsed.data
   }
   return {
+    loadEditor: (signal: AbortSignal) =>
+      request("automation/editor", "GET", automationEditorSchema, signal),
+    loadAutomationStatus: (signal: AbortSignal) =>
+      request("automation/status", "GET", automationStatusSchema, signal),
+    loadModelSettings: (signal: AbortSignal) =>
+      request("processing/model-settings", "GET", processingModelSettingsSchema, signal),
+    loadModelCatalog: (signal: AbortSignal) =>
+      request("processing/model-catalog", "GET", processingModelCatalogSchema, signal),
+    saveModelSettings: (
+      settings: Omit<ProcessingModelSettings, "hasApiKey"> & { apiKey?: string },
+      signal: AbortSignal,
+    ) =>
+      request("processing/model-settings", "PUT", processingModelSettingsSchema, signal, settings),
+    activateRules: (
+      rules: AutomationRule[],
+      expectedRevision: number,
+      requestId: string,
+      signal: AbortSignal,
+    ) =>
+      request("rules/activate-batch", "POST", ruleActivationSchema, signal, {
+        rules: rules.map((rule) => ruleSchema.parse(rule)),
+        expectedRevision,
+        requestId,
+      }),
+    reorderRules: (
+      ruleIds: string[],
+      expectedRevision: number,
+      requestId: string,
+      signal: AbortSignal,
+    ) =>
+      request("rules/reorder-active", "POST", ruleActivationSchema, signal, {
+        ruleIds,
+        expectedRevision,
+        requestId,
+      }),
     previewUpgrade: (signal: AbortSignal) =>
       request("rules/upgrade-preview", "GET", ruleUpgradeSchema, signal),
     upgradeRules: (
@@ -598,6 +734,19 @@ export function createProcessingClient(
     ) => request("schedule", "PUT", scheduleSchema, signal, { expectedRevision, config }),
     startRun: (requestId: string, signal: AbortSignal) =>
       request("runs", "POST", processingRunSchema, signal, { requestId }),
+    notifyListLoaded: (entries: ProcessingListEntry[], signal: AbortSignal) =>
+      request(
+        "processing/list-loaded",
+        "POST",
+        z
+          .object({
+            accepted: revisionSchema,
+            trigger: processingRunSchema.nullable(),
+          })
+          .strict(),
+        signal,
+        { entries },
+      ),
     loadRuns: (signal: AbortSignal) => request("runs", "GET", runsSchema, signal),
     releaseRuleSet: (
       expectedRevision: number,

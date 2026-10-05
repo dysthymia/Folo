@@ -143,7 +143,11 @@ describe("entry processing role", () => {
       revision: 0,
       settledEntryIds: {},
     })
-    useEntryProcessingRoleStore.setState({ revision: 0, serviceRoles: {} })
+    useEntryProcessingRoleStore.setState({
+      revision: 0,
+      serviceRoles: {},
+      localDedupeAllowed: true,
+    })
   })
 
   it("leaves entries untouched when no engine decided anything", () => {
@@ -212,6 +216,39 @@ describe("entry processing role", () => {
       source: "service",
     })
     expect(isEntryHiddenByProcessingRole("entry-b")).toBe(false)
+  })
+
+  // 后台关闭或移除去重角色后，不能重新使用旧缓存隐藏内容，来源角标也必须同步清空。
+  it("后台接管后清除服务角色不会退回旧缓存", () => {
+    seedEntries([
+      createEntry({ id: "entry-a", title: "Alpha" }),
+      createEntry({ id: "entry-b", title: "Alpha follow-up" }),
+    ])
+    seedLocalDuplicateDecision({ hideEntryId: "entry-b", keepEntryId: "entry-a" })
+    entryProcessingRoleActions.setLocalDedupeAllowed(false)
+    entryProcessingRoleActions.replaceServiceRoles([
+      { entryId: "entry-b", kind: "merged", relatedEntryIds: ["entry-a"] },
+    ])
+    expect(isEntryHiddenByProcessingRole("entry-b")).toBe(true)
+    entryProcessingRoleActions.clearServiceRoles()
+    expect(isEntryHiddenByProcessingRole("entry-b", { localDedupe: true })).toBe(false)
+    expect(resolveEntryProcessingRole("entry-a")).toBeNull()
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([])
+    expect(Object.keys(useSemanticDedupeStore.getState().decisions)).toHaveLength(1)
+  })
+
+  it("旧执行器停用使默认角色和角标读取一起退出旧缓存", () => {
+    seedEntries([
+      createEntry({ id: "entry-a", title: "Alpha" }),
+      createEntry({ id: "entry-b", title: "Beta" }),
+    ])
+    seedLocalDuplicateDecision({ hideEntryId: "entry-b", keepEntryId: "entry-a" })
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toHaveLength(1)
+    entryProcessingRoleActions.setLocalDedupeAllowed(false)
+    expect(isEntryHiddenByProcessingRole("entry-b")).toBe(false)
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([])
+    entryProcessingRoleActions.setLocalDedupeAllowed(true)
+    expect(isEntryHiddenByProcessingRole("entry-b")).toBe(true)
   })
 
   it("carries story identity and merges service related entries", () => {

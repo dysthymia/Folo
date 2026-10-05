@@ -5,12 +5,16 @@ import type { Root } from "react-dom/client"
 import { createRoot } from "react-dom/client"
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { ProcessingRequestError } from "./processing-client"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
 
 const { trial } = vi.hoisted(() => ({ trial: vi.fn() }))
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock("../ai-chat/local-provider", () => ({ getOneTimeToken: vi.fn() }))
-vi.mock("./processing-client", () => ({ createProcessingClient: () => ({ trial }) }))
+vi.mock("./processing-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./processing-client")>()),
+  createProcessingClient: () => ({ trial }),
+}))
 const config: RuleSet = {
   formatVersion: 4,
   ownerId: "owner",
@@ -44,6 +48,18 @@ describe("样本 AI 前后对照", () => {
   afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
+  })
+  it.each([
+    ["target_read", "processing.trial_read"],
+    ["read_state_unknown", "processing.trial_read_unknown"],
+  ] as const)("%s 明确说明未读资格，不误报模型故障", async (code, message) => {
+    trial.mockRejectedValue(new ProcessingRequestError("invalid", code))
+    await act(async () =>
+      root.render(<ProcessingTrialPanel config={config} sourceKey="feed/1" entryId="e1" valid />),
+    )
+    await act(async () => container.querySelector("button")!.click())
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(message)
+    expect(container.textContent).not.toContain("processing.trial_failed")
   })
   it("只有显式点击才试运行，展示已发布/草稿对照与原文", async () => {
     trial.mockResolvedValue(output)

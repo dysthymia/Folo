@@ -147,6 +147,152 @@ const previewResponse = {
 }
 
 describe("createProcessingClient", () => {
+  it("列表加载使用独立接口，允许有目标范围的队列响应与零匹配响应", async () => {
+    const entry = {
+      id: "entry-1",
+      sourceKey: "feed/1",
+      title: "条目",
+      publishedAt: "2026-10-04T10:00:00Z",
+      url: null,
+      read: false,
+      description: null,
+    }
+    const trigger = {
+      ...processingRun,
+      kind: "list_loaded",
+      targets: [{ sourceKey: entry.sourceKey, itemId: entry.id }],
+    }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ accepted: 1, trigger }))
+      .mockResolvedValueOnce(Response.json({ accepted: 0, trigger: null }))
+    const client = createProcessingClient(async () => "token", fetcher)
+    const signal = new AbortController().signal
+    await expect(client.notifyListLoaded([entry], signal)).resolves.toEqual({
+      accepted: 1,
+      trigger,
+    })
+    await expect(client.notifyListLoaded([entry], signal)).resolves.toEqual({
+      accepted: 0,
+      trigger: null,
+    })
+    expect(fetcher.mock.calls[0]![0]).toBe("/information/v1/processing/list-loaded")
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({ entries: [entry] })
+  })
+
+  it("Codex模型配置原样读写推理强度", async () => {
+    // 公开元信息与保存请求都带强度，不能在客户端解析时丢失后退回 low。
+    const settings = {
+      provider: "codex" as const,
+      model: "gpt-6.1-sol",
+      reasoningEffort: "ultra" as const,
+      hasApiKey: false,
+    }
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(settings))
+    const client = createProcessingClient(async () => "ott", fetcher)
+    const signal = new AbortController().signal
+    expect(await client.loadModelSettings(signal)).toEqual(settings)
+    expect(
+      await client.saveModelSettings(
+        { provider: "codex", model: "gpt-6.1-sol", reasoningEffort: "ultra" },
+        signal,
+      ),
+    ).toEqual(settings)
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      provider: "codex",
+      model: "gpt-6.1-sol",
+      reasoningEffort: "ultra",
+    })
+  })
+  it("读取公开 Codex 目录并通过同一后台接口保存自定义模型地址", async () => {
+    const catalog = {
+      models: [
+        {
+          id: "codex-model",
+          displayName: "Codex",
+          description: "",
+          reasoningEfforts: ["low"],
+          defaultReasoningEffort: "low",
+        },
+      ],
+      source: "rpc",
+      fetchedAt: "2026-10-04T00:00:00.000Z",
+      stale: false,
+      available: true,
+    }
+    const settings = {
+      provider: "openai-compatible",
+      model: "custom-model",
+      baseUrl: "https://models.example.test/v1",
+      hasApiKey: true,
+    }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (path) =>
+        Response.json(String(path).endsWith("model-catalog") ? catalog : settings),
+      )
+    const client = createProcessingClient(async () => "ott", fetcher)
+    const signal = new AbortController().signal
+    expect(await client.loadModelCatalog(signal)).toEqual(catalog)
+    expect(
+      await client.saveModelSettings(
+        {
+          provider: "openai-compatible",
+          model: "custom-model",
+          baseUrl: settings.baseUrl,
+          apiKey: "new-key",
+        },
+        signal,
+      ),
+    ).toEqual(settings)
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/information/v1/processing/model-catalog")
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/information/v1/processing/model-settings")
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      provider: "openai-compatible",
+      model: "custom-model",
+      baseUrl: settings.baseUrl,
+      apiKey: "new-key",
+    })
+  })
+  it("批量启用与排序仅提交选定规则和ID，后台模型保存使用执行配置接口", async () => {
+    const response = {
+      revision: 8,
+      config: ruleSet,
+      effectiveConfig: ruleSet,
+      release: releaseResponse,
+      schedule: { revision: 0, config: null },
+    }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (path) =>
+        Response.json(
+          String(path).endsWith("model-settings")
+            ? { provider: "codex", model: "codex-model", hasApiKey: false }
+            : response,
+        ),
+      )
+    const client = createProcessingClient(async () => "ott", fetcher)
+    const signal = new AbortController().signal
+    await client.activateRules(ruleSet.rules, 7, "batch", signal)
+    await client.reorderRules(["rule-1"], 8, "reorder", signal)
+    await client.saveModelSettings({ provider: "codex", model: "codex-model" }, signal)
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/information/v1/rules/activate-batch")
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      rules: ruleSet.rules,
+      expectedRevision: 7,
+      requestId: "batch",
+    })
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      ruleIds: ["rule-1"],
+      expectedRevision: 8,
+      requestId: "reorder",
+    })
+    expect(fetcher.mock.calls[2]?.[0]).toBe("/information/v1/processing/model-settings")
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
+      provider: "codex",
+      model: "codex-model",
+    })
+  })
   it("uses same-origin OTT on every request and never writes through official Actions", async () => {
     const generate = vi
       .fn<() => Promise<string>>()
@@ -193,6 +339,43 @@ describe("createProcessingClient", () => {
       expectedRevision: 7,
     })
     expect(fetcher.mock.calls.every(([path]) => !String(path).includes("actions"))).toBe(true)
+  })
+
+  it("首屏一次凭据交换取得规则、生效状态和迁移检查", async () => {
+    const { revision, sources, subscriptionTags, sourceTags, listMemberships } = editorResponse
+    const snapshot = {
+      editor: editorResponse,
+      effective: {
+        revision,
+        sources,
+        subscriptionTags,
+        sourceTags,
+        listMemberships,
+        config: ruleSet,
+        releaseVersion: 2,
+      },
+      upgrade: {
+        required: false,
+        supported: true,
+        expectedRevision: revision,
+        expectedScheduleRevision: 1,
+        sourceCount: sources.length,
+        affectedRules: [],
+      },
+    }
+    const generate = vi.fn(async () => "fresh-token")
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(snapshot))
+    expect(
+      await createProcessingClient(generate, fetcher).loadEditor(new AbortController().signal),
+    ).toEqual(snapshot)
+    expect(generate).toHaveBeenCalledTimes(1)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/information/v1/automation/editor")
+    // 汇总读取仍要求同源、不可缓存的新凭据，不能靠复用授权获得速度。
+    const init = fetcher.mock.calls[0]?.[1]
+    expect(init).toMatchObject({ method: "POST", cache: "no-store", credentials: "same-origin" })
+    expect(new Headers(init?.headers).get("X-Folo-One-Time-Token")).toBe("fresh-token")
+    expect(new Headers(init?.headers).get("X-Folo-Read")).toBe("1")
   })
 
   it("accepts the current editor response shape, including tag revisions and disabled automation", async () => {
@@ -298,6 +481,19 @@ describe("createProcessingClient", () => {
       new ProcessingRequestError("conflict"),
     )
   })
+
+  it.each(["target_read", "read_state_unknown"] as const)(
+    "保留试运行固定读态错误 %s",
+    async (code) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(JSON.stringify({ error: code }), { status: 400 }))
+      const client = createProcessingClient(async () => "token", fetcher)
+      await expect(
+        client.trial(ruleSet, "feed/1", "entry", new AbortController().signal),
+      ).rejects.toEqual(new ProcessingRequestError("invalid", code))
+    },
+  )
 
   it("stops after cancellation and does not return a write result", async () => {
     const controller = new AbortController()

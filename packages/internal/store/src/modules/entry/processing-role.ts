@@ -85,11 +85,14 @@ export interface ResolveEntryProcessingRoleOptions {
 interface EntryProcessingRoleStore {
   revision: number
   serviceRoles: Record<string, EntryProcessingServiceRole>
+  /** 当前部署与开关共同决定是否允许旧缓存参与，所有列表和角标读取同一口径。 */
+  localDedupeAllowed: boolean
 }
 
 const defaultState: EntryProcessingRoleStore = {
   revision: 0,
   serviceRoles: {},
+  localDedupeAllowed: true,
 }
 
 export const useEntryProcessingRoleStore = createZustandStore<EntryProcessingRoleStore>(
@@ -99,6 +102,13 @@ export const useEntryProcessingRoleStore = createZustandStore<EntryProcessingRol
 const set = createImmerSetter(useEntryProcessingRoleStore)
 
 export const entryProcessingRoleActions = {
+  setLocalDedupeAllowed: (allowed: boolean) => {
+    set((state) => {
+      if (state.localDedupeAllowed === allowed) return
+      state.localDedupeAllowed = allowed
+      state.revision += 1
+    })
+  },
   replaceServiceRoles: (roles: EntryProcessingServiceRole[]) => {
     set((state) => {
       state.serviceRoles = Object.fromEntries(roles.map((role) => [role.entryId, role]))
@@ -157,7 +167,9 @@ export const resolveEntryProcessingRole = (
     }
   }
 
-  if (options.localDedupe === false) return null
+  // 后台接管或旧执行器停用时，旧缓存仅保留审计，不能在服务角色消失后重新隐藏原文。
+  if (options.localDedupe === false || !useEntryProcessingRoleStore.getState().localDedupeAllowed)
+    return null
 
   return resolveLocalDedupeRole(entryId)
 }

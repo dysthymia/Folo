@@ -1,3 +1,4 @@
+import { entryProcessingRoleActions } from "@follow/store/entry/processing-role"
 import type {
   SemanticDedupeEvaluatorRunInfo,
   SemanticDuplicateCandidate,
@@ -273,9 +274,15 @@ export const SemanticDedupeProvider = () => {
   }))
 
   useSemanticDedupeHydration(user?.id)
+  const availability = useSemanticDedupeEvaluatorAvailability()
+  const backendManaged = isLocalFoloHost()
 
   useEffect(() => {
-    if (!semanticDedupeSettings.enabled) {
+    // 后台部署只消费发布结果；旧缓存和旧执行器一起停用，避免关闭规则后又退回旧隐藏决定。
+    const legacyAllowed =
+      semanticDedupeSettings.enabled && availability.available && !backendManaged
+    entryProcessingRoleActions.setLocalDedupeAllowed(legacyAllowed)
+    if (!legacyAllowed) {
       return registerSemanticDuplicateEvaluator(null)
     }
 
@@ -311,12 +318,15 @@ export const SemanticDedupeProvider = () => {
 
     return registerSemanticDuplicateEvaluator(null)
   }, [
+    availability.available,
+    backendManaged,
     semanticDedupeSettings.enabled,
     semanticDedupeSettings.model,
     semanticDedupeSettings.reasoningEffort,
   ])
 
-  if (!semanticDedupeSettings.debugPanel) return null
+  // 后台去重的状态在规则管理中展示，旧缓存调试面板不能冒充当前执行结果。
+  if (backendManaged || !semanticDedupeSettings.debugPanel) return null
 
   return <SemanticDedupeDebugPanel />
 }

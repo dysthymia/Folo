@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { useSettingModal } from "~/modules/settings/modal/use-setting-modal-hack"
+
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import { notifyLocalAutomationChanged } from "./local-automation-events"
 import type {
@@ -22,6 +24,7 @@ export function LocalAutomationPreferences({
   onDirty,
   onBusy,
   migrationRequired,
+  onHistory,
 }: {
   editor: ProcessingEditor
   effective: EffectiveProcessing | null
@@ -29,8 +32,10 @@ export function LocalAutomationPreferences({
   onDirty: (dirty: boolean) => void
   onBusy: (busy: boolean) => void
   migrationRequired: boolean
+  onHistory: () => void
 }) {
   const { t } = useTranslation("app")
+  const showSettings = useSettingModal()
   // 展示已保存的草稿（含模板G00），启用比较单独使用发布版本，不用旧正文遮住待启用内容。
   const initial = editor.config.global.markdown
   const [markdown, setMarkdown] = useState(initial)
@@ -40,6 +45,7 @@ export function LocalAutomationPreferences({
   const [times, setTimes] = useState("")
   const [timeZone, setTimeZone] = useState("")
   const [enabled, setEnabled] = useState(false)
+  const [runOnListLoad, setRunOnListLoad] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -48,7 +54,8 @@ export function LocalAutomationPreferences({
     !!schedule?.config &&
     (times !== schedule.config.times.join(", ") ||
       timeZone !== schedule.config.timeZone ||
-      enabled !== schedule.config.enabled)
+      enabled !== schedule.config.enabled ||
+      runOnListLoad !== (schedule.config.runOnListLoad !== false))
   // 同页切换公共设置也必须保护草稿，由父编辑器统一管理离开提示。
   useEffect(() => {
     onDirty(markdown !== baseline || scheduleDirty)
@@ -67,6 +74,7 @@ export function LocalAutomationPreferences({
         setSchedule(value)
         setTimes(value.config?.times.join(", ") ?? "")
         setTimeZone(value.config?.timeZone ?? "")
+        setRunOnListLoad(value.config?.runOnListLoad !== false)
         setEnabled(value.config?.enabled ?? false)
       })
       .catch(() => {
@@ -119,6 +127,7 @@ export function LocalAutomationPreferences({
           times: times.split(/[,，\s]+/).filter(Boolean),
           timeZone,
           enabled,
+          runOnListLoad,
         },
         schedule.revision,
         controller.signal,
@@ -126,6 +135,7 @@ export function LocalAutomationPreferences({
       if (controller.signal.aborted) return
       setSchedule(value)
       setTimes(value.config?.times.join(", ") ?? "")
+      setRunOnListLoad(value.config?.runOnListLoad !== false)
       setSaved(true)
       notifyLocalAutomationChanged()
     } catch {
@@ -181,6 +191,16 @@ export function LocalAutomationPreferences({
               />
               {t("automation.editor.schedule_enabled")}
             </label>
+            {/* 列表与定时共用已发布规则和总开关，允许独立关闭列表触发。 */}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={runOnListLoad}
+                onChange={(event) => setRunOnListLoad(event.target.checked)}
+              />
+              {t("processing.run.on_list_load")}
+            </label>
+            <p className="text-xs text-text-secondary">{t("processing.run.on_list_load_hint")}</p>
             <label className="block space-y-2 text-sm">
               <span>{t("automation.editor.times")}</span>
               <input
@@ -211,15 +231,15 @@ export function LocalAutomationPreferences({
         )}
       </fieldset>
       <div className="flex flex-wrap gap-2">
-        <a className={processingButtonClass} href="/information#model-settings">
+        <button type="button" className={processingButtonClass} onClick={() => showSettings("ai")}>
           {t("automation.editor.model")}
-        </a>
+        </button>
         <a className={processingButtonClass} href="/action?scope=processing_service&advanced=1">
           {t("automation.editor.advanced")}
         </a>
-        <a className={processingButtonClass} href="/information#diagnostics">
+        <button type="button" className={processingButtonClass} onClick={onHistory}>
           {t("automation.editor.history")}
-        </a>
+        </button>
       </div>
       <details className="rounded-lg border border-fill-secondary p-4">
         <summary className="cursor-pointer text-sm">{t("automation.editor.export")}</summary>

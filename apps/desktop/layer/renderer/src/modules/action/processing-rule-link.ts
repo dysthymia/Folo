@@ -9,7 +9,7 @@ export type ProcessingRuleContext =
 
 const isSupportedView = (value: number) => Number.isInteger(value) && value >= 0 && value <= 5
 
-export function buildProcessingRuleUrl(context: ProcessingRuleContext) {
+export function buildProcessingRuleUrl(context: ProcessingRuleContext, returnTo?: string) {
   const search = new URLSearchParams({ scope: "processing_service", [contextParam]: context.kind })
   if (context.kind === "source") search.set("sourceId", context.sourceId)
   if (context.kind === "category") {
@@ -17,11 +17,28 @@ export function buildProcessingRuleUrl(context: ProcessingRuleContext) {
     search.set("category", context.name)
   }
   if (context.kind === "view") search.set("view", String(context.view))
+  if (returnTo && validReadingReturnPath(returnTo)) search.set("returnTo", returnTo)
   return `/action?${search.toString()}`
 }
 
 export function openProcessingRuleEditor(context: ProcessingRuleContext) {
-  window.location.assign(buildProcessingRuleUrl(context))
+  // 把原来的条目深链与筛选一并带回，保存后可返回相同阅读目标。
+  window.location.assign(
+    buildProcessingRuleUrl(
+      context,
+      `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    ),
+  )
+}
+
+function validReadingReturnPath(path: string) {
+  // 返回入口限定同域阅读路径，不能被 query 注入外站跳转或管理操作。
+  return /^\/(?:timeline(?:\/|\?|$)|events(?:\/|\?|$))[^\\]*$/u.test(path)
+}
+
+export function parseProcessingReadingReturn(search: string) {
+  const path = new URLSearchParams(search).get("returnTo")
+  return path && validReadingReturnPath(path) ? path : null
 }
 
 export function parseProcessingRuleContext(search: string): ProcessingRuleContext | null {
@@ -118,4 +135,52 @@ export function prepareProcessingRuleContext(
     ],
   }
   return { ruleSet: next, ruleId: draft.id, created: true as const }
+}
+
+/** 去重管理沿用单规则编辑器，入口本身不写入后台。 */
+export function buildDedupeManagementUrl(ruleId?: string) {
+  const search = new URLSearchParams({ scope: "processing_service", dedupe: "1" })
+  if (ruleId) search.set("ruleId", ruleId)
+  return `/action?${search.toString()}`
+}
+
+export function prepareDedupeRule(
+  draft: RuleSet,
+  effective: RuleSet | null,
+  coverage: readonly { ruleId: string; sourceKeys: string[] }[],
+  name: string,
+): AutomationRule | null {
+  const existing = draft.rules.find((rule) =>
+    rule.actions.some((action) => action.type === "ai_dedupe"),
+  )
+  if (existing) return structuredClone(existing)
+  // 只从实际启用的后台 AI 规则取得已授权范围，空范围不能退化成全部来源。
+  const authorizedIds = new Set(
+    effective?.rules
+      .filter(
+        (rule) =>
+          rule.enabled &&
+          rule.actions.some((action) =>
+            ["ai_transform", "ai_aggregate", "ai_dedupe"].includes(action.type),
+          ),
+      )
+      .map((rule) => rule.id),
+  )
+  const sourceKeys = [
+    ...new Set(
+      coverage.filter((item) => authorizedIds.has(item.ruleId)).flatMap((item) => item.sourceKeys),
+    ),
+  ]
+  if (!sourceKeys.length) return null
+  return {
+    id: crypto.randomUUID(),
+    ownerId: draft.ownerId,
+    name,
+    enabled: false,
+    order: Math.max(-1, ...draft.rules.map((rule) => rule.order)) + 1,
+    version: 1,
+    executionLocation: "processing_service",
+    when: { anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: sourceKeys }] }] },
+    actions: [{ type: "ai_dedupe", scope: { all: true } }],
+  }
 }

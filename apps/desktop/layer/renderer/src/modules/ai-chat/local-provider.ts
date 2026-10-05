@@ -3,7 +3,8 @@ import { z } from "zod"
 import { oneTimeToken } from "~/lib/auth"
 
 const localAISettingsSchema = z.object({
-  provider: z.enum(["qianwen", "codex"]),
+  // 本机对话与后台共用已保存的自定义模型，不能因提供商新增而退回云端。
+  provider: z.enum(["qianwen", "codex", "openai-compatible"]),
   model: z.string().min(1),
   hasApiKey: z.boolean(),
 })

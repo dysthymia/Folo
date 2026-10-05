@@ -4,6 +4,7 @@ import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
 import { setAISetting, useAISettingValue } from "~/atoms/settings/ai"
+import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { useSemanticDedupeEvaluatorAvailability } from "~/providers/semantic-dedupe-provider"
 
 import {
@@ -12,6 +13,7 @@ import {
   SettingSwitch,
   SettingTabbedSegment,
 } from "../../control"
+import { BackendDedupeSection } from "./BackendDedupeSection"
 
 const reasoningEffortOptions: SemanticDedupeReasoningEffort[] = ["low", "medium", "high", "xhigh"]
 
@@ -20,7 +22,11 @@ const normalizeReasoningEffort = (value: string): SemanticDedupeReasoningEffort 
     ? (value as SemanticDedupeReasoningEffort)
     : "low"
 
-export const SemanticDedupeSection = () => {
+// 后台阅读使用已发布规则；原本地执行设置仅用于没有后台的客户端。
+export const SemanticDedupeSection = () =>
+  isLocalFoloHost() ? <BackendDedupeSection /> : <LocalDedupeSection />
+
+const LocalDedupeSection = () => {
   const { t } = useTranslation("ai")
   const { t: tApp } = useTranslation("app")
   const settings = useAISettingValue()
