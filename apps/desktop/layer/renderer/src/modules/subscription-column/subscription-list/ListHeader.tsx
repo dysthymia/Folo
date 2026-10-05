@@ -1,18 +1,18 @@
 import type { FeedViewType } from "@follow/constants"
 import { getView } from "@follow/constants"
-import { useUnreadByView } from "@follow/store/unread/hooks"
 import { stopPropagation } from "@follow/utils"
 import { useTranslation } from "react-i18next"
 
 import { useNavigateEntry } from "~/hooks/biz/useNavigateEntry"
 
+import { useSidebarUnreadByView } from "../hooks/use-sidebar-unread"
 import { UnreadNumber } from "../UnreadNumber"
 import { SortButton } from "./SortButton"
 
 export const ListHeader = ({ view }: { view: FeedViewType }) => {
   const { t } = useTranslation()
 
-  const totalUnread = useUnreadByView(view)
+  const totalUnread = useSidebarUnreadByView(view)
 
   const navigateEntry = useNavigateEntry()
 

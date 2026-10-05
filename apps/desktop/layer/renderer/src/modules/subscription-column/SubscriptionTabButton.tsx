@@ -1,7 +1,6 @@
 import { useDroppable } from "@dnd-kit/core"
 import { ActionButton } from "@follow/components/ui/button/index.js"
 import { FeedViewType, getView } from "@follow/constants"
-import { useUnreadByView } from "@follow/store/unread/hooks"
 import { cn } from "@follow/utils/utils"
 import type { FC } from "react"
 import { startTransition, useCallback } from "react"
@@ -17,6 +16,7 @@ import { useContextMenu } from "~/hooks/common/useContextMenu"
 import { openProcessingRuleEditor } from "~/modules/action/processing-rule-link"
 
 import { resetSelectedFeedIds } from "./atom"
+import { useSidebarUnreadByView } from "./hooks/use-sidebar-unread"
 import { useShowTimelineTabsSettingsModal } from "./TimelineTabsSettingsModal"
 
 const getTimelineTabTestId = (name: string) =>
@@ -165,7 +165,7 @@ const ViewAllSwitchButton: FC<{
   shortcut: string
   navigateToTimeline: (timelineId: string) => void
 }> = ({ timelineId, isActive, setActive, shortcut, navigateToTimeline }) => {
-  const unreadByView = useUnreadByView(FeedViewType.All)
+  const unreadByView = useSidebarUnreadByView(FeedViewType.All)
   const { t } = useTranslation()
   const showSidebarUnreadCount = useUISettingKey("sidebarShowUnreadCount")
   const item = getView(FeedViewType.All)
@@ -221,7 +221,7 @@ const ViewSwitchButton: FC<{
   shortcut: string
   navigateToTimeline: (timelineId: string) => void
 }> = ({ view, timelineId, isActive, setActive, shortcut, navigateToTimeline }) => {
-  const unreadByView = useUnreadByView(view)
+  const unreadByView = useSidebarUnreadByView(view)
   const { t } = useTranslation()
   const showSidebarUnreadCount = useUISettingKey("sidebarShowUnreadCount")
   const item = getView(view)

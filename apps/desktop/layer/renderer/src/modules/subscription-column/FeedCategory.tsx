@@ -37,6 +37,7 @@ import { useModalStack } from "../../components/ui/modal/stacked/hooks"
 import { ListCreationModalContent } from "../settings/tabs/lists/modals"
 import { CategoryRemoveDialogContent } from "./CategoryRemoveDialogContent"
 import { CategoryUnsubscribeDialogContent } from "./CategoryUnsubscribeDialogContent"
+import { useSidebarUnreadByIds } from "./hooks/use-sidebar-unread"
 import { RenameCategoryForm } from "./RenameCategoryForm"
 import { SortedFeedItems } from "./SortedFeedItems"
 import { feedColumnStyles } from "./styles"
@@ -147,7 +148,7 @@ function FeedCategoryImpl({
     }
   }
 
-  const unread = useUnreadByIds(ids)
+  const unread = useSidebarUnreadByIds(ids)
 
   const isActive = useRouteParamsSelector(
     (routerParams) => routerParams.feedId === `${ROUTE_FEED_IN_FOLDER}${folderName}`,

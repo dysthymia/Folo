@@ -41,6 +41,7 @@ import { getPreferredTitle } from "~/store/feed/hooks"
 
 import { useSelectedFeedIdsState } from "./atom"
 import { DraggableContext } from "./context"
+import { SourceRow } from "./SourceRow"
 import { feedColumnStyles } from "./styles"
 import { UnreadNumber } from "./UnreadNumber"
 
@@ -234,8 +235,10 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
     isFeed && !isOnboardingFeed && shouldShowFeedErrorIndicator(feed.errorAt)
 
   return (
-    <DraggableItemWrapper
-      isInMultipleSelection={isInMultipleSelection}
+    <SourceRow
+      renderContainer={(props) => (
+        <DraggableItemWrapper {...props} isInMultipleSelection={isInMultipleSelection} />
+      )}
       data-feed-id={feedId}
       data-sub={`feed-${feedId}`}
       data-active={
@@ -244,68 +247,60 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
           : isActive || isContextMenuOpen || isInMultipleSelection
       }
       className={cn(
-        feedColumnStyles.item,
         isFeed ? "py-0.5" : "py-1.5",
-        "justify-between py-0.5",
 
         className,
       )}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       {...contextMenuProps}
+      leadingClassName={showFeedErrorIndicator ? "text-red" : undefined}
+      trailing={
+        <>
+          {isOnboardingFeed && (
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger>
+                <i className="i-mingcute-sparkles-line shrink-0 text-base text-text-tertiary" />
+              </TooltipTrigger>
+              <TooltipPortal>
+                <TooltipContent>{t("feed_item.onboarding_feed")}</TooltipContent>
+              </TooltipPortal>
+            </Tooltip>
+          )}
+          {!isOnboardingFeed &&
+            (isPreview ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                buttonClassName="!p-1 mr-0.5"
+                onClick={() => follow({ isList: false, id: feedId, url: feed.url })}
+              >
+                <i className="i-mgc-add-cute-re text-base text-accent" />
+              </Button>
+            ) : (
+              <UnreadNumber unread={feedUnread} className="ml-2" />
+            ))}
+        </>
+      }
     >
-      <div className={cn("flex min-w-0 items-center", showFeedErrorIndicator && "text-red")}>
-        <FeedIcon fallback target={feed} size={16} />
-        <FeedTitle feed={feed} />
-        {showFeedErrorIndicator && (
-          <ErrorTooltip errorAt={feed.errorAt} errorMessage={feed.errorMessage}>
-            <i className="i-mingcute-close-circle-fill ml-1 shrink-0 text-base" />
-          </ErrorTooltip>
-        )}
-        {subscription?.isPrivate && !isOnboardingFeed && (
-          <Tooltip delayDuration={300}>
-            <TooltipTrigger>
-              <OouiUserAnonymous className="ml-1 shrink-0 text-base" />
-            </TooltipTrigger>
-            <TooltipPortal>
-              <TooltipContent>{t("feed_item.not_publicly_visible")}</TooltipContent>
-            </TooltipPortal>
-          </Tooltip>
-        )}
-      </div>
-      {isOnboardingFeed && (
+      <FeedIcon fallback target={feed} size={16} />
+      <FeedTitle feed={feed} />
+      {showFeedErrorIndicator && (
+        <ErrorTooltip errorAt={feed.errorAt} errorMessage={feed.errorMessage}>
+          <i className="i-mingcute-close-circle-fill ml-1 shrink-0 text-base" />
+        </ErrorTooltip>
+      )}
+      {subscription?.isPrivate && !isOnboardingFeed && (
         <Tooltip delayDuration={300}>
           <TooltipTrigger>
-            <i className="i-mingcute-sparkles-line shrink-0 text-base text-text-tertiary" />
+            <OouiUserAnonymous className="ml-1 shrink-0 text-base" />
           </TooltipTrigger>
           <TooltipPortal>
-            <TooltipContent>{t("feed_item.onboarding_feed")}</TooltipContent>
+            <TooltipContent>{t("feed_item.not_publicly_visible")}</TooltipContent>
           </TooltipPortal>
         </Tooltip>
       )}
-      {!isOnboardingFeed && (
-        <>
-          {isPreview ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              buttonClassName="!p-1 mr-0.5"
-              onClick={() => {
-                follow({
-                  isList: false,
-                  id: feedId,
-                  url: feed.url,
-                })
-              }}
-            >
-              <i className="i-mgc-add-cute-re text-base text-accent" />
-            </Button>
-          ) : (
-            <UnreadNumber unread={feedUnread} className="ml-2" />
-          )}
-        </>
-      )}
-    </DraggableItemWrapper>
+    </SourceRow>
   )
 }
 
