@@ -34,6 +34,7 @@ import { HighlightedText } from "~/modules/spotlight/HighlightedText"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
 import { MergedEntriesBadge } from "../merged-entries-badge"
+import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
@@ -156,6 +157,7 @@ export function AllItem({
           "before:absolute before:-left-4 before:top-[14px] before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryProcessingStatusIcon entryId={entryId} />
       <EntryStarActionButton entryId={entryId} view={view} className="-ml-1" />
       {currentFeedTitle !== thisFeedTitle && (
         <FeedIcon target={related} fallback entry={iconEntry} size={16} />

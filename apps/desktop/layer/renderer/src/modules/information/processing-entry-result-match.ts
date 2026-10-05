@@ -8,12 +8,28 @@ export type ProcessingEntryResult = {
   releaseVersion: number
 }
 
-// 同一条目可能从多个清单进入处理服务；只接受能确定真实来源的唯一决定。
-export function resolveProcessingEntryResult(
-  entries: readonly ProcessingEntryResult[],
+export type ProcessingEntryIdentity = Pick<
+  ProcessingEntryResult,
+  "itemId" | "sourceKey" | "sourceId"
+>
+
+// 状态只需证明有一个同源的已完成决定；多个清单结果不妨碍显示“已处理”。
+export function hasProcessingEntry(
+  entries: readonly ProcessingEntryIdentity[],
   entryId: string,
   sourceIds: readonly string[],
-): ProcessingEntryResult | null {
+): boolean {
+  return entries.some(
+    (item) => item.itemId === entryId && !!item.sourceId && sourceIds.includes(item.sourceId),
+  )
+}
+
+// 同一条目可能从多个清单进入处理服务；只接受能确定真实来源的唯一决定。
+export function resolveProcessingEntryResult<T extends ProcessingEntryIdentity>(
+  entries: readonly T[],
+  entryId: string,
+  sourceIds: readonly string[],
+): T | null {
   const candidates = entries.filter(
     (item) => item.itemId === entryId && item.sourceId && sourceIds.includes(item.sourceId),
   )

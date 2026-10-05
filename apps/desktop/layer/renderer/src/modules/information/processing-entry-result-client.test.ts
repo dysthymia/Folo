@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { ProcessingEntryResult } from "./processing-entry-result-match"
-import { resolveProcessingEntryResult } from "./processing-entry-result-match"
+import { hasProcessingEntry, resolveProcessingEntryResult } from "./processing-entry-result-match"
 
 const result = (
   sourceKey: string,
@@ -42,5 +42,14 @@ describe("resolveProcessingEntryResult", () => {
     expect(
       resolveProcessingEntryResult([result("feed/b", "feed/b", 1)], "entry-1", ["feed/a"]),
     ).toBeNull()
+  })
+})
+
+describe("hasProcessingEntry", () => {
+  it("多个清单决定仍能确认处理状态，但错误来源不能点亮图标", () => {
+    const entries = [result("list/one", "feed/a", 1), result("list/two", "feed/a", 2)]
+    expect(hasProcessingEntry(entries, "entry-1", ["feed/a"])).toBe(true)
+    expect(hasProcessingEntry(entries, "entry-1", ["feed/b"])).toBe(false)
+    expect(hasProcessingEntry([result("list/one", null, 1)], "entry-1", ["feed/a"])).toBe(false)
   })
 })

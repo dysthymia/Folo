@@ -18,6 +18,7 @@ import { Media } from "~/components/ui/media/Media"
 import { FEED_COLLECTION_LIST } from "~/constants"
 import { useEntryIsRead } from "~/hooks/biz/useAsRead"
 import { useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
+import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { EntryTranslation } from "~/modules/entry-column/translation"
 import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
@@ -25,6 +26,7 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
 import { MergedEntriesBadge } from "../merged-entries-badge"
+import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
 import type { UniversalItemProps } from "../types"
 
@@ -161,6 +163,8 @@ export function ListItem({
   let savedWidth = 0
 
   savedWidth += starActionWidth
+  // 本地列表在未读点与收藏之间预留处理状态图标的固定宽度。
+  if (isLocalFoloHost()) savedWidth += 20
   savedWidth += feedIconWidth
 
   if (hasAudio) {
@@ -178,6 +182,7 @@ export function ListItem({
           "before:absolute before:-left-3 before:top-5 before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryProcessingStatusIcon entryId={entryId} className="mt-0.5" />
       <EntryStarActionButton entryId={entryId} view={view} className="-ml-1 mt-0.5" />
       <FeedIcon target={related} fallback entry={iconEntry} size={24} />
       <div

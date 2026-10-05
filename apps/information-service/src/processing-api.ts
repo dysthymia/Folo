@@ -1,4 +1,4 @@
-import { compileInstructions, scheduleScopeSchema } from "@follow/information-core"
+import { compileInstructions, ruleUsesAI, scheduleScopeSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
@@ -81,6 +81,11 @@ export type ProcessingEntryListItem = {
 export type ProcessingEntryListResponse = { entries: ProcessingEntryListItem[] }
 export type ProcessingEntryRolesResponse = { roles: ProcessingEntryRole[] }
 export type ProcessingEntryResultsResponse = {
+  processed: Array<{
+    itemId: string
+    sourceKey: string
+    sourceId: string | null
+  }>
   results: Array<{
     itemId: string
     sourceKey: string
@@ -344,20 +349,20 @@ export function processingApi(
     const availableSources = new Set(store.sources().map((source) => source.key))
     const releases = new Map<number, ReturnType<typeof store.automation.release>>()
     // 时间线只轮询身份索引，正文与完整结果在用户点击后才读取。
-    const results = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
+    const entries = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
       if (
         input.releaseVersion === null ||
         !availableSources.has(input.sourceKey) ||
-        store.stories.isMaterialWithdrawn(input.seq) ||
-        !decision.summary.trim()
+        store.stories.isMaterialWithdrawn(input.seq)
       )
         return []
       if (!releases.has(input.releaseVersion))
         releases.set(input.releaseVersion, store.automation.release(input.releaseVersion))
       const config = releases.get(input.releaseVersion)
-      // 仅标记执行当时真正命中 AI 变换的输出，普通动作与后来改动的草稿不会制造假结果。
-      if (!config || !compileInstructions(config, decision.context).transformations.length)
-        return []
+      if (!config) return []
+      const instructions = compileInstructions(config, decision.context)
+      // 处理状态取执行时实际命中的 AI 规则；仅摘要变换才暴露可打开的 AI 结果。
+      if (!instructions.matched.some(ruleUsesAI)) return []
       return [
         {
           itemId: input.itemId,
@@ -373,10 +378,18 @@ export function processingApi(
           decisionId,
           contentVersion: input.contentVersion,
           releaseVersion: input.releaseVersion,
+          hasResult: !!decision.summary.trim() && instructions.transformations.length > 0,
         },
       ]
     })
-    return { results } satisfies ProcessingEntryResultsResponse
+    return {
+      processed: entries.map(({ itemId, sourceKey, sourceId }) => ({
+        itemId,
+        sourceKey,
+        sourceId,
+      })),
+      results: entries.flatMap(({ hasResult, ...result }) => (hasResult ? [result] : [])),
+    } satisfies ProcessingEntryResultsResponse
   }
   if (path === "/processing/entries" && method === "GET")
     return { entries: entryView(store) } satisfies ProcessingEntryListResponse

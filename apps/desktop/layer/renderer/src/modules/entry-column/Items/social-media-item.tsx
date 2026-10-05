@@ -22,6 +22,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
 import { socialMediaContentWidthAtom } from "../atoms/social-media-content-width"
+import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, EntryListItemFC } from "../types"
@@ -105,6 +106,7 @@ export const SocialMediaItem: EntryListItemFC = ({
           "before:absolute before:-left-3 before:top-8 before:block before:size-2 before:rounded-full before:bg-accent",
       )}
     >
+      <EntryProcessingStatusIcon entryId={entryId} className="mt-1" />
       <EntryStarActionButton entryId={entryId} view={view} className="-ml-1 mr-1 mt-1" />
       <FeedIcon fallback target={feed} entry={iconEntry} size={32} className="mt-1" />
       <div ref={ref} className="ml-2 min-w-0 flex-1">

@@ -5,11 +5,23 @@ import { z } from "zod"
 
 import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 
-import type { ProcessingEntryResult } from "./processing-entry-result-match"
-import { resolveProcessingEntryResult } from "./processing-entry-result-match"
+import type {
+  ProcessingEntryIdentity,
+  ProcessingEntryResult,
+} from "./processing-entry-result-match"
+import { hasProcessingEntry, resolveProcessingEntryResult } from "./processing-entry-result-match"
 import { readingRequest, ReadingRequestError } from "./processing-reader-client"
 
 const resultIndexSchema = z.object({
+  processed: z
+    .array(
+      z.object({
+        itemId: z.string(),
+        sourceKey: z.string(),
+        sourceId: z.string().nullable(),
+      }),
+    )
+    .optional(),
   results: z.array(
     z.object({
       itemId: z.string(),
@@ -24,8 +36,15 @@ const resultIndexSchema = z.object({
 })
 
 const emptyResults: ProcessingEntryResult[] = []
+const emptyIndex: {
+  results: ProcessingEntryResult[]
+  processed: ProcessingEntryIdentity[] | null
+} = {
+  results: emptyResults,
+  processed: null,
+}
 let ownerId: string | null = null
-let results: ProcessingEntryResult[] = emptyResults
+let index = emptyIndex
 let controller: AbortController | null = null
 let interval: ReturnType<typeof setInterval> | null = null
 const listeners = new Set<() => void>()
@@ -35,7 +54,7 @@ const reset = (nextOwner: string | null) => {
   controller?.abort()
   controller = null
   ownerId = nextOwner
-  results = emptyResults
+  index = emptyIndex
   emit()
 }
 
@@ -47,11 +66,17 @@ const refresh = () => {
   void readingRequest("processing/entry-results", resultIndexSchema, request.signal)
     .then((response) => {
       if (request.signal.aborted || ownerId !== requestOwner) return
-      results = response.results
+      index = { results: response.results, processed: response.processed ?? null }
       emit()
     })
     .catch((error: unknown) => {
-      if (error instanceof ReadingRequestError && error.kind === "authorization") reset(null)
+      if (request.signal.aborted || ownerId !== requestOwner) return
+      if (error instanceof ReadingRequestError && error.kind === "authorization") {
+        // 授权失败时撤销当前确认，但保留账号以便下一轮自动重试；账号变化会由 useResultIndex 清空。
+        index = emptyIndex
+        emit()
+      }
+      // 短暂的网络或服务错误不抹掉同一账号上次确认的处理记录。
     })
     .finally(() => {
       if (controller === request) controller = null
@@ -75,7 +100,7 @@ const subscribe = (listener: () => void) => {
   }
 }
 
-export function useProcessingEntryResult(entryId: string): ProcessingEntryResult | null {
+function useResultIndex() {
   const user = useWhoami()
   const userId = user?.id ?? null
   useEffect(() => {
@@ -84,14 +109,17 @@ export function useProcessingEntryResult(entryId: string): ProcessingEntryResult
       refresh()
     }
   }, [userId])
-  const index = useSyncExternalStore(
+  return useSyncExternalStore(
     subscribe,
-    () => (ownerId === userId ? results : emptyResults),
-    () => emptyResults,
+    () => (ownerId === userId ? index : emptyIndex),
+    () => emptyIndex,
   )
+}
+
+function entrySourceIds(entryId: string): string[] | null {
   const entry = getEntry(entryId)
   if (!entry) return null
-  const sources = [
+  return [
     ...(entry.feedId ? [`feed/${entry.feedId}`] : []),
     ...(entry.inboxHandle ? [`inbox/${entry.inboxHandle}`] : []),
     ...(entry.sources ?? []).flatMap((source) =>
@@ -102,5 +130,20 @@ export function useProcessingEntryResult(entryId: string): ProcessingEntryResult
           : [],
     ),
   ]
-  return resolveProcessingEntryResult(index, entryId, sources)
+}
+
+export function useProcessingEntryResult(entryId: string): ProcessingEntryResult | null {
+  const { results } = useResultIndex()
+  const sources = entrySourceIds(entryId)
+  return sources ? resolveProcessingEntryResult(results, entryId, sources) : null
+}
+
+/** null 表示服务尚未确认状态，不能把加载失败误写成“未处理”。 */
+export function useProcessingEntryStatus(entryId: string): boolean | null {
+  const { processed, results } = useResultIndex()
+  const sources = entrySourceIds(entryId)
+  if (!isLocalFoloHost() || !sources) return null
+  // 旧后台仍能确认摘要变换已完成；其它条目等新状态索引到位后再判断。
+  if (!processed) return hasProcessingEntry(results, entryId, sources) ? true : null
+  return hasProcessingEntry(processed, entryId, sources)
 }

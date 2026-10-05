@@ -29,7 +29,7 @@ const entry: SourceEntry = {
   read: false,
   publishedAt: "2026-09-01T00:00:00.000Z",
 }
-function fixture(transform = true) {
+function fixture(action: "transform" | "dedupe" | "local" = "transform") {
   const store = new Store(":memory:")
   stores.push(store)
   store.bindOwner("owner")
@@ -47,9 +47,12 @@ function fixture(transform = true) {
         version: 1,
         executionLocation: "processing_service",
         when: { all: true },
-        actions: transform
-          ? [{ type: "ai_transform", prompt: "摘要" }]
-          : [{ type: "local_filter", mode: "silence" }],
+        actions:
+          action === "transform"
+            ? [{ type: "ai_transform", prompt: "摘要" }]
+            : action === "dedupe"
+              ? [{ type: "ai_dedupe", scope: { all: true } }]
+              : [{ type: "local_filter", mode: "silence" }],
       },
     ],
   }
@@ -94,6 +97,9 @@ describe("时间线 AI 结果轻量索引", () => {
     const store = fixture()
     const input = complete(store)
     const index = results(store).results[0]!
+    expect(results(store).processed).toEqual([
+      { itemId: entry.id, sourceKey: source.key, sourceId: source.key },
+    ])
     expect(index).toEqual({
       itemId: entry.id,
       sourceKey: source.key,
@@ -118,6 +124,7 @@ describe("时间线 AI 结果轻量索引", () => {
     const input = complete(store)
     store.saveEntry({ ...entry, content: "更新正文" })
     expect(results(store).results).toEqual([])
+    expect(results(store).processed).toEqual([])
     expect(() => processingApi(store, "GET", `/processing/entries/${input.seq}`, null)).toThrow(
       "invalid_target",
     )
@@ -128,13 +135,24 @@ describe("时间线 AI 结果轻量索引", () => {
   })
 
   it("只按执行时配置判断真实AI变换，不把普通动作伪装成AI结果", () => {
-    const store = fixture(false)
+    const store = fixture("local")
     complete(store)
     expect(results(store).results).toEqual([])
+    expect(results(store).processed).toEqual([])
     const draft = store.automation.draft()
     draft.config.rules[0]!.actions = [{ type: "ai_transform", prompt: "后来增加" }]
     store.automation.saveDraft(draft.config, draft.revision)
     expect(results(store).results).toEqual([])
+    expect(results(store).processed).toEqual([])
+  })
+
+  it("去重规则的已完成决定有处理标记，但没有可打开的摘要变换结果", () => {
+    const store = fixture("dedupe")
+    complete(store)
+    expect(results(store)).toMatchObject({
+      processed: [{ itemId: entry.id, sourceKey: source.key, sourceId: source.key }],
+      results: [],
+    })
   })
 
   it("来源撤销和材料撤回立即移出索引，同时阻止懒详情读取", () => {
@@ -142,6 +160,7 @@ describe("时间线 AI 结果轻量索引", () => {
     const input = complete(store)
     store.stories.withdrawMaterial(input.seq, "撤回")
     expect(results(store).results).toEqual([])
+    expect(results(store).processed).toEqual([])
     expect(() => processingApi(store, "GET", `/processing/entries/${input.seq}`, null)).toThrow(
       "invalid_target",
     )
