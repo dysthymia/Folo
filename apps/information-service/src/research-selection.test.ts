@@ -722,3 +722,39 @@ it("未入队材料网络预检中重复key返回running，等待结束后只执
   expect((await first).status).toBe("completed")
   expect(remote.execute).toHaveBeenCalledTimes(2)
 })
+
+it("推理强度研究生成和支持检查绑定同一次配置读取", async () => {
+  const read = vi
+    .spyOn(aiConfig, "read")
+    .mockResolvedValue({ provider: "codex", model: "test-model", reasoningEffort: "high" })
+  const efforts: Array<string | undefined> = []
+  try {
+    const f = fixture({
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        efforts.push(request.reasoningEffort)
+        const result = request.prompt.startsWith("研究支持检查")
+          ? { supported: true, issues: [] }
+          : selectedOutput
+        expect(request.validate(result)).toBe(true)
+        return {
+          result: result as T,
+          model: request.model,
+          usage: null,
+          durationMs: 1,
+          toolCalls: 0,
+        }
+      },
+    })
+    const preview = await f.service.preview(f.request)
+    const result = await f.service.run({
+      ...f.request,
+      selectionToken: preview.selectionToken,
+      idempotencyKey: "research_reasoning_123456",
+    })
+    expect(result.status).toBe("completed")
+    expect(efforts).toEqual(["high", "high"])
+    expect(read).toHaveBeenCalledTimes(1)
+  } finally {
+    read.mockRestore()
+  }
+})

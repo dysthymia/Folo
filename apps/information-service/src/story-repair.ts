@@ -5,10 +5,13 @@ import { compileInstructions, matchConditions } from "@follow/information-core"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
+import { aiReasoningEffort } from "./ai-reasoning"
 import type { CodexUsage } from "./codex"
 import { runCodexJson } from "./codex"
 import type { PublishedDecision } from "./processing-decision"
 import { compatibleEvents, traceableEvent } from "./processing-event"
+import type { ProcessingReadStateLookup } from "./processing-read-state"
+import { inputReadState } from "./processing-read-state"
 import { sourceText } from "./service"
 import type { RepairingStory, StoryRevisionDraft, StoryStore } from "./story-store"
 import { sourceSpanFragmentId } from "./story-store"
@@ -73,7 +76,10 @@ export type StoryRepairResult = {
   usage: CodexUsage
 }
 export type StoryRepairOptions = {
+  /** 列表事件只修复包含本次条目身份的既有 Story。 */
+  targets?: readonly { sourceKey: string; itemId: string }[]
   decisions: PublishedDecision[]
+  currentEntry?: ProcessingReadStateLookup
   // 兼容已有调用；接线后应传 releases，避免把最新规则套到历史 Story。
   ruleSets: RuleSet[]
   releasedRuleSets?: ReleasedRuleSet[]
@@ -99,6 +105,24 @@ export async function runStoryRepair(options: StoryRepairOptions): Promise<Story
       continue
     }
     const mapped = currentOriginCandidates(target, options.decisions)
+    if (
+      options.targets &&
+      !mapped.some((candidate) =>
+        options.targets!.some(
+          (target) =>
+            target.sourceKey === candidate.input.sourceKey &&
+            target.itemId === candidate.input.itemId,
+        ),
+      )
+    )
+      continue
+    // 修复也是日常 AI 调用；读态不合格时保持修复待办，不能删除旧成员或改写既有结果。
+    if (
+      mapped.some((candidate) => inputReadState(candidate.input, options.currentEntry) !== false)
+    ) {
+      result.pending.push({ storyId: target.story.id, reason: "excluded" })
+      continue
+    }
     const currentReleaseVersions = new Set(
       mapped
         .map((candidate) => candidate.input.releaseVersion)
@@ -189,10 +213,10 @@ export async function runStoryRepair(options: StoryRepairOptions): Promise<Story
         schema: z.toJSONSchema(repairOutputSchema),
         validate: (value): value is RepairOutput => repairOutputSchema.safeParse(value).success,
         model: config.model,
-        reasoningEffort: "low",
+        reasoningEffort: aiReasoningEffort(config),
         runtimeDir: options.runtimeDir,
         signal: options.signal,
-        qianwen: await options.aiConfig.execution(config.provider),
+        qianwen: await options.aiConfig.execution(config),
       })
     } catch {
       result.failures.push({ storyId: target.story.id, reason: "model_failed" })

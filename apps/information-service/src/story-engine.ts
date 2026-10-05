@@ -7,12 +7,17 @@ import { join } from "pathe"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
+import { aiEndpointFingerprint } from "./ai-config"
+import { aiReasoningEffort, reasoningFingerprint } from "./ai-reasoning"
 import type { ProcessingInput } from "./automation-store"
 import type { CodexUsage } from "./codex"
 import { runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
 import type { PublishedDecision } from "./processing-decision"
 import { compatibleEvents, traceableEvent } from "./processing-event"
+import type { EvidenceFragment } from "./processing-evidence"
+import type { ProcessingReadStateLookup } from "./processing-read-state"
+import { inputReadState } from "./processing-read-state"
 import type { ActiveStory, StoryFactKind, StoryRevisionDraft, StoryStore } from "./story-store"
 import { sourceSpanFragmentId } from "./story-store"
 
@@ -21,7 +26,7 @@ const MAX_MATERIAL_CHARS = 120_000
 const modelEvidenceSchema = z
   .object({ inputSeq: z.number().int().positive(), evidenceId: z.string().min(1).max(80) })
   .strict()
-const storyModelOutputSchema = z
+export const storyModelOutputSchema = z
   .object({
     groups: z
       .array(
@@ -63,7 +68,7 @@ const storyModelOutputSchema = z
       .max(20),
   })
   .strict()
-type StoryModelOutput = z.infer<typeof storyModelOutputSchema>
+export type StoryModelOutput = z.infer<typeof storyModelOutputSchema>
 type AggregateAction = Extract<
   RuleSet["rules"][number]["actions"][number],
   { type: "ai_aggregate" }
@@ -96,8 +101,31 @@ export type StoryAggregationResult = {
   usage: CodexUsage
   cacheHits: number
 }
+export type SharedStoryGroup = {
+  ruleId: string
+  ruleFingerprint: string
+  inputSeqs: readonly number[]
+  inputs: readonly Pick<
+    ProcessingInput,
+    "seq" | "generation" | "contentVersion" | "sourceKey" | "itemId"
+  >[]
+  evidenceCatalogs: readonly { inputSeq: number; fragments: readonly EvidenceFragment[] }[]
+  output: StoryModelOutput
+}
+
+// 统一分析与独立综述使用同一规则指纹，规则或全局指令变动后不能复用旧草稿。
+export function sharedStoryRuleFingerprint(
+  rule: RuleSet["rules"][number],
+  global: RuleSet["global"],
+) {
+  return fingerprint({ rule, global })
+}
+
 export type StoryAggregationOptions = {
+  /** 旧材料可作同事件上下文，只有含本次目标的批次才允许推进。 */
+  targets?: readonly { sourceKey: string; itemId: string }[]
   decisions: PublishedDecision[]
+  currentEntry?: ProcessingReadStateLookup
   ruleSet: RuleSet
   stories: StoryStore
   aiConfig: AIConfigStore
@@ -105,6 +133,10 @@ export type StoryAggregationOptions = {
   signal: AbortSignal
   execute?: typeof runCodexJson
   alreadyClaimedInputSeqs?: number[]
+  /** 同批单篇分析产出的草稿；完整请求身份仍有效时允许按事件消费子批次。 */
+  sharedGroups?: readonly SharedStoryGroup[]
+  /** 已被去重代表覆盖的材料不再提供新综述来源。 */
+  hiddenInputSeqs?: readonly number[]
 }
 
 // 进程内缓存只避免同一材料与指令的重复付费；持久化 revision 仍由 StoryStore 的 CAS 和资格校验保护。
@@ -125,7 +157,10 @@ export async function runStoryAggregation(
     result.pending.push({ ruleId: "aborted", inputSeqs: [], reason: "aborted" })
     return result
   }
-  const claimed = new Set<number>(options.alreadyClaimedInputSeqs)
+  const claimed = new Set<number>([
+    ...(options.alreadyClaimedInputSeqs ?? []),
+    ...(options.hiddenInputSeqs ?? []),
+  ])
   const actions = options.ruleSet.rules
     .filter((rule) => rule.enabled)
     .sort((left, right) => left.order - right.order)
@@ -146,6 +181,7 @@ export async function runStoryAggregation(
       rule.id,
       claimed,
       rule.when,
+      options.currentEntry,
     )
     result.pending.push(...pending)
     if (candidates.length === 0) continue
@@ -163,17 +199,29 @@ export async function runStoryAggregation(
       })
       continue
     }
-    const config = await options.aiConfig.read()
     const batches =
       action.mode === "same_event"
         ? sameEventCandidates(candidates).flatMap(chunkCandidates)
         : chunkCandidates(candidates)
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex]!
+    const selectedBatches = options.targets
+      ? batches.filter((batch) =>
+          batch.some((candidate) =>
+            options.targets!.some(
+              (target) =>
+                target.sourceKey === candidate.input.sourceKey &&
+                target.itemId === candidate.input.itemId,
+            ),
+          ),
+        )
+      : batches
+    if (!selectedBatches.length) continue
+    const config = await options.aiConfig.read()
+    for (let batchIndex = 0; batchIndex < selectedBatches.length; batchIndex++) {
+      const batch = selectedBatches[batchIndex]!
       if (options.signal.aborted) {
         result.pending.push({
           ruleId: rule.id,
-          inputSeqs: batches
+          inputSeqs: selectedBatches
             .slice(batchIndex)
             .flatMap((item) => item.map((candidate) => candidate.input.seq)),
           reason: "aborted",
@@ -198,6 +246,33 @@ export async function runStoryAggregation(
         })
         continue
       }
+      // 既有 Story 的更新仍需要当前 revision；共享草稿仅用于本批新建综述。
+      const sharedOutput =
+        existing.length === 0
+          ? sharedStoryOutput(
+              options.sharedGroups,
+              rule,
+              options.ruleSet.global,
+              batch,
+              options.decisions,
+            )
+          : undefined
+      if (sharedOutput) {
+        publishGroups({
+          result,
+          output: sharedOutput,
+          ruleId: rule.id,
+          ruleVersion: rule.version,
+          action,
+          scopeVersion,
+          candidates: batch,
+          existing,
+          stories: options.stories,
+          global: options.ruleSet.global.markdown,
+          targets: options.targets,
+        })
+        continue
+      }
       const prompt = `${options.ruleSet.global.markdown}\n\n${modelPrompt({ ruleId: rule.id, mode: action.mode, action, candidates: batch, existing })}`
       if (prompt.length > MAX_MATERIAL_CHARS) {
         result.pending.push({
@@ -210,6 +285,8 @@ export async function runStoryAggregation(
       const cacheKey = fingerprint({
         provider: config.provider,
         model: config.model,
+        endpointFingerprint: aiEndpointFingerprint(config),
+        reasoningEffort: reasoningFingerprint(aiReasoningEffort(config)),
         promptVersion: 7,
         runtimeDir: options.runtimeDir,
         ruleId: rule.id,
@@ -242,10 +319,10 @@ export async function runStoryAggregation(
             validate: (value): value is StoryModelOutput =>
               storyModelOutputSchema.safeParse(value).success,
             model: config.model,
-            reasoningEffort: "low",
+            reasoningEffort: aiReasoningEffort(config),
             runtimeDir: options.runtimeDir,
             signal: options.signal,
-            qianwen: await options.aiConfig.execution(config.provider),
+            qianwen: await options.aiConfig.execution(config),
           })
           output = response.result
           modelCache.set(cacheKey, output)
@@ -271,10 +348,90 @@ export async function runStoryAggregation(
         existing,
         stories: options.stories,
         global: options.ruleSet.global.markdown,
+        targets: options.targets,
       })
     }
   }
   return result
+}
+
+// 编号目录由服务端保存；引用必须同时命中本代际原文和已发布 facts，不能扩大单篇许可证据。
+function sharedStoryOutput(
+  drafts: readonly SharedStoryGroup[] | undefined,
+  rule: RuleSet["rules"][number],
+  global: RuleSet["global"],
+  candidates: Candidate[],
+  decisions: PublishedDecision[],
+): StoryModelOutput | undefined {
+  const expectedSeqs = candidates.map((candidate) => candidate.input.seq)
+  const currentBySeq = new Map(decisions.map((decision) => [decision.input.seq, decision.input]))
+  const draft = drafts?.find((item) => {
+    const covered = new Set(item.inputSeqs)
+    return (
+      item.ruleId === rule.id &&
+      item.ruleFingerprint === sharedStoryRuleFingerprint(rule, global) &&
+      covered.size === item.inputSeqs.length &&
+      expectedSeqs.every((seq) => covered.has(seq)) &&
+      item.inputs.length === covered.size &&
+      new Set(item.inputs.map((input) => input.seq)).size === covered.size &&
+      item.inputs.every((saved) => {
+        const current = currentBySeq.get(saved.seq)
+        return (
+          covered.has(saved.seq) &&
+          current?.current &&
+          current.status === "succeeded" &&
+          saved.generation === current.generation &&
+          saved.contentVersion === current.contentVersion &&
+          saved.sourceKey === current.sourceKey &&
+          saved.itemId === current.itemId
+        )
+      })
+    )
+  })
+  if (!draft) return undefined
+  const parsed = storyModelOutputSchema.safeParse(draft.output)
+  if (!parsed.success) return undefined
+  const candidateBySeq = new Map(candidates.map((candidate) => [candidate.input.seq, candidate]))
+  try {
+    return {
+      // 统一请求可能覆盖多个事件或去重前的来源；只消费完全属于当前正式候选批次的组。
+      // 空输出也代表本批已经分析，避免按事件拆批后重复支付相同材料的综合费用。
+      groups: parsed.data.groups
+        .filter((group) => groupInputSeqs(group).every((seq) => candidateBySeq.has(seq)))
+        .map((group) => {
+          if (group.existingStoryId !== null) throw new Error("unexpected_existing_story")
+          return {
+            ...group,
+            sentences: group.sentences.map((sentence) => ({
+              ...sentence,
+              sources: sentence.sources.map((source) => {
+                const candidate = candidateBySeq.get(source.inputSeq)
+                const quote = draft.evidenceCatalogs
+                  .find((catalog) => catalog.inputSeq === source.inputSeq)
+                  ?.fragments.find((fragment) => fragment.evidenceId === source.evidenceId)?.quote
+                const factIndex = candidate?.decision.facts.findIndex(
+                  (fact) => quote !== undefined && normalize(fact.quote) === normalize(quote),
+                )
+                if (
+                  !candidate ||
+                  quote === undefined ||
+                  factIndex === undefined ||
+                  factIndex < 0 ||
+                  !normalize(candidate.text).includes(normalize(quote))
+                )
+                  throw new Error("invalid_shared_evidence")
+                return {
+                  inputSeq: source.inputSeq,
+                  evidenceId: evidenceId(source.inputSeq, factIndex),
+                }
+              }),
+            })),
+          }
+        }),
+    }
+  } catch {
+    return undefined
+  }
 }
 
 function candidatesForAction(
@@ -283,11 +440,14 @@ function candidatesForAction(
   ruleId: string,
   claimed: Set<number>,
   when: RuleSet["rules"][number]["when"],
+  currentEntry?: ProcessingReadStateLookup,
 ) {
   const pending: PendingStory[] = []
   const grouped = new Map<string, Candidate[]>()
   for (const published of decisions) {
     if (claimed.has(published.input.seq)) continue
+    // 已成功单篇不代表仍未读；综述资格必须查当前读态，保留既有结果但不重复付费。
+    if (inputReadState(published.input, currentEntry) !== false) continue
     const reason = ineligibleReason(published)
     if (reason) {
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason })
@@ -372,6 +532,7 @@ function chunkCandidates(candidates: Candidate[]) {
 }
 
 function publishGroups(input: {
+  targets?: readonly { sourceKey: string; itemId: string }[]
   result: StoryAggregationResult
   output: StoryModelOutput
   ruleId: string
@@ -391,6 +552,22 @@ function publishGroups(input: {
   for (const group of input.output.groups) {
     try {
       const newMembers = groupInputSeqs(group)
+      // 模型可把同批上下文拆成多个组；不落地完全不含本次目标的旁支输出。
+      if (
+        input.targets &&
+        !newMembers.some((seq) => {
+          const candidate = candidateBySeq.get(seq)
+          return (
+            candidate &&
+            input.targets!.some(
+              (target) =>
+                target.sourceKey === candidate.input.sourceKey &&
+                target.itemId === candidate.input.itemId,
+            )
+          )
+        })
+      )
+        continue
       if (newMembers.some((member) => used.has(member))) throw new Error("overlapping_model_groups")
       for (const member of newMembers) used.add(member)
       const existing = selectExisting(group.existingStoryId, newMembers, input.existing)

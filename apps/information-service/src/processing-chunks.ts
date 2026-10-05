@@ -5,6 +5,9 @@ import type { compileInstructions } from "@follow/information-core"
 import { join } from "pathe"
 import { z } from "zod"
 
+import type { AIChatExecution, AIProvider } from "./ai-config"
+import type { ReasoningEffort } from "./ai-reasoning"
+import { reasoningFingerprint } from "./ai-reasoning"
 import type { CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import type { EntryModelOutput, EntryModelSelection } from "./processing-decision"
@@ -58,14 +61,17 @@ export type LongEntryResult =
 export type LongEntryOptions = {
   entryId: string
   text: string
-  provider: "codex" | "qianwen"
+  provider: AIProvider
   model: string
+  endpointFingerprint?: string
+  // 分块与最终综合共用调用方冻结的强度，并进入分块缓存身份。
+  reasoningEffort?: ReasoningEffort
   instructions: Instructions
   sourceRole: string
   historySince: string
   runtimeDir: string
   signal: AbortSignal
-  qianwen?: { apiKey: string }
+  qianwen?: AIChatExecution
   execute?: ChunkExecution
 }
 
@@ -141,7 +147,7 @@ export async function processLongEntry(options: LongEntryOptions): Promise<LongE
         validate: (value): value is z.infer<typeof selectionSchema> =>
           selectionSchema.safeParse(value).success,
         model: options.model,
-        reasoningEffort: "low",
+        reasoningEffort: options.reasoningEffort ?? "low",
         runtimeDir: options.runtimeDir,
         signal: options.signal,
         qianwen: options.qianwen,
@@ -180,7 +186,7 @@ export async function processLongEntry(options: LongEntryOptions): Promise<LongE
     validate: (value): value is EntryModelSelection =>
       finalSelectionSchema.safeParse(value).success,
     model: options.model,
-    reasoningEffort: "low",
+    reasoningEffort: options.reasoningEffort ?? "low",
     runtimeDir: options.runtimeDir,
     signal: options.signal,
     qianwen: options.qianwen,
@@ -206,6 +212,8 @@ function chunkFingerprint(options: LongEntryOptions, source: string, chunkId: st
     version: CACHE_VERSION,
     provider: options.provider,
     model: options.model,
+    endpointFingerprint: options.endpointFingerprint,
+    reasoningEffort: reasoningFingerprint(options.reasoningEffort),
     global: options.instructions.global,
     transformations: options.instructions.transformations,
     aggregates: options.instructions.aggregates,

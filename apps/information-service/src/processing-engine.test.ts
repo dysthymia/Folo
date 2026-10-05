@@ -7,6 +7,7 @@ import { compileInstructions } from "@follow/information-core"
 import { join } from "pathe"
 import { describe, expect, it } from "vitest"
 
+import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
 import { CodexRunError } from "./codex"
 import type { EntryProcessingResult, ProcessingEngineStore } from "./processing-engine"
@@ -1051,6 +1052,30 @@ describe("单篇处理 engine", () => {
     expect(prompts).toEqual([])
   })
 
+  it.each([null, true] as const)("当前读态为 %s 时不回退旧未读输入调用模型", async (read) => {
+    const fixture = storeFixture()
+    fixture.setMaterial("complete")
+    // 当前来源读态优先于输入快照；空值表示上游尚未确认。
+    fixture.store.entry = () => ({ ...entry, read })
+    let calls = 0
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: async () => {
+        calls++
+        throw new Error("unexpected_model")
+      },
+    })
+    expect(calls).toBe(0)
+    expect(result.completed).toBe(0)
+    expect(result.pending).toBe(read === null ? 1 : 0)
+    expect(result.failures).toEqual([])
+  })
+
   it("已读条目不再请求模型，并在收敛时落为跳过态", async () => {
     const fixture = storeFixture("automatic", [], true)
     fixture.setMaterial("complete")
@@ -1382,4 +1407,114 @@ describe("单篇处理 engine", () => {
       await rm(runtimeDir, { recursive: true, force: true })
     }
   })
+})
+
+it("同模型换自定义端点不会复用另一网关决定缓存，同端点重算仍可复用", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "folo-entry-endpoint-"))
+  const store = new Store(":memory:")
+  const config = new AIConfigStore(join(directory, "ai.json"))
+  let calls = 0
+  const endpoints: Array<string | undefined> = []
+  try {
+    store.bindOwner("owner")
+    store.automation.saveDraft({ ...release, rules: [release.rules[1]!] }, 0)
+    store.automation.publish(1, { mode: "future" }, randomUUID())
+    store.saveEntry(entry)
+    store.processingState.setMaterial(store.automation.inputs()[0]!, "complete")
+    const execute = async <T>(request: CodexJsonOptions<T>) => {
+      calls++
+      endpoints.push(request.qianwen?.baseUrl)
+      const output = batchSelection("entry-1", "E000001")
+      expect(request.validate(output)).toBe(true)
+      return { result: output as T, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
+    }
+    const options = {
+      store,
+      aiConfig: config,
+      runtimeDir: directory,
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00Z",
+      signal: new AbortController().signal,
+      execute,
+    }
+    await config.save({
+      provider: "openai-compatible",
+      model: "same-model",
+      baseUrl: "https://first.test/v1",
+      apiKey: "first-key",
+    })
+    expect((await runEntryProcessing(options)).completed).toBe(1)
+    store.automation.invalidateSources(["feed/1"])
+    await config.save({
+      provider: "openai-compatible",
+      model: "same-model",
+      baseUrl: "https://second.test/v1",
+      apiKey: "second-key",
+    })
+    expect((await runEntryProcessing(options)).completed).toBe(1)
+    expect(calls).toBe(2)
+    expect(endpoints).toEqual(["https://first.test/v1", "https://second.test/v1"])
+    store.automation.invalidateSources(["feed/1"])
+    expect(await runEntryProcessing(options)).toMatchObject({
+      completed: 1,
+      metrics: { modelCalls: 0, cacheHits: 1 },
+    })
+    expect(calls).toBe(2)
+  } finally {
+    store.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+it("推理强度冻结并隔离单篇缓存，同强度重算仍可复用", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "folo-entry-endpoint-"))
+  const store = new Store(":memory:")
+  const config = new AIConfigStore(join(directory, "ai.json"))
+  let calls = 0
+  const efforts: Array<string | undefined> = []
+  try {
+    store.bindOwner("owner")
+    store.automation.saveDraft({ ...release, rules: [release.rules[1]!] }, 0)
+    store.automation.publish(1, { mode: "future" }, randomUUID())
+    store.saveEntry(entry)
+    store.processingState.setMaterial(store.automation.inputs()[0]!, "complete")
+    const execute = async <T>(request: CodexJsonOptions<T>) => {
+      calls++
+      efforts.push(request.reasoningEffort)
+      if (calls === 2) throw new CodexRunError("TIMEOUT")
+      const output = batchSelection("entry-1", "E000001")
+      expect(request.validate(output)).toBe(true)
+      return { result: output as T, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
+    }
+    const options = {
+      store,
+      aiConfig: config,
+      runtimeDir: directory,
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00Z",
+      signal: new AbortController().signal,
+      execute,
+    }
+    // 私有读取使用假快照，不访问正式目录或实际模型。
+    config.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "low" })
+    expect((await runEntryProcessing(options)).completed).toBe(1)
+    store.automation.invalidateSources(["feed/1"])
+    config.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "high" })
+    expect((await runEntryProcessing(options)).failures).toHaveLength(1)
+    config.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "low" })
+    store.processingState.retry(store.automation.inputs()[0]!.seq)
+    expect((await runEntryProcessing(options)).completed).toBe(1)
+    expect(calls).toBe(3)
+    expect(efforts).toEqual(["low", "high", "high"])
+    config.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "high" })
+    store.automation.invalidateSources(["feed/1"])
+    expect(await runEntryProcessing(options)).toMatchObject({
+      completed: 1,
+      metrics: { modelCalls: 0, cacheHits: 1 },
+    })
+    expect(calls).toBe(3)
+  } finally {
+    store.close()
+    await rm(directory, { recursive: true, force: true })
+  }
 })

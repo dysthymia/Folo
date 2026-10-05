@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
+import { aiReasoningEffort } from "./ai-reasoning"
 import { runCodexJson } from "./codex"
 import type { FoloReader, SourceEntry } from "./folo"
 import { sourceText } from "./service"
@@ -137,7 +138,8 @@ export class FoloChat {
     const output = await (this.options.execute ?? runCodexJson)<{ answer: string }>({
       purpose: "chat",
       model: config.model,
-      qianwen: await this.options.aiConfig.execution(config.provider),
+      reasoningEffort: aiReasoningEffort(config),
+      qianwen: await this.options.aiConfig.execution(config),
       runtimeDir: this.options.runtimeDir,
       signal,
       schema,

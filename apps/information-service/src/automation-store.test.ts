@@ -61,6 +61,31 @@ afterEach(() => {
 })
 
 describe("发布范围与输入版本", () => {
+  it("编辑器汇总同步复用独立只读接口，保留草稿与生效配置的区别", () => {
+    const store = new Store(":memory:")
+    close.push(() => store.close())
+    store.bindOwner("owner")
+    store.replaceSources([
+      { key: "feed/1", kind: "feed", id: "1", title: "来源", view: 0, category: null },
+    ])
+    store.saveEntry(entry)
+    store.automation.saveDraft(config, 0)
+    // 首屏必须保留尚未发布的草稿，不能把草稿当成生效配置返回。
+    const expected = {
+      editor: automationApi(store, "GET", "/configuration", undefined),
+      effective: automationApi(store, "GET", "/configuration/effective", undefined),
+      upgrade: automationApi(store, "GET", "/rules/upgrade-preview", undefined),
+    }
+    expect(automationApi(store, "GET", "/automation/editor", undefined)).toEqual(expected)
+    expect(expected).toMatchObject({
+      editor: { revision: 1, config: { global: { markdown: "全局说明" } } },
+      effective: { revision: 1, config: null },
+      upgrade: { expectedRevision: 1 },
+    })
+    expect(JSON.stringify(expected)).not.toContain(entry.content)
+    expect(store.automation.draft().revision).toBe(1)
+  })
+
   it("草稿保存不发布；旧 revision 与跨账号配置不能覆盖新草稿", () => {
     const { repository } = fixture()
     expect(repository.saveDraft(config, 0).revision).toBe(1)

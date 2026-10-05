@@ -46,6 +46,8 @@ export type SourceEntry = {
   language?: string | null
   updatedAt?: string | null
   collected?: boolean | null
+  collectedAt?: string | null
+  view?: number
   // 图片与一般视频附件分开计数，避免普通附件误触图片补读保护。
   imageCount?: number | null
   mediaLength?: number | null
@@ -122,6 +124,7 @@ const entryRowSchema = z.object({
   feeds: z.object({ id: identifier, type: z.enum(["feed", "inbox"]) }),
   read: z.boolean().nullish(),
   collections: z.unknown().nullish(),
+  view: z.number().int().min(0).max(5).optional(),
 })
 
 function attachmentDuration(
@@ -387,6 +390,55 @@ export class FoloReader {
       nextCursor,
       pageFull: entries.length >= options.limit,
       boundaryCount: entries.filter((entry) => entry.publishedAt === nextCursor).length,
+    }
+  }
+
+  // 官方收藏列表按收藏时间分页，范围不受 AI 计划或当前订阅名单限制。
+  async collectionPage(options: { cursor?: string; limit: number }): Promise<Page> {
+    if (
+      !Number.isInteger(options.limit) ||
+      options.limit < 1 ||
+      options.limit > 100 ||
+      (options.cursor !== undefined && !timestamp.safeParse(options.cursor).success)
+    )
+      throw new FoloReadError("invalid-input")
+    const response = await this.request(() =>
+      this.client.api.entries.list({
+        isCollection: true,
+        publishedAfter: options.cursor,
+        limit: options.limit,
+      }),
+    )
+    const rows = data(
+      z.array(
+        entryRowSchema.extend({
+          collections: z.object({ createdAt: timestamp }),
+        }),
+      ),
+      response,
+    )
+    const entries = rows.map((row) => ({
+      ...toEntry(
+        {
+          key: `${row.feeds.type}/${row.feeds.id}`,
+          kind: row.feeds.type,
+          id: row.feeds.id,
+          title: row.feeds.id,
+          view: row.view ?? 0,
+          category: null,
+        },
+        row,
+      ),
+      collected: true,
+      collectedAt: row.collections.createdAt,
+      view: row.view,
+    }))
+    const nextCursor = entries.at(-1)?.collectedAt ?? null
+    return {
+      entries,
+      nextCursor,
+      pageFull: entries.length >= options.limit,
+      boundaryCount: entries.filter((item) => item.collectedAt === nextCursor).length,
     }
   }
 

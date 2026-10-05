@@ -10,7 +10,8 @@ import type { ProcessingInput } from "./automation-store"
 import type { CodexJsonOptions } from "./codex"
 import type { PublishedDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
-import { runStoryAggregation } from "./story-engine"
+import type { SharedStoryGroup, StoryModelOutput } from "./story-engine"
+import { runStoryAggregation, sharedStoryRuleFingerprint } from "./story-engine"
 import { StoryStore } from "./story-store"
 
 const databases: DatabaseSync[] = []
@@ -241,7 +242,7 @@ function aggregateAction() {
   }
 }
 
-function modelOutput(existingStoryId: string | null = null) {
+function modelOutput(existingStoryId: string | null = null): StoryModelOutput {
   return {
     groups: [
       {
@@ -277,7 +278,7 @@ function evidenceId(inputSeq: number, factIndex = 0) {
   return `evidence-${inputSeq}-${factIndex}`
 }
 
-function pairsOutput(sequences: number[]) {
+function pairsOutput(sequences: number[]): StoryModelOutput {
   return {
     groups: Array.from({ length: sequences.length / 2 }, (_, index) => {
       const first = sequences[index * 2]!
@@ -331,7 +332,288 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
+function sharedDraft(
+  decisions: PublishedDecision[],
+  ruleSet: RuleSet,
+  output: StoryModelOutput = modelOutput(),
+): SharedStoryGroup {
+  return {
+    ruleId: ruleSet.rules[0]!.id,
+    ruleFingerprint: sharedStoryRuleFingerprint(ruleSet.rules[0]!, ruleSet.global),
+    inputSeqs: decisions.map((decision) => decision.input.seq),
+    inputs: decisions.map(({ input }) => ({
+      seq: input.seq,
+      generation: input.generation,
+      contentVersion: input.contentVersion,
+      sourceKey: input.sourceKey,
+      itemId: input.itemId,
+    })),
+    // 单篇目录编号可在每条材料中重复，必须结合 inputSeq 才能还原来源。
+    evidenceCatalogs: decisions.map((decision) => ({
+      inputSeq: decision.input.seq,
+      fragments: [{ evidenceId: "E000001", quote: decision.decision.facts[0]!.quote }],
+    })),
+    output: {
+      groups: output.groups.map((group) => ({
+        ...group,
+        sentences: group.sentences.map((sentence) => ({
+          ...sentence,
+          sources: sentence.sources.map((source) => ({ ...source, evidenceId: "E000001" })),
+        })),
+      })),
+    },
+  }
+}
+
 describe("Story 模型聚合", () => {
+  it("同批综述复用单篇分析的证据目录，不再请求模型", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2)]
+    const ruleSet = rules([aggregateAction()])
+    let calls = 0
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [sharedDraft(decisions, ruleSet)],
+      execute: async () => {
+        calls++
+        throw new Error("unexpected_model")
+      },
+    })
+    expect(calls).toBe(0)
+    expect(result.created).toHaveLength(1)
+    expect(result.failures).toEqual([])
+    expect(result.usage.inputTokens).toBe(0)
+    const revision = stories.currentSnapshot(result.created[0]!.storyId)!
+    expect(revision.sourceSpans.map((span) => [span.inputSeq, span.quote])).toEqual([
+      [1, decisions[0]!.decision.facts[0]!.quote],
+      [2, decisions[1]!.decision.facts[0]!.quote],
+    ])
+  })
+
+  it("已有综述仍读取当前 revision 后单独更新，不采用新建共享草稿", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2)]
+    const ruleSet = rules([aggregateAction()])
+    const options = {
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [sharedDraft(decisions, ruleSet)],
+    }
+    const first = await runStoryAggregation(options)
+    const prompts: string[] = []
+    const second = await runStoryAggregation({
+      ...options,
+      execute: executeWith([modelOutput(first.created[0]!.storyId)], prompts),
+    })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain(first.created[0]!.storyId)
+    expect(second.created).toEqual([])
+    expect(second.failures).toEqual([])
+  })
+
+  it("同批明确没有综述的结果不会再付费请求一次", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2)]
+    const ruleSet = rules([aggregateAction()])
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [sharedDraft(decisions, ruleSet, { groups: [] })],
+      execute: executeWith([], prompts),
+    })
+    expect(prompts).toEqual([])
+    expect(result.created).toEqual([])
+    expect(result.pending).toEqual([
+      { ruleId: ruleSet.rules[0]!.id, inputSeqs: [1, 2], reason: "no_story_group" },
+    ])
+  })
+
+  it.each(["generation", "rule", "batch", "evidence", "unpublished_fact"] as const)(
+    "共享草稿的 %s 不匹配时使用当前事实重新综合",
+    async (mismatch) => {
+      const { db, stories, aiConfig, runtimeDir } = fixture()
+      const decisions = [published(db, 1), published(db, 2)]
+      const ruleSet = rules([aggregateAction()])
+      const draft = sharedDraft(decisions, ruleSet)
+      if (mismatch === "generation")
+        draft.inputs = draft.inputs.map((item) => ({ ...item, generation: 0 }))
+      if (mismatch === "rule") draft.ruleFingerprint = "stale-rule"
+      if (mismatch === "batch") draft.inputSeqs = [1, 2, 3]
+      if (mismatch === "evidence") draft.evidenceCatalogs = []
+      if (mismatch === "unpublished_fact") {
+        // 原文存在但单篇 facts 未认可的摘引也不能借共享草稿进入正式综述。
+        draft.evidenceCatalogs = [
+          { inputSeq: 1, fragments: [{ evidenceId: "E000001", quote: "来源" }] },
+        ]
+      }
+      const prompts: string[] = []
+      const result = await runStoryAggregation({
+        decisions,
+        ruleSet,
+        stories,
+        aiConfig,
+        runtimeDir,
+        signal: new AbortController().signal,
+        sharedGroups: [draft],
+        execute: executeWith([modelOutput()], prompts),
+      })
+      expect(prompts).toHaveLength(1)
+      expect(result.created).toHaveLength(1)
+      expect(result.failures).toEqual([])
+    },
+  )
+
+  it("去重已覆盖的来源不参与新综述，只消费草稿中的保留来源组", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2), published(db, 3)]
+    const ruleSet = rules([aggregateAction()])
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [sharedDraft(decisions, ruleSet, pairsOutput([1, 3]))],
+      hiddenInputSeqs: [2],
+      execute: executeWith([], prompts),
+    })
+    expect(prompts).toHaveLength(0)
+    expect(result.created).toHaveLength(1)
+    expect(
+      stories.currentSnapshot(result.created[0]!.storyId)!.members.map((member) => member.inputSeq),
+    ).toEqual([1, 3])
+  })
+
+  it("同事件批次包含未成组材料时保留完整请求覆盖，不重复综合", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2), published(db, 3)]
+    const ruleSet = rules([aggregateAction()])
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [sharedDraft(decisions, ruleSet)],
+      execute: executeWith([], prompts),
+    })
+    expect(prompts).toEqual([])
+    expect(result.created).toHaveLength(1)
+    expect(result.pending).toEqual([
+      { ruleId: ruleSet.rules[0]!.id, inputSeqs: [3], reason: "no_story_group" },
+    ])
+  })
+
+  it.each(["groups", "empty", "cross_event"] as const)(
+    "统一请求按两个事件拆批时复用完整 %s 结果",
+    async (mode) => {
+      const { db, stories, aiConfig, runtimeDir } = fixture()
+      const decisions = [1, 2, 3, 4].map((seq) => {
+        const version = seq < 3 ? "5.2" : "5.3"
+        const original = `来源${seq}：OpenAI发布GPT ${version}。`
+        return casePublished(
+          db,
+          seq,
+          original,
+          caseEvent(original, "OpenAI", "product_release", "GPT", { version }),
+        )
+      })
+      const ruleSet = rules([aggregateAction()])
+      const prompts: string[] = []
+      const output =
+        mode === "empty"
+          ? { groups: [] }
+          : mode === "cross_event"
+            ? pairsOutput([1, 3, 2, 4])
+            : pairsOutput([1, 2, 3, 4])
+      const result = await runStoryAggregation({
+        decisions,
+        ruleSet,
+        stories,
+        aiConfig,
+        runtimeDir,
+        signal: new AbortController().signal,
+        sharedGroups: [sharedDraft(decisions, ruleSet, output)],
+        execute: executeWith([], prompts),
+      })
+      expect(prompts).toEqual([])
+      expect(result.failures).toEqual([])
+      expect(result.created).toHaveLength(mode === "groups" ? 2 : 0)
+      expect(result.pending.flatMap((item) => item.inputSeqs)).toEqual(
+        mode === "groups" ? [] : [1, 2, 3, 4],
+      )
+    },
+  )
+
+  it("共享请求中子批次以外的材料换代后也不能继续复用", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2), published(db, 3)]
+    const ruleSet = rules([aggregateAction()])
+    const draft = sharedDraft(decisions, ruleSet)
+    draft.inputs = draft.inputs.map((input) =>
+      input.seq === 3 ? { ...input, generation: 0 } : input,
+    )
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      hiddenInputSeqs: [3],
+      sharedGroups: [draft],
+      execute: executeWith([modelOutput()], prompts),
+    })
+    expect(prompts).toHaveLength(1)
+    expect(result.created).toHaveLength(1)
+  })
+
+  it.each([true, null, undefined] as const)(
+    "当前读态 %s 不允许旧未读决定参与综述",
+    async (read) => {
+      const { db, stories, aiConfig, runtimeDir } = fixture()
+      const decisions = [published(db, 1), published(db, 2)]
+      // 模拟单篇成功之后改为已读或读态缺失，输入仍保存旧未读状态。
+      let calls = 0
+      const result = await runStoryAggregation({
+        decisions,
+        currentEntry: () => (read === undefined ? undefined : { read }),
+        ruleSet: rules([aggregateAction()]),
+        stories,
+        aiConfig,
+        runtimeDir,
+        signal: new AbortController().signal,
+        execute: async () => {
+          calls++
+          throw new Error("unexpected_model")
+        },
+      })
+      expect(calls).toBe(0)
+      expect(result.created).toEqual([])
+      expect(result.updated).toEqual([])
+      expect(result.failures).toEqual([])
+    },
+  )
+
   it.each([
     [
       "ASvanevik 于2026-09-26发表代理式交易将成常态的预测。",
@@ -1242,5 +1524,115 @@ describe("Story 模型聚合", () => {
       inputSeqs: [1, 2],
       reason: "no_story_group",
     })
+  })
+})
+
+it("同模型换自定义端点不会命中前一个端点的Story模型缓存", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const decisions = [published(db, 1), published(db, 2)]
+  let calls = 0
+  const execute = async <T>(options: CodexJsonOptions<T>) => {
+    calls++
+    const output = { groups: [] }
+    if (!options.validate(output)) throw new Error("invalid_stub_output")
+    return { result: output, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
+  }
+  const options = {
+    decisions,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute,
+  }
+  await aiConfig.save({
+    provider: "openai-compatible",
+    model: "same-model",
+    baseUrl: "https://first.test/v1",
+    apiKey: "first-key",
+  })
+  await runStoryAggregation(options)
+  await aiConfig.save({
+    provider: "openai-compatible",
+    model: "same-model",
+    baseUrl: "https://second.test/v1",
+    apiKey: "second-key",
+  })
+  await runStoryAggregation(options)
+  await runStoryAggregation(options)
+  expect(calls).toBe(2)
+})
+
+it("推理强度隔离Story模型缓存，同强度仍可复用", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const decisions = [published(db, 1), published(db, 2)]
+  let calls = 0
+  const efforts: Array<string | undefined> = []
+  const execute = async <T>(options: CodexJsonOptions<T>) => {
+    calls++
+    efforts.push(options.reasoningEffort)
+    const output = { groups: [] }
+    if (!options.validate(output)) throw new Error("invalid_stub_output")
+    return { result: output, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
+  }
+  const options = {
+    decisions,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute,
+  }
+  aiConfig.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "low" })
+  await runStoryAggregation(options)
+  aiConfig.read = async () => ({ provider: "codex", model: "same-model", reasoningEffort: "high" })
+  await runStoryAggregation(options)
+  await runStoryAggregation(options)
+  expect(calls).toBe(2)
+  expect(efforts).toEqual(["low", "high"])
+})
+
+// 列表目标只唤醒有关事件，模型返回的旁支组也不能顺便发布。
+describe("列表触发 Story 范围", () => {
+  it("没有本次目标的事件不读取模型配置或执行聚合", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2)]
+    let calls = 0
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      targets: [{ sourceKey: "feed/unloaded", itemId: "unloaded" }],
+      execute: async () => {
+        calls++
+        throw new Error("unexpected_model")
+      },
+    })
+    expect(calls).toBe(0)
+    expect(result.created).toEqual([])
+    expect(result.updated).toEqual([])
+  })
+  it("同批上下文可参与，但完全不含目标的模型分组不会发布", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [1, 2, 3, 4].map((seq) => published(db, seq))
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      targets: [{ sourceKey: "feed/1", itemId: "entry-1" }],
+      execute: executeWith([pairsOutput([1, 2, 3, 4])]),
+    })
+    expect(result.created).toHaveLength(1)
+    expect(
+      stories.currentSnapshot(result.created[0]!.storyId)?.members.map((member) => member.inputSeq),
+    ).toEqual([1, 2])
   })
 })

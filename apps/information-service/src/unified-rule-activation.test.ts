@@ -57,6 +57,106 @@ function effective(store: Store): RuleSet {
 }
 
 describe("统一规则的单条保存生效", () => {
+  it("运行概览只统计有效规则覆盖，未发布草稿不扩大范围", () => {
+    const store = fixture()
+    activate(store, rule("active"))
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      { ...draft.config, rules: [...draft.config.rules, rule("private-draft", { order: 1 })] },
+      draft.revision,
+    )
+    store.saveEntry({
+      id: "entry",
+      sourceKey: source.key,
+      title: "待处理",
+      url: null,
+      publishedAt: new Date().toISOString(),
+      read: false,
+      content: "正文",
+      description: null,
+    })
+    const status = automationApi(store, "GET", "/automation/status", undefined)
+    expect(status).toMatchObject({
+      sourceInventory: { available: 1, covered: 1, unknown: 0 },
+      counts: { processed: 0, pending: 1, needsContext: 0, uncovered: 0 },
+      rules: [{ ruleId: "active", sourceKeys: [source.key] }],
+    })
+    expect((status as { rules: unknown[] }).rules).toHaveLength(1)
+  })
+  it("批量启用只发布选中的规则，保留其它草稿和私人全局说明", () => {
+    const store = fixture()
+    activate(store, rule("active"))
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...draft.config,
+        global: { ...draft.config.global, markdown: "私人待审全局" },
+        rules: [
+          ...draft.config.rules.map((item) => ({ ...item, name: "待审旧规则" })),
+          rule("new-a", { order: 1 }),
+          rule("new-b", { order: 2 }),
+          rule("unselected", { order: 3 }),
+        ],
+      },
+      draft.revision,
+    )
+    const input = {
+      rules: [rule("new-a"), rule("new-b")],
+      expectedRevision: store.automation.draft().revision,
+      requestId: randomUUID(),
+    }
+    const result = automationApi(store, "POST", "/rules/activate-batch", input)
+    expect(effective(store).rules.map((item) => item.id)).toEqual(["active", "new-a", "new-b"])
+    expect(effective(store).rules[0]?.name).toBe("active")
+    expect(effective(store).global.markdown).toBe("")
+    expect(store.automation.draft().config.global.markdown).toBe("私人待审全局")
+    expect(automationApi(store, "POST", "/rules/activate-batch", input)).toEqual(result)
+    expect(store.automation.releases()[0]?.targetInputIds).toEqual([])
+  })
+
+  it("发布重排只调整有效规则顺序，不偷发布规则内容或草稿新规则", () => {
+    const store = fixture()
+    activate(store, rule("a"))
+    activate(store, rule("b"))
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...draft.config,
+        global: { ...draft.config.global, markdown: "未发布全局" },
+        rules: [
+          ...draft.config.rules.map((item) => ({ ...item, name: `未发布${item.id}` })),
+          rule("draft-only", { order: 2 }),
+        ],
+      },
+      draft.revision,
+    )
+    const input = {
+      ruleIds: ["b", "a"],
+      expectedRevision: store.automation.draft().revision,
+      requestId: randomUUID(),
+    }
+    const result = automationApi(store, "POST", "/rules/reorder-active", input)
+    expect(effective(store).rules.map((item) => [item.id, item.name, item.order])).toEqual([
+      ["b", "b", 0],
+      ["a", "a", 1],
+    ])
+    expect(store.automation.draft().config.rules.map((item) => item.name)).toEqual([
+      "未发布b",
+      "未发布a",
+      "draft-only",
+    ])
+    expect(effective(store).global.markdown).toBe("")
+    expect(automationApi(store, "POST", "/rules/reorder-active", input)).toEqual(result)
+    expect(() =>
+      automationApi(store, "POST", "/rules/reorder-active", {
+        ...input,
+        ruleIds: ["a", "draft-only"],
+        expectedRevision: store.automation.draft().revision,
+        requestId: randomUUID(),
+      }),
+    ).toThrow("invalid_rule_set")
+  })
+
   it("只发布选中规则，保留其他草稿与全局草稿，并不重算既有结果", () => {
     const store = fixture()
     activate(store, rule("a"))

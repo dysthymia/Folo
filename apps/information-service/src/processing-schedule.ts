@@ -13,6 +13,8 @@ export type ProcessingScheduleInput = {
   historySince: string
   timeZone: string
   enabled: boolean
+  /** 列表加载也可唤醒后台；enabled 仍是总暂停开关。 */
+  runOnListLoad?: boolean
   times?: readonly string[]
   pollIntervalMinutes?: number | null
   readyBy?: { leadMinutes: number } | null
@@ -26,6 +28,7 @@ export type ProcessingScheduleConfig = {
   historySince: string
   timeZone: string
   enabled: boolean
+  runOnListLoad: boolean
   times: string[]
   pollIntervalMinutes: number | null
   readyBy: { leadMinutes: number } | null
@@ -47,7 +50,7 @@ export type ProcessingScheduleReadingStatus = {
   nextPollAt: string | null
 }
 
-export type ProcessingTriggerKind = "scheduled" | "catchup" | "poll" | "manual"
+export type ProcessingTriggerKind = "scheduled" | "catchup" | "poll" | "manual" | "list_loaded"
 export type ProcessingTriggerStatus =
   | "pending"
   | "running"
@@ -58,7 +61,11 @@ export type ProcessingTriggerStatus =
   | "failed"
   | "cancelled"
 
+export type ProcessingTarget = { sourceKey: string; itemId: string }
+
 export type ProcessingTrigger = {
+  /** 身份跨正文水合换代保持稳定，不能只存旧 input seq。 */
+  targets?: ProcessingTarget[]
   id: string
   kind: ProcessingTriggerKind
   dedupeKey: string
@@ -154,6 +161,8 @@ function timeZone(value: unknown): string {
 function normalizeConfig(input: unknown): ProcessingScheduleConfig {
   if (!isRecord(input) || typeof input.enabled !== "boolean")
     throw new ProcessingScheduleError("invalid_schedule")
+  if (input.runOnListLoad !== undefined && typeof input.runOnListLoad !== "boolean")
+    throw new ProcessingScheduleError("invalid_schedule")
   const timesValue = input.times === undefined ? defaultScheduleTimes : input.times
   if (!Array.isArray(timesValue)) throw new ProcessingScheduleError("invalid_schedule")
   const times = unique(timesValue.map((value) => parseTime(value).value)).sort()
@@ -212,6 +221,7 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
     historySince: parseIso(input.historySince, "invalid_schedule"),
     timeZone: timeZone(input.timeZone),
     enabled: input.enabled,
+    runOnListLoad: input.runOnListLoad !== false,
     times,
     pollIntervalMinutes,
     readyBy,
@@ -327,8 +337,21 @@ export class ProcessingScheduleStore {
       );
       CREATE INDEX IF NOT EXISTS processing_schedule_trigger_claim
         ON processing_schedule_triggers(owner_id, status, lease_until, created_at);
+      CREATE TABLE IF NOT EXISTS processing_list_load_signatures (
+        owner_id TEXT NOT NULL, target_key TEXT NOT NULL, config_revision INTEGER NOT NULL,
+        signature TEXT NOT NULL, trigger_id TEXT NOT NULL,
+        PRIMARY KEY(owner_id,target_key,config_revision)
+      );
       INSERT OR IGNORE INTO processing_schedule_state VALUES(1, NULL, NULL);
     `)
+    this.migrateTargets()
+  }
+
+  // 旧库原位补列；明确列名插入兼容新旧表，已有批次保持原范围。
+  private migrateTargets() {
+    const columns = this.db.prepare("PRAGMA table_info(processing_schedule_triggers)").all()
+    if (!columns.some((column) => column.name === "targets"))
+      this.db.exec("ALTER TABLE processing_schedule_triggers ADD COLUMN targets TEXT")
   }
 
   private transaction<T>(operation: () => T): T {
@@ -524,6 +547,125 @@ export class ProcessingScheduleStore {
     })
   }
 
+  listLoaded(
+    targets: readonly ProcessingTarget[],
+    now: Date | string,
+    signatures?: ReadonlyMap<string, string>,
+  ): ProcessingTrigger | null {
+    const cutoffAt = instant(now)
+    return this.transaction(() => {
+      const snapshot = this.snapshot()
+      const config = snapshot.config
+      if (!config?.enabled || !config.runOnListLoad || !targets.length) return null
+      const identity = (target: ProcessingTarget) =>
+        JSON.stringify([target.sourceKey, target.itemId])
+      const uniqueTargets = [
+        ...new Map(targets.map((target) => [identity(target), target])).values(),
+      ].filter((target) => config.sourceKeys.includes(target.sourceKey))
+      const active = this.db
+        .prepare(
+          "SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND config_revision=? AND (status IN ('pending','running') OR finished_at>?) ORDER BY created_at,id",
+        )
+        .all(
+          this.ownerId(),
+          snapshot.revision,
+          new Date(Date.parse(cutoffAt) - 60_000).toISOString(),
+        )
+        .map((row) => this.triggerFromRow(row))
+      // 已运行的列表批次保持冻结；短冷却阻止同一次列表重取反复启动后处理。
+      const covered = new Set(
+        active.flatMap((trigger) => {
+          if (
+            trigger.kind !== "list_loaded" ||
+            !(
+              trigger.status === "running" ||
+              (trigger.finishedAt && Date.parse(cutoffAt) - Date.parse(trigger.finishedAt) < 60_000)
+            )
+          )
+            return []
+          return (trigger.targets ?? [])
+            .filter((target) => {
+              if (!signatures) return true
+              const key = identity(target)
+              const previous = this.db
+                .prepare(
+                  "SELECT signature,trigger_id FROM processing_list_load_signatures WHERE owner_id=? AND target_key=? AND config_revision=?",
+                )
+                .get(this.ownerId(), key, snapshot.revision)
+              // 相同身份正文或规则变化必须另排下一批，不能被正在执行的旧目标吞掉。
+              return (
+                previous?.trigger_id === trigger.id && previous.signature === signatures.get(key)
+              )
+            })
+            .map(identity)
+        }),
+      )
+      const remember = (trigger: ProcessingTrigger, accepted: readonly ProcessingTarget[]) => {
+        if (signatures)
+          for (const target of accepted) {
+            const key = identity(target)
+            this.db
+              .prepare("INSERT OR REPLACE INTO processing_list_load_signatures VALUES(?,?,?,?,?)")
+              .run(this.ownerId(), key, snapshot.revision, signatures.get(key) ?? "", trigger.id)
+          }
+        return trigger
+      }
+      const fresh = uniqueTargets.filter((target) => !covered.has(identity(target)))
+      if (!fresh.length) return null
+      const pending = active.find(
+        (trigger) => trigger.status === "pending" && trigger.kind === "list_loaded",
+      )
+      if (pending) {
+        const merged = [
+          ...new Map(
+            [...(pending.targets ?? []), ...fresh].map((target) => [identity(target), target]),
+          ).values(),
+        ]
+        this.db
+          .prepare(
+            "UPDATE processing_schedule_triggers SET targets=?,source_keys=?,cutoff_at=? WHERE id=? AND status='pending'",
+          )
+          .run(
+            JSON.stringify(merged),
+            JSON.stringify(unique(merged.map((target) => target.sourceKey))),
+            cutoffAt,
+            pending.id,
+          )
+        return remember(
+          this.triggerFromRow(
+            this.db
+              .prepare("SELECT * FROM processing_schedule_triggers WHERE id=?")
+              .get(pending.id)!,
+          ),
+          fresh,
+        )
+      }
+      const created = this.createTrigger({
+        kind: "list_loaded",
+        dedupeKey: `list_loaded:${snapshot.revision}:${randomUUID()}`,
+        configRevision: snapshot.revision,
+        sourceKeys: unique(fresh.map((target) => target.sourceKey)),
+        targets: fresh,
+        historySince: config.historySince,
+        timeZone: config.timeZone,
+        scheduledFor: null,
+        cutoffAt,
+        createdAt: cutoffAt,
+      }).trigger
+      return remember(created, fresh)
+    })
+  }
+
+  refreshListSignatures(triggerId: string, signatures: ReadonlyMap<string, string>) {
+    // 水合会换材料版本；完成后记住实际版本，且不能覆盖已另排下一批的新签名。
+    for (const [key, signature] of signatures)
+      this.db
+        .prepare(
+          "UPDATE processing_list_load_signatures SET signature=? WHERE owner_id=? AND target_key=? AND trigger_id=?",
+        )
+        .run(signature, this.ownerId(), key, triggerId)
+  }
+
   recover(now: Date | string): number {
     const at = instant(now)
     return this.transaction(() => {
@@ -553,6 +695,7 @@ export class ProcessingScheduleStore {
       const current = this.snapshot()
       // 手动排队先保存意图，首次领取才用 worker 已刷新的清单冻结；租约恢复不扩大旧批次。
       const refreshScope =
+        row.kind !== "list_loaded" &&
         row.started_at === null &&
         current.revision === Number(row.config_revision) &&
         current.config?.scope.mode !== "fixed"
@@ -604,6 +747,16 @@ export class ProcessingScheduleStore {
     )
   }
 
+  pendingTriggers(): ProcessingTrigger[] {
+    // 列表事件只检查活动队列，不随累计运行历史增长而加载全部记录。
+    return this.db
+      .prepare(
+        "SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND status='pending' ORDER BY created_at,id",
+      )
+      .all(this.ownerId())
+      .map((row) => this.triggerFromRow(row))
+  }
+
   triggers(): ProcessingTrigger[] {
     const ownerId = this.ownerId()
     return this.db
@@ -617,7 +770,7 @@ export class ProcessingScheduleStore {
     const id = randomUUID()
     const result = this.db
       .prepare(
-        "INSERT OR IGNORE INTO processing_schedule_triggers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO processing_schedule_triggers (id,owner_id,dedupe_key,kind,config_revision,source_keys,history_since,time_zone,scheduled_for,cutoff_at,status,lease_token,lease_until,created_at,started_at,finished_at,error,targets) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         id,
@@ -637,6 +790,7 @@ export class ProcessingScheduleStore {
         null,
         null,
         null,
+        draft.targets ? JSON.stringify(draft.targets) : null,
       )
     const row = this.db
       .prepare("SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND dedupe_key=?")
@@ -646,6 +800,9 @@ export class ProcessingScheduleStore {
 
   private triggerFromRow(row: Record<string, unknown>): ProcessingTrigger {
     return {
+      ...(row.targets == null
+        ? {}
+        : { targets: JSON.parse(String(row.targets)) as ProcessingTarget[] }),
       id: String(row.id),
       kind: String(row.kind) as ProcessingTriggerKind,
       dedupeKey: String(row.dedupe_key),

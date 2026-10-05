@@ -6,6 +6,7 @@ import { compileInstructions } from "@follow/information-core"
 import { join } from "pathe"
 import { describe, expect, it } from "vitest"
 
+import { aiEndpointFingerprint } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
 import { processLongEntry, splitEntryText } from "./processing-chunks"
 import { ENTRY_PROMPT_VERSION, SOURCE_FIDELITY_REQUIREMENTS } from "./processing-prompt"
@@ -274,4 +275,123 @@ describe("长文分块", () => {
       await rm(runtimeDir, { recursive: true, force: true })
     }
   })
+})
+
+it("自定义端点身份隔离长文分块缓存，同端点仍复用已验证分块", async () => {
+  const runtimeDir = await mkdtemp(join(tmpdir(), "folo-chunk-endpoint-"))
+  let chunkCalls = 0
+  try {
+    const execute = async <T>(options: CodexJsonOptions<T>) => {
+      const chunk = options.prompt.includes("长文分块阅读器")
+      if (chunk) chunkCalls++
+      const output = chunk
+        ? {
+            chunkId: "entry-1:1/1",
+            summary: "分块",
+            facts: [{ text: "事实", evidenceId: "C1E000001", kind: "fact" }],
+          }
+        : {
+            entryId: "entry-1",
+            event: null,
+            title: "标题",
+            summary: "摘要",
+            disposition: "keep",
+            reason: "原因",
+            aggregation: true,
+            rewrite: false,
+            labels: [],
+            facts: [{ text: "事实", evidenceId: "FE000001", kind: "fact" }],
+          }
+      if (!options.validate(output)) throw new Error("invalid_stub_output")
+      return { result: output, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
+    }
+    const options = {
+      entryId: "entry-1",
+      text: "唯一完整原文事实。",
+      provider: "openai-compatible" as const,
+      model: "same-model",
+      instructions,
+      sourceRole: "媒体",
+      historySince: "2026-09-01T00:00:00Z",
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute,
+    }
+    await processLongEntry({
+      ...options,
+      endpointFingerprint: aiEndpointFingerprint({
+        provider: "openai-compatible",
+        baseUrl: "https://first.test/v1",
+      }),
+    })
+    await processLongEntry({
+      ...options,
+      endpointFingerprint: aiEndpointFingerprint({
+        provider: "openai-compatible",
+        baseUrl: "https://second.test/v1",
+      }),
+    })
+    await processLongEntry({
+      ...options,
+      endpointFingerprint: aiEndpointFingerprint({
+        provider: "openai-compatible",
+        baseUrl: "https://second.test/v1",
+      }),
+    })
+    expect(chunkCalls).toBe(2)
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true })
+  }
+})
+
+it("推理强度隔离分块缓存，分块与综合同强度执行", async () => {
+  const runtimeDir = await mkdtemp(join(tmpdir(), "folo-chunk-endpoint-"))
+  let chunkCalls = 0
+  const efforts: Array<string | undefined> = []
+  try {
+    const execute = async <T>(options: CodexJsonOptions<T>) => {
+      efforts.push(options.reasoningEffort)
+      const chunk = options.prompt.includes("长文分块阅读器")
+      if (chunk) chunkCalls++
+      const output = chunk
+        ? {
+            chunkId: "entry-1:1/1",
+            summary: "分块",
+            facts: [{ text: "事实", evidenceId: "C1E000001", kind: "fact" }],
+          }
+        : {
+            entryId: "entry-1",
+            event: null,
+            title: "标题",
+            summary: "摘要",
+            disposition: "keep",
+            reason: "原因",
+            aggregation: true,
+            rewrite: false,
+            labels: [],
+            facts: [{ text: "事实", evidenceId: "FE000001", kind: "fact" }],
+          }
+      if (!options.validate(output)) throw new Error("invalid_stub_output")
+      return { result: output, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
+    }
+    const options = {
+      entryId: "entry-1",
+      text: "唯一完整原文事实。",
+      provider: "codex" as const,
+      model: "same-model",
+      instructions,
+      sourceRole: "媒体",
+      historySince: "2026-09-01T00:00:00Z",
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute,
+    }
+    await processLongEntry({ ...options, reasoningEffort: "low" })
+    await processLongEntry({ ...options, reasoningEffort: "high" })
+    await processLongEntry({ ...options, reasoningEffort: "high" })
+    expect(efforts).toEqual(["low", "low", "high", "high", "high"])
+    expect(chunkCalls).toBe(2)
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true })
+  }
 })

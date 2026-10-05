@@ -1,5 +1,10 @@
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+
+import { join } from "pathe"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions, runCodexJson } from "./codex"
 import type { Page, Source, SourceEntry } from "./folo"
 import { FoloReader, FoloReadError } from "./folo"
@@ -364,4 +369,89 @@ describe("InformationService model input", () => {
     expect(prompts).toHaveLength(2)
     expect(store.snapshot().results).toHaveLength(2)
   })
+})
+
+it("旧后台任务的provider或端点不匹配时拒绝密钥与模型调用，缺配置也不回落Codex", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "folo-job-endpoint-"))
+  try {
+    const config = new AIConfigStore(join(directory, "ai.json"))
+    await config.save({
+      provider: "openai-compatible",
+      model: "same-model",
+      baseUrl: "https://new.test/v1",
+      apiKey: "new-domain-private-key",
+    })
+    // 单独记录调用，保留执行器的泛型签名并确保拒绝发生在模型请求之前。
+    const called = vi.fn()
+    const execute: typeof runCodexJson = async () => {
+      called()
+      throw new Error("unexpected_model_call")
+    }
+    for (const task of [
+      {
+        provider: "openai-compatible" as const,
+        baseUrl: "https://old.test/v1",
+        model: "same-model",
+      },
+      { provider: "qianwen" as const, model: "qwen-test" },
+      {
+        provider: "openai-compatible" as const,
+        baseUrl: "https://new.test/v1",
+        model: "same-model",
+        missingConfig: true,
+      },
+    ]) {
+      const { store, reader, signal } = fixture()
+      store.saveEntry(makeEntry("e1", 8))
+      const service = new InformationService({
+        store,
+        reader: async () => reader,
+        aiConfig: "missingConfig" in task ? undefined : config,
+        runtimeDir: directory,
+        execute,
+      })
+      const job = store.enqueue({ kind: "process", sourceKey: source.key, itemId: "e1", ...task })
+      await service.run(job, signal)
+      expect(store.job(job.id)).toMatchObject({
+        status: "failed",
+        error: "missingConfig" in task ? "ai_key_required" : "ai_config_changed",
+      })
+    }
+    expect(called).not.toHaveBeenCalled()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+it("推理强度旧任务冻结保存值，并隔离摘要缓存", async () => {
+  const f = fixture()
+  f.store.saveEntry(makeEntry("e1", 8))
+  const efforts: Array<string | undefined> = []
+  // 队列只使用创建时冻结值，当前默认设置和摘要缓存都不能悄悄替换该值。
+  const service = new InformationService({
+    store: f.store,
+    reader: async () => f.reader,
+    runtimeDir: "/unused-mock-runtime",
+    execute: async <T>(request: CodexJsonOptions<T>) => {
+      efforts.push(request.reasoningEffort)
+      const result: unknown = { summary: "摘要", points: ["事实"], entryId: "e1" }
+      if (!request.validate(result)) throw new Error("invalid_test_result")
+      return { result, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
+    },
+  })
+  for (const reasoningEffort of ["high", "low", "high"] as const) {
+    const job = f.store.enqueue({
+      kind: "process",
+      sourceKey: source.key,
+      itemId: "e1",
+      provider: "codex",
+      model: "test",
+      reasoningEffort,
+    })
+    expect(f.store.job(job.id)?.reasoningEffort).toBe(reasoningEffort)
+    await service.run(job, f.signal)
+    expect(f.store.job(job.id)?.status).toBe("succeeded")
+  }
+  expect(efforts).toEqual(["high", "low"])
+  expect(f.store.snapshot().results).toHaveLength(2)
 })

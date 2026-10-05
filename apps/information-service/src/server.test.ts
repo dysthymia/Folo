@@ -114,6 +114,26 @@ describe("information HTTP server", () => {
     })
   })
 
+  it("编辑器首屏汇总只鉴权一次，拒绝过期凭据且不泄露正文", async () => {
+    // HTTP 同源读取沿用既有只读 POST 和一次性凭据校验。
+    const headers = { ...signedHeaders, "X-Folo-Read": "1" }
+    const result = await request("/information/v1/automation/editor", { method: "POST", headers })
+    expect(result.status).toBe(200)
+    expect(JSON.parse(result.body)).toMatchObject({
+      editor: { revision: 0, releases: [] },
+      effective: { revision: 0 },
+      upgrade: { expectedRevision: 0 },
+    })
+    expect(result.body).not.toContain("private-raw-content")
+    expect(authenticate).toHaveBeenCalledTimes(1)
+    const rejected = await request("/information/v1/automation/editor", {
+      method: "POST",
+      headers: { ...headers, "X-Folo-One-Time-Token": "expired" },
+    })
+    expect(rejected.status).toBe(401)
+    expect(JSON.parse(rejected.body)).toEqual({ error: "authorization" })
+  })
+
   it("HTTP 同域只读 POST 保留 Origin 和新凭据检查，不能携带写入内容", async () => {
     const headers = { ...signedHeaders, "X-Folo-Read": "1" }
     const result = await request("/information/v1/configuration", { method: "POST", headers })

@@ -21,6 +21,9 @@ const evidenceValue = z
   .strict()
 const anchorKind = z.enum(["event_date", "event_time", "official_reference"])
 const anchorZone = z.string().trim().min(1).max(80).nullable().optional()
+// 模型的严格输出格式要求所有属性都在 required 中；未知时区明确返回 null。
+// 持久化身份仍兼容旧记录省略 timeZone，不能为修正请求格式破坏已有事件。
+const selectedAnchorZone = anchorZone.unwrap()
 
 // 名称只允许原文可追溯的规范实体；优先使用材料明确提供的稳定URL/ID，不按主题或标题聚类。
 export const eventIdentitySchema = z
@@ -47,7 +50,7 @@ export const eventSelectionSchema = z
     object: selectedValue,
     version: selectedValue.nullable(),
     round: selectedValue.nullable(),
-    anchor: selectedValue.extend({ kind: anchorKind, timeZone: anchorZone }).nullable(),
+    anchor: selectedValue.extend({ kind: anchorKind, timeZone: selectedAnchorZone }).nullable(),
   })
   .strict()
 export type EventSelection = z.infer<typeof eventSelectionSchema>
@@ -63,7 +66,7 @@ export function eventSelectionForCatalog(catalog: EvidenceCatalog) {
       object: value,
       version: value.nullable(),
       round: value.nullable(),
-      anchor: value.extend({ kind: anchorKind, timeZone: anchorZone }).nullable(),
+      anchor: value.extend({ kind: anchorKind, timeZone: selectedAnchorZone }).nullable(),
     })
     .nullable()
 }

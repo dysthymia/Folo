@@ -293,6 +293,8 @@ describe("Story 持久化与版本", () => {
     const merged = store.create(draft([3, 4]), mergedId)
     store.markRead(mergedId, "reader")
     store.setCollected(mergedId, "reader", true)
+    const collectedAt = store.collectedAt(mergedId, "reader")
+    expect(collectedAt).not.toBeNull()
 
     const result = store.merge({
       keepStoryId: keepId,
@@ -304,6 +306,7 @@ describe("Story 持久化与版本", () => {
 
     expect(result.revision.revision).toBe(2)
     expect(store.isCollected(keepId, "reader")).toBe(true)
+    expect(store.collectedAt(keepId, "reader")).toBe(collectedAt)
     expect(store.resolveLink(mergedId)).toMatchObject({ kind: "merged", mergedInto: keepId })
     expect(store.readStatus(keepId, "reader").unread).toBe(true)
     expect(store.currentSnapshot(keepId)?.members.map((member) => member.inputSeq)).toEqual([
@@ -331,6 +334,7 @@ describe("Story 持久化与版本", () => {
     store.markRead(parentId, "reader")
 
     store.setCollected(parentId, "reader", true)
+    const collectedAt = store.collectedAt(parentId, "reader")
     const result = store.split({
       storyId: parentId,
       expectedCurrentRevision: parent.revision,
@@ -343,6 +347,8 @@ describe("Story 持久化与版本", () => {
     expect(result.childIds).toEqual([firstChildId, secondChildId])
     expect(store.isCollected(firstChildId, "reader")).toBe(true)
     expect(store.isCollected(secondChildId, "reader")).toBe(true)
+    expect(store.collectedAt(firstChildId, "reader")).toBe(collectedAt)
+    expect(store.collectedAt(secondChildId, "reader")).toBe(collectedAt)
     expect(store.resolveLink(parentId)).toMatchObject({ kind: "split", splitInto: result.childIds })
     expect(store.canAggregate("aggregation-rule", "scope-v1", [1, 3])).toBe(false)
     expect(() => store.create(draft([1, 3]))).toThrow("invalid_reference")

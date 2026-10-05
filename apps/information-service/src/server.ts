@@ -16,6 +16,7 @@ import { ChatInputError } from "./chat"
 import { ExportStoreError } from "./export-store"
 import { ExternalApiError } from "./external-api"
 import { ExternalConfigError } from "./external-config"
+import { FoloReadError } from "./folo"
 import { NotionExportError } from "./notion-export"
 import { ProcessingFeedbackError } from "./processing-feedback"
 import { ProcessingReadingError } from "./processing-reading-store"
@@ -162,6 +163,9 @@ export function createInformationServer(
           }
           return json(response, 200, automationApi(store, method, path, body))
         } catch (error) {
+          if (error instanceof FoloReadError)
+            return json(response, error.code === "unauthorized" ? 401 : 502, { error: error.code })
+          if (error instanceof AIConfigError) return json(response, 400, { error: error.code })
           if (error instanceof ResearchSelectionError)
             return json(
               response,

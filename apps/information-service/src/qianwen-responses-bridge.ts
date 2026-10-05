@@ -3,8 +3,9 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { createServer } from "node:http"
 import { isDeepStrictEqual } from "node:util"
 
+import { normalizeAIBaseUrl, QIANWEN_BASE_URL } from "./ai-config"
+
 const MAX_BODY_BYTES = 1024 * 1024
-const QIANWEN_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
 type FetchImplementation = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -26,6 +27,7 @@ export interface QianwenResponsesBridge {
 
 export interface StartQianwenResponsesBridgeOptions {
   apiKey: string
+  baseUrl?: string
   model: string
   schema: object
   signal?: AbortSignal
@@ -214,11 +216,13 @@ const validateToolDeclarations = (body: JsonRecord) => {
 }
 
 const readUsage = (payload: JsonRecord): QianwenBridgeUsage | null => {
-  if (!isRecord(payload.usage) || !isRecord(payload.usage.prompt_tokens_details)) return null
+  if (!isRecord(payload.usage)) return null
   const inputTokens = payload.usage.prompt_tokens
   const outputTokens = payload.usage.completion_tokens
   const totalTokens = payload.usage.total_tokens
-  const cachedInputTokens = payload.usage.prompt_tokens_details.cached_tokens
+  const cachedInputTokens = isRecord(payload.usage.prompt_tokens_details)
+    ? (payload.usage.prompt_tokens_details.cached_tokens ?? 0)
+    : 0
   if (
     !isSafeTokenCount(inputTokens) ||
     !isSafeTokenCount(outputTokens) ||
@@ -353,6 +357,7 @@ const sendSseResponse = (
 
 export async function startQianwenResponsesBridge({
   apiKey,
+  baseUrl = QIANWEN_BASE_URL,
   model,
   schema,
   signal,
@@ -362,6 +367,8 @@ export async function startQianwenResponsesBridge({
     throw new BridgeRequestError(400, "invalid_options")
   }
 
+  const upstreamBaseUrl = normalizeAIBaseUrl(baseUrl)
+  const upstreamUrl = `${upstreamBaseUrl}/chat/completions`
   const accessToken = randomBytes(32).toString("base64url")
   const upstreamControllers = new Set<AbortController>()
   let latestUsage: QianwenBridgeUsage | null = null
@@ -411,7 +418,7 @@ export async function startQianwenResponsesBridge({
 
       let completion: ReturnType<typeof readCompletion>
       try {
-        const upstreamResponse = await fetchImpl(QIANWEN_CHAT_URL, {
+        const upstreamResponse = await fetchImpl(upstreamUrl, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -424,7 +431,8 @@ export async function startQianwenResponsesBridge({
               type: "json_schema",
               json_schema: { name: schemaName, strict: true, schema },
             },
-            enable_thinking: false,
+            // 仅千问端点接受这个扩展；其他兼容服务只收到标准 Chat Completions 字段。
+            ...(upstreamBaseUrl === QIANWEN_BASE_URL ? { enable_thinking: false } : {}),
             stream: false,
           }),
           redirect: "error",

@@ -2,14 +2,20 @@ import type { DatabaseSync } from "node:sqlite"
 
 import type { RuleInput } from "@follow/information-core"
 
+import type { AIProvider } from "./ai-config"
+import type { ReasoningEffort } from "./ai-reasoning"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import { AutomationError } from "./automation-store"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
 
 export type TargetSnapshot = {
   context: RuleInput
-  provider: "codex" | "qianwen"
+  provider: AIProvider
   model: string
+  baseUrl?: string
+  endpointFingerprint?: string
+  // 已领取目标冻结强度；旧快照缺字段仍以 low 重试。
+  reasoningEffort?: ReasoningEffort
   sourceRole: string
   metadataVersion: number
 }
@@ -25,6 +31,7 @@ export class ProcessingStateStore {
       CREATE TABLE IF NOT EXISTS processing_source_item_overrides(source_key TEXT NOT NULL,item_id TEXT NOT NULL,mode TEXT NOT NULL,revision INTEGER NOT NULL,previous_mode TEXT,PRIMARY KEY(source_key,item_id));
       CREATE TABLE IF NOT EXISTS processing_trigger_reports(trigger_id TEXT PRIMARY KEY,body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS processing_material_state(source_key TEXT NOT NULL,item_id TEXT NOT NULL,content_version TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(source_key,item_id));
+      CREATE TABLE IF NOT EXISTS processing_input_retries(input_seq INTEGER NOT NULL,generation INTEGER NOT NULL,last_failed_at TEXT NOT NULL,automatic_retries INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL,PRIMARY KEY(input_seq,generation));
     `)
   }
 
@@ -52,30 +59,112 @@ export class ProcessingStateStore {
     )
   }
 
-  fail(input: ProcessingInput, error: string) {
+  fail(input: ProcessingInput, error: string, now = new Date()) {
     this.db
       .prepare("UPDATE processing_target_snapshots SET error=? WHERE input_seq=? AND generation=?")
       .run(error, input.seq, input.generation)
-    this.db
+    const changed = this.db
       .prepare(
         "UPDATE processing_inputs SET status='failed' WHERE seq=? AND current=1 AND generation=?",
       )
       .run(input.seq, input.generation)
+    // 每次失败刷新退避起点，自动重试次数跨任务和服务重启保存。
+    if (Number(changed.changes) === 1)
+      this.db
+        .prepare(
+          "INSERT INTO processing_input_retries VALUES(?,?,?,0,?) ON CONFLICT(input_seq,generation) DO UPDATE SET last_failed_at=excluded.last_failed_at,error=excluded.error",
+        )
+        .run(input.seq, input.generation, now.toISOString(), error)
   }
 
   recover() {
     // 中断的模型调用结果未知，标为失败，避免重启时无提示重复付费。
+    this.db
+      .prepare(
+        "INSERT INTO processing_input_retries SELECT seq,generation,?,0,'processing_interrupted' FROM processing_inputs WHERE status='running' ON CONFLICT(input_seq,generation) DO UPDATE SET last_failed_at=excluded.last_failed_at,error=excluded.error",
+      )
+      .run(new Date().toISOString())
     this.db.exec("UPDATE processing_inputs SET status='failed' WHERE status='running'")
   }
 
   retry(seq: number) {
-    return (
+    const changed =
       this.db
         .prepare(
           "UPDATE processing_inputs SET status='pending' WHERE seq=? AND current=1 AND status='failed'",
         )
         .run(seq).changes === 1
+    // 用户显式重试重新授予额度；配置快照和已发布版本仍保留。
+    if (changed) this.db.prepare("DELETE FROM processing_input_retries WHERE input_seq=?").run(seq)
+    return changed
+  }
+
+  failure(input: ProcessingInput): string | null {
+    const row = this.db
+      .prepare(
+        "SELECT error FROM processing_input_retries WHERE input_seq=? AND generation=? UNION ALL SELECT error FROM processing_target_snapshots WHERE input_seq=? AND generation=? LIMIT 1",
+      )
+      .get(input.seq, input.generation, input.seq, input.generation)
+    return typeof row?.error === "string" ? row.error : null
+  }
+
+  retryAutomatically(input: ProcessingInput, now = new Date()): boolean {
+    if (!input.current || input.status !== "failed" || input.releaseVersion === null) return false
+    const error = this.failure(input)
+    // 只自动恢复暂时性的调用故障，配置错误、无效输出及未知中断需要显式处理。
+    if (
+      !error ||
+      ![
+        "codex_process_failed",
+        "codex_timeout",
+        "codex_incomplete_turn",
+        "codex_connection",
+        "codex_rate_limit",
+      ].includes(error)
     )
+      return false
+    const readRetry = this.db.prepare(
+      "SELECT * FROM processing_input_retries WHERE input_seq=? AND generation=?",
+    )
+    let row = readRetry.get(input.seq, input.generation)
+    if (!row) {
+      // 仅首次迁移旧失败才读取报告；摄取时间不是失败时间，不能据此提前补付费。
+      const reported = this.db
+        .prepare(
+          "SELECT MAX(COALESCE(json_extract(report.body,'$.finishedAt'),json_extract(report.body,'$.progressAt'))) AS failed_at FROM processing_trigger_reports AS report,json_each(report.body,'$.entries.failures') AS failure WHERE json_extract(failure.value,'$.inputSeq')=? AND json_extract(failure.value,'$.code')=?",
+        )
+        .get(input.seq, error)
+      const failedAt = Date.parse(String(reported?.failed_at ?? ""))
+      const knownFailureTime =
+        Number.isFinite(failedAt) &&
+        failedAt >= Date.parse(input.receivedAt) &&
+        failedAt <= now.getTime()
+          ? new Date(failedAt).toISOString()
+          : now.toISOString()
+      // 缺少可靠失败时间的旧目标从首次观察开始等待，仍只允许两次自动续跑。
+      this.db
+        .prepare("INSERT OR IGNORE INTO processing_input_retries VALUES(?,?,?,0,?)")
+        .run(input.seq, input.generation, knownFailureTime, error)
+      row = readRetry.get(input.seq, input.generation)!
+    }
+    if (
+      Number(row.automatic_retries) >= 2 ||
+      now.getTime() - Date.parse(String(row.last_failed_at)) < 5 * 60_000
+    )
+      return false
+    const changed =
+      this.db
+        .prepare(
+          "UPDATE processing_inputs SET status='pending' WHERE seq=? AND current=1 AND generation=? AND release_version=? AND status='failed'",
+        )
+        .run(input.seq, input.generation, input.releaseVersion).changes === 1
+    if (changed)
+      this.db
+        .prepare(
+          "UPDATE processing_input_retries SET automatic_retries=automatic_retries+1 WHERE input_seq=? AND generation=?",
+        )
+        .run(input.seq, input.generation)
+    return changed
   }
 
   /**

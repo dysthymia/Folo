@@ -3,7 +3,10 @@ import { createHash } from "node:crypto"
 import { compileInstructions } from "@follow/information-core"
 import { z } from "zod"
 
-import type { AIConfigStore } from "./ai-config"
+import type { AIChatExecution, AIConfigStore } from "./ai-config"
+import { AIConfigError, aiEndpointFingerprint } from "./ai-config"
+import type { ReasoningEffort } from "./ai-reasoning"
+import { aiReasoningEffort, reasoningFingerprint } from "./ai-reasoning"
 import type { CodexJsonOptions, CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
@@ -34,7 +37,9 @@ import {
   EVENT_IDENTITY_REQUIREMENTS,
   SOURCE_FIDELITY_REQUIREMENTS,
 } from "./processing-prompt"
+import { entryReadState, inputReadState } from "./processing-read-state"
 import { matchesAIRule, runnableReleasedConfig } from "./processing-rule-scope"
+import type { SharedAnalysisSession, SharedEntryMaterial } from "./processing-shared-analysis"
 import type { TargetSnapshot } from "./processing-state"
 import { sourceText } from "./service"
 import type { Store } from "./store"
@@ -99,6 +104,8 @@ export type EntryProcessingOptions = {
   signal: AbortSignal
   execute?: typeof runCodexJson
   onProgress?: (result: EntryProcessingResult) => void
+  // 同一证据目录可同时产出单篇、去重与新综述，避免各规则重读正文。
+  sharedAnalysis?: SharedAnalysisSession
 }
 
 // 每次只接受固定 TargetSnapshot；模型建议不能覆盖程序解析出的展示和材料资格。
@@ -155,7 +162,7 @@ export async function runEntryProcessing(
             ["pending", "running"].includes(candidate.status) &&
             sourceKeys.has(candidate.sourceKey) &&
             withinWindow(candidate.body.publishedAt, historySince, cutoffAt) &&
-            entryReadState(entrySnapshots.get(candidate.seq) ?? candidate.body) !== true,
+            entryReadState(entrySnapshots.get(candidate.seq)) === false,
         ).length
       snapshot.pending = Math.max(snapshot.pending, queued)
       originalProgress?.(snapshot)
@@ -172,7 +179,10 @@ export async function runEntryProcessing(
   const entrySnapshots = new Map(
     candidates.map((candidate) => [
       candidate.seq,
-      options.store.entry?.(candidate.sourceKey, candidate.itemId) ?? candidate.body,
+      {
+        ...candidate.body,
+        read: inputReadState(candidate, options.store.entry?.bind(options.store)),
+      },
     ]),
   )
   // 与水合共用公平批次。仅连续短文装箱，遇到长文立即执行，不能把第2位普通项挤到后面。
@@ -218,10 +228,14 @@ export async function runEntryProcessing(
       !withinWindow(candidate.body.publishedAt, historySince, cutoffAt)
     )
       continue
-    // 已读条目不进模型。队列状态由 `settleReadStates` 在更早的阶段收敛，这里只做防御：
-    // 直接调用引擎的路径（测试、试运行）也必须遵守同一口径。
-    if (entryReadState(entrySnapshots.get(candidate.seq)) === true) {
-      metrics.readSkipped++
+    // 直接调用、试运行和长文也必须明确未读；未知读态等待同步，不能暗中付费。
+    const read = entryReadState(entrySnapshots.get(candidate.seq))
+    if (read !== false) {
+      if (read === true) metrics.readSkipped++
+      else {
+        metrics.contextPending++
+        result.pending++
+      }
       continue
     }
     if (batches.handledInputSeqs.has(candidate.seq)) continue
@@ -271,6 +285,10 @@ export async function runEntryProcessing(
         context,
         provider: config.provider,
         model: config.model,
+        reasoningEffort: aiReasoningEffort(config),
+        ...(config.provider === "openai-compatible"
+          ? { baseUrl: config.baseUrl, endpointFingerprint: aiEndpointFingerprint(config) }
+          : {}),
         sourceRole: sourceRole(options.store, context.source_id),
         metadataVersion: options.store.subscriptionTags.snapshot().revision,
       }
@@ -317,7 +335,11 @@ export async function runEntryProcessing(
           usage: null,
         }
       } else {
-        const execution = await options.aiConfig.execution(target.snapshot.provider)
+        const execution = await options.aiConfig.execution(
+          target.snapshot.provider,
+          target.snapshot.baseUrl,
+          target.snapshot.model,
+        )
         const modelStartedAt = Date.now()
         const response =
           text.length > MAX_ENTRY_CHARS
@@ -326,6 +348,8 @@ export async function runEntryProcessing(
                 text,
                 provider: target.snapshot.provider,
                 model: target.snapshot.model,
+                reasoningEffort: target.snapshot.reasoningEffort ?? "low",
+                endpointFingerprint: target.snapshot.endpointFingerprint,
                 instructions,
                 sourceRole: target.snapshot.sourceRole,
                 historySince: options.historySince,
@@ -355,10 +379,19 @@ export async function runEntryProcessing(
               sourceRole: target.snapshot.sourceRole,
               historySince: options.historySince,
               model: target.snapshot.model,
+              reasoningEffort: target.snapshot.reasoningEffort ?? "low",
               runtimeDir: options.runtimeDir,
               signal: options.signal,
               qianwen: execution,
               execute: options.execute,
+              sharedAnalysis: options.sharedAnalysis,
+              material: {
+                input: target.input,
+                text,
+                context: target.snapshot.context,
+                policy: instructions.policy,
+                provider: target.snapshot.provider,
+              },
             })
         if (
           model.output.entryId !== target.input.itemId ||
@@ -421,36 +454,34 @@ export async function runEntryProcessing(
 }
 
 /**
- * 读态判定的单一来源：批层准备与原单篇路径共用，避免两处口径分叉。
- *
- * `null` 表示来源没有提供读态（例如 X 搜索条目），不能当成已读丢弃；`read` 不是内容身份
- * 的一部分，所以来源侧的读态变化不会让输入自动换代，判定必须走这里的实时快照。
- */
-function entryReadState(entry: { read?: boolean | null } | undefined): boolean | null {
-  const read = entry?.read
-  return typeof read === "boolean" ? read : null
-}
-
-/**
  * 用来源侧实时读态收敛队列，并把「已读」落成终态。
  *
  * 必须由 worker 在抓取正文之前调用：否则已读条目的详情与可读性提取会白跑一遍，等于把
  * 省下的模型额度又花在网络与解析上。已读条目本身不会因为来源侧读到一半就自动换代
  * （`read` 不属于内容身份），所以历史积压只能在这里显式退出队列。
  */
-export function settleReadStates(store: ProcessingEngineStore): {
+export function settleReadStates(
+  store: ProcessingEngineStore,
+  targets?: readonly { sourceKey: string; itemId: string }[],
+): {
   skip: number[]
   revive: number[]
 } {
   const skip: number[] = []
   const revive: number[] = []
   for (const candidate of store.automation.inputs()) {
+    // 列表唤醒只收敛本批读态，不能复活其它来源的历史跳过项。
+    if (
+      targets &&
+      !targets.some(
+        (target) => target.sourceKey === candidate.sourceKey && target.itemId === candidate.itemId,
+      )
+    )
+      continue
     // 已出决定与正在跑的输入不参与收敛：前者不该被追溯改写，后者由租约负责收尾。
     // 失败态要参与：已读条目的处理失败没有修复价值，留在失败视图只会误导。
     if (!candidate.current || ["succeeded", "running"].includes(candidate.status)) continue
-    const read = entryReadState(
-      store.entry?.(candidate.sourceKey, candidate.itemId) ?? candidate.body,
-    )
+    const read = inputReadState(candidate, store.entry?.bind(store))
     if (read === true) skip.push(candidate.seq)
     else if (read === false) revive.push(candidate.seq)
   }
@@ -479,8 +510,8 @@ async function prepareNormalEntryBatches(
       candidate.status !== "pending" ||
       !sourceKeys.has(candidate.sourceKey) ||
       !withinWindow(candidate.body.publishedAt, historySince, cutoffAt) ||
-      // 已读条目在批层就要挡掉，否则会先花一次批量模型调用再在原单篇路径被丢弃。
-      entryReadState(entrySnapshots.get(candidate.seq)) === true ||
+      // 批处理同样只接受明确未读，未知读态也不能先付费再被单篇路径丢弃。
+      entryReadState(entrySnapshots.get(candidate.seq)) !== false ||
       options.store.processingState.material(candidate) !== "complete"
     )
       continue
@@ -511,6 +542,10 @@ async function prepareNormalEntryBatches(
         context,
         provider: config.provider,
         model: config.model,
+        reasoningEffort: aiReasoningEffort(config),
+        ...(config.provider === "openai-compatible"
+          ? { baseUrl: config.baseUrl, endpointFingerprint: aiEndpointFingerprint(config) }
+          : {}),
         sourceRole: sourceRole(options.store, context.source_id),
         metadataVersion: options.store.subscriptionTags.snapshot().revision,
       })
@@ -574,6 +609,8 @@ async function prepareNormalEntryBatches(
           version: ENTRY_BATCH_PROMPT_VERSION,
           provider: target.snapshot.provider,
           model: target.snapshot.model,
+          endpointFingerprint: target.snapshot.endpointFingerprint,
+          reasoningEffort: reasoningFingerprint(target.snapshot.reasoningEffort),
           sourceRole: target.snapshot.sourceRole,
           lengthBucket,
           global: instructions.global,
@@ -689,18 +726,36 @@ async function runPreparedBatch(
     .strict()
   let response: Awaited<ReturnType<typeof execute<z.infer<typeof batchEnvelopeSchema>>>>
   try {
-    response = await execute({
+    const request: CodexJsonOptions<z.infer<typeof batchEnvelopeSchema>> = {
       purpose: "entry",
       prompt: promptForEntryBatch(eligible, options.historySince),
       schema: z.toJSONSchema(batchContractSchema),
       validate: (value): value is z.infer<typeof batchEnvelopeSchema> =>
         batchEnvelopeSchema.safeParse(value).success,
       model: eligible[0]!.target.snapshot.model,
-      reasoningEffort: "low",
+      reasoningEffort: eligible[0]!.target.snapshot.reasoningEffort ?? "low",
       runtimeDir: options.runtimeDir,
       signal: options.signal,
-      qianwen: await options.aiConfig.execution(eligible[0]!.target.snapshot.provider),
-    })
+      qianwen: await options.aiConfig.execution(
+        eligible[0]!.target.snapshot.provider,
+        eligible[0]!.target.snapshot.baseUrl,
+        eligible[0]!.target.snapshot.model,
+      ),
+    }
+    response = options.sharedAnalysis
+      ? await options.sharedAnalysis.execute(
+          request,
+          eligible.map((item) => ({
+            input: item.input,
+            text: item.text,
+            evidence: item.evidence,
+            context: item.target.snapshot.context,
+            policy: item.instructions.policy,
+            provider: item.target.snapshot.provider,
+          })),
+          execute,
+        )
+      : await execute(request)
     addUsage(result.usage, response.usage)
   } catch (error) {
     // 失败调用若带有真实 usage 也必须计入；未知 usage 由 codex usage 账本以 null 保留。
@@ -787,7 +842,11 @@ async function retryBatchItem(
     return
   }
   try {
-    const execution = await options.aiConfig.execution(item.target.snapshot.provider)
+    const execution = await options.aiConfig.execution(
+      item.target.snapshot.provider,
+      item.target.snapshot.baseUrl,
+      item.target.snapshot.model,
+    )
     const model = await runSingleEntryModel({
       entryId: item.input.itemId,
       text: item.text,
@@ -795,10 +854,19 @@ async function retryBatchItem(
       sourceRole: item.target.snapshot.sourceRole,
       historySince: options.historySince,
       model: item.target.snapshot.model,
+      reasoningEffort: item.target.snapshot.reasoningEffort ?? "low",
       runtimeDir: options.runtimeDir,
       signal: options.signal,
       qianwen: execution,
       execute: options.execute,
+      sharedAnalysis: options.sharedAnalysis,
+      material: {
+        input: item.input,
+        text: item.text,
+        context: item.target.snapshot.context,
+        policy: item.instructions.policy,
+        provider: item.target.snapshot.provider,
+      },
     })
     addUsage(result.usage, model.usage)
     if (options.signal.aborted || !batchTargetCurrent(options.store, item)) {
@@ -901,6 +969,8 @@ function entryFingerprint(input: {
     version: ENTRY_PROMPT_VERSION,
     model: input.target.model,
     provider: input.target.provider,
+    endpointFingerprint: input.target.endpointFingerprint,
+    reasoningEffort: reasoningFingerprint(input.target.reasoningEffort),
     input: { identity: contentIdentity(input.input.body), text: input.text },
     // 原文身份与实际模型指令一致才复用；分类等审计上下文保留在各自决定中。
     sourceRole: input.target.sourceRole,
@@ -1020,25 +1090,32 @@ export async function runSingleEntryModel(input: {
   sourceRole: string
   historySince: string
   model: string
+  reasoningEffort?: ReasoningEffort
   runtimeDir: string
   signal: AbortSignal
-  qianwen?: { apiKey: string }
+  qianwen?: AIChatExecution
   execute?: typeof runCodexJson
+  sharedAnalysis?: SharedAnalysisSession
+  material?: Omit<SharedEntryMaterial, "evidence">
 }) {
   const execute = input.execute ?? runCodexJson
   const evidence = createEvidenceCatalog(input.text)
   const selectionSchema = createEntryModelSelectionSchema(input.entryId, evidence)
-  const response = await execute({
+  const request: CodexJsonOptions<EntryModelSelection> = {
     purpose: "entry",
     prompt: promptForEntry({ ...input, evidence: renderEvidenceCatalog(evidence) }),
     schema: z.toJSONSchema(selectionSchema),
     validate: (value): value is EntryModelSelection => selectionSchema.safeParse(value).success,
     model: input.model,
-    reasoningEffort: "low",
+    reasoningEffort: input.reasoningEffort ?? "low",
     runtimeDir: input.runtimeDir,
     signal: input.signal,
     qianwen: input.qianwen,
-  })
+  }
+  const response =
+    input.sharedAnalysis && input.material
+      ? await input.sharedAnalysis.execute(request, [{ ...input.material, evidence }], execute)
+      : await execute(request)
   const { facts, ...selection } = response.result
   const output: EntryModelOutput = entryModelOutputSchema.parse({
     ...selection,
@@ -1090,6 +1167,7 @@ function withinWindow(publishedAt: string, historySince: number, cutoffAt: numbe
 }
 
 function processingErrorCode(error: unknown): string {
+  if (error instanceof AIConfigError) return error.code
   if (error instanceof CodexRunError) return `codex_${error.code.toLowerCase()}`
   if (
     error instanceof Error &&

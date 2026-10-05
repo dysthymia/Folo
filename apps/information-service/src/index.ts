@@ -7,10 +7,12 @@ import { parseArgs } from "node:util"
 import { join, resolve } from "pathe"
 
 import { AIConfigStore } from "./ai-config"
+import { aiReasoningEffort } from "./ai-reasoning"
 import { FoloChat } from "./chat"
 import { xPostId } from "./content-identity"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
+import { nativeReaderApi } from "./native-reader-api"
 import { diagnosticsApi } from "./processing-diagnostics"
 import { ProcessingTrial } from "./processing-trial"
 import { runProcessingWorker } from "./processing-worker"
@@ -110,6 +112,8 @@ async function main() {
         itemId: values.entry,
         model: values.model ?? config?.model,
         provider: config?.provider,
+        reasoningEffort: config ? aiReasoningEffort(config) : undefined,
+        ...(config?.provider === "openai-compatible" ? { baseUrl: config.baseUrl } : {}),
         limit,
         pages,
       }),
@@ -175,6 +179,7 @@ async function main() {
             },
             mainWebRoot,
             [
+              nativeReaderApi({ store, getReader: reader, aiConfig }),
               // 手工历史选材使用独立研究记录，不进入日常调度或改变原文读态。
               new ResearchSelectionService({
                 store,

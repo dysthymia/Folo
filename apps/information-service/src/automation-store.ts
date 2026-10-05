@@ -193,6 +193,35 @@ export class AutomationStore {
     )
   }
 
+  activateRules(
+    rules: AutomationRule[],
+    expectedRevision: number,
+    requestId: string,
+    afterActivate?: () => void,
+  ) {
+    if (
+      !rules.length ||
+      new Set(rules.map((rule) => rule.id)).size !== rules.length ||
+      rules.some((rule) => rule.ownerId !== this.owner())
+    )
+      throw new AutomationError("invalid_rule_set")
+    return this.activateChange({ type: "rules", rules }, expectedRevision, requestId, afterActivate)
+  }
+
+  reorderRules(
+    ruleIds: string[],
+    expectedRevision: number,
+    requestId: string,
+    afterActivate?: () => void,
+  ) {
+    return this.activateChange(
+      { type: "reorder", ruleIds },
+      expectedRevision,
+      requestId,
+      afterActivate,
+    )
+  }
+
   upgradeRules(
     expectedRevision: number,
     expectedScheduleRevision: number,
@@ -277,7 +306,9 @@ export class AutomationStore {
   private activateChange(
     change:
       | { type: "rule"; ruleId: string; rule: AutomationRule | null }
-      | { type: "global"; markdown: string },
+      | { type: "global"; markdown: string }
+      | { type: "rules"; rules: AutomationRule[] }
+      | { type: "reorder"; ruleIds: string[] },
     expectedRevision: number,
     requestId: string,
     afterActivate?: () => void,
@@ -321,6 +352,50 @@ export class AutomationStore {
             version: active.global.version + Number(active.global.markdown !== change.markdown),
           },
         }
+      } else if (change.type === "reorder") {
+        if (
+          new Set(change.ruleIds).size !== change.ruleIds.length ||
+          change.ruleIds.length !== active.rules.length ||
+          change.ruleIds.some((id) => !active.rules.some((rule) => rule.id === id))
+        )
+          throw new AutomationError("invalid_rule_set")
+        // 顺序发布只读取旧的有效规则内容，草稿中的其它编辑保持未发布。
+        effectiveConfig = {
+          ...active,
+          rules: change.ruleIds.map((id, order) => ({
+            ...active.rules.find((rule) => rule.id === id)!,
+            order,
+          })),
+        }
+        const draftOnly = draftConfig.rules.filter((rule) => !change.ruleIds.includes(rule.id))
+        draftConfig = {
+          ...draftConfig,
+          rules: [
+            ...change.ruleIds.flatMap((id, order) => {
+              const rule = draftConfig.rules.find((rule) => rule.id === id)
+              return rule ? [{ ...rule, order }] : []
+            }),
+            ...draftOnly.map((rule, index) => ({ ...rule, order: change.ruleIds.length + index })),
+          ],
+        }
+      } else if (change.type === "rules") {
+        const selected = new Map(change.rules.map((rule) => [rule.id, rule]))
+        const replace = (config: RuleSet) => {
+          let order = Math.max(-1, ...config.rules.map((rule) => rule.order)) + 1
+          return {
+            ...config,
+            rules: [
+              ...config.rules.map((old) =>
+                selected.has(old.id) ? { ...selected.get(old.id)!, order: old.order } : old,
+              ),
+              ...change.rules
+                .filter((rule) => !config.rules.some((old) => old.id === rule.id))
+                .map((rule) => ({ ...rule, order: order++ })),
+            ],
+          }
+        }
+        draftConfig = replace(draftConfig)
+        effectiveConfig = replace(active)
       } else {
         const existing = previous.config.rules.find((rule) => rule.id === change.ruleId)
         const published = active.rules.find((rule) => rule.id === change.ruleId)
@@ -355,6 +430,20 @@ export class AutomationStore {
           ...effectiveConfig,
           rules: effectiveConfig.rules.map((rule) =>
             rule.id === change.ruleId ? { ...savedRule, order: rule.order } : rule,
+          ),
+        }
+      }
+      if (change.type === "rules") {
+        const selected = new Set(change.rules.map((rule) => rule.id))
+        effectiveConfig = {
+          ...effectiveConfig,
+          rules: effectiveConfig.rules.map((rule) =>
+            selected.has(rule.id)
+              ? {
+                  ...saved.config.rules.find((savedRule) => savedRule.id === rule.id)!,
+                  order: rule.order,
+                }
+              : rule,
           ),
         }
       }

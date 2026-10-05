@@ -64,7 +64,7 @@ pnpm --filter @follow/information-service start members --source 'list/<id>'
 
 ## Folo AI 模型设置
 
-打开 [模型设置](http://local.folo.is/information#model-settings)，填写 provider、模型 ID 和 API Key。当前已配置 `qwen3.8-flash`。信息工作台新处理任务及 `local.folo.is` 原有 AI 聊天共用此设置；其他部署的聊天仍走原官方接口。新处理目标开始时固定 provider/model，旧结果保持原模型记录。
+在头像菜单打开「设置 → AI → 本机处理模型与密钥」，从本机 Codex CLI 目录选择模型，或填写自定义模型的 API 基础地址、模型 ID 和 API Key。自定义接口需兼容 OpenAI Chat Completions 与结构化 JSON；「使用千问配置」保留原千问兼容入口。模型目录查询不调用模型；缓存目录会明确标为可能过期。信息工作台新处理任务及 `local.folo.is` 原有 AI 聊天共用此设置；其他部署的聊天仍走原官方接口。点击保存后才生效，新处理目标固定 provider/model/endpoint，旧结果保持原模型记录。详细说明见 [使用指南](../../docs/information-user-guide.md#设置规则与模型)。
 
 **执行框架始终是 Codex CLI。** 千问调用使用任务专用 `CODEX_HOME` 和 `folo.config.toml`，通过 `codex exec --profile folo` 请求每任务独立的回环 Responses 桥。桥将 Codex 的 `text.format` 转换为千问 Chat Completions 的 `response_format.json_schema`（严格模式），固定请求 `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` 并关闭 thinking；这样避免千问 Responses 忽略格式约束。模型能力目录和实际输出 Schema 保留在专用目录，最终仍严格验证 JSON、业务结构与原文引用。桥仅接受纯文本输入，不向上游转发工具声明，拒绝实际工具调用；失败不自动换模型或重复付费调用。
 

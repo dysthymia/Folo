@@ -7,6 +7,7 @@ import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingFeedbackApi } from "./processing-feedback-api"
+import { processListLoaded } from "./processing-list-load"
 import type {
   ProcessingEntryRole,
   ReadingSnapshot,
@@ -36,6 +37,7 @@ const scheduleConfig = z
     historySince: z.iso.datetime({ offset: true }),
     timeZone: z.string().min(1).max(100),
     enabled: z.boolean(),
+    runOnListLoad: z.boolean().optional(),
     times: z
       .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u))
       .min(1)
@@ -258,8 +260,25 @@ export function processingApi(
   if (research !== undefined) return research
   if (path === "/processing/generated-feeds" && method === "GET")
     return store.reading.generatedFeeds()
+  if (path === "/processing/generated-feed/stats" && method === "GET")
+    return store.reading.generatedStats()
   if (path === "/processing/generated-feed/items" && (method === "POST" || method === "GET"))
     return store.reading.generatedPage(generatedFeedQuerySchema.parse(body ?? {}))
+  const generatedEntryPath = /^\/processing\/generated-feed\/entries\/([^/]+)$/.exec(path)
+  if (generatedEntryPath && method === "GET")
+    return store.reading.generatedEntryState(decodeURIComponent(generatedEntryPath[1]!))
+  if (path === "/processing/generated-feed/locate" && method === "POST") {
+    const input = z
+      .object({
+        entryId: z.string().min(1).max(300).optional(),
+        storyId: z.uuid().optional(),
+        query: generatedFeedQuerySchema,
+      })
+      .strict()
+      .refine((input) => Boolean(input.entryId) !== Boolean(input.storyId))
+      .parse(body)
+    return { target: store.reading.locateGenerated(input.query, input) }
+  }
   const storyReaderPath = /^\/processing\/stories\/([^/]+)\/reader-state$/.exec(path)
   if (storyReaderPath && (method === "POST" || method === "GET")) {
     const changes =
@@ -290,6 +309,7 @@ export function processingApi(
       return store.schedule.save(input.config as ProcessingScheduleInput, input.expectedRevision)
     }
   }
+  if (path === "/processing/list-loaded" && method === "POST") return processListLoaded(store, body)
   if (path === "/runs") {
     if (method === "GET")
       return { runs: store.schedule.triggers(), reports: store.processingState.reports() }

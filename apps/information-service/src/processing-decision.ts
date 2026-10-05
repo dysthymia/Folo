@@ -1,6 +1,7 @@
 import type { PresentationPolicy, RuleInput } from "@follow/information-core"
 import { z } from "zod"
 
+import type { AIProvider } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
 import {
   eventIdentitySchema,
@@ -79,7 +80,7 @@ export function createEntryModelSelectionSchema(entryId: string, catalog: Eviden
 export type ProcessingDecision = {
   schemaVersion: 1
   fingerprint: string
-  provider: "codex" | "qianwen"
+  provider: AIProvider
   model: string
   generatedAt: string
   durationMs: number

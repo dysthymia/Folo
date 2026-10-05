@@ -5,6 +5,8 @@ import { join } from "pathe"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
+import { aiEndpointFingerprint } from "./ai-config"
+import { aiReasoningEffort } from "./ai-reasoning"
 import { runCodexJson } from "./codex"
 import { processLongEntry } from "./processing-chunks"
 import { processingRuleInput } from "./processing-context"
@@ -15,6 +17,7 @@ import {
   runSingleEntryModel,
   sourceRole,
 } from "./processing-engine"
+import { inputReadState } from "./processing-read-state"
 import { sourceText } from "./service"
 import type { Store } from "./store"
 
@@ -30,6 +33,8 @@ export class ProcessingTrialError extends Error {
   constructor(
     public readonly code:
       | "invalid_target"
+      | "target_read"
+      | "read_state_unknown"
       | "material_missing"
       | "stale_target"
       | "trial_busy"
@@ -73,6 +78,10 @@ export class ProcessingTrial {
       !store.sources().some((source) => source.key === request.sourceKey)
     )
       throw new ProcessingTrialError("invalid_target")
+    // 试运行也是付费模型调用，当前已读或未知状态必须明确拒绝，不能假报成功。
+    const read = inputReadState(input, store.entry.bind(store))
+    if (read !== false)
+      throw new ProcessingTrialError(read === true ? "target_read" : "read_state_unknown")
     const text = sourceText(input.body.content ?? "")
     if (
       !text ||
@@ -91,7 +100,7 @@ export class ProcessingTrial {
       const published = store.processingState.published()
       const before = published.find((item) => item.input.seq === input.seq)
       const ai = await this.options.aiConfig.read()
-      const qianwen = await this.options.aiConfig.execution(ai.provider)
+      const qianwen = await this.options.aiConfig.execution(ai)
       const execute: typeof runCodexJson = (request) =>
         (this.options.execute ?? runCodexJson)({
           ...request,
@@ -105,6 +114,8 @@ export class ProcessingTrial {
         sourceRole: sourceRole(store, context.source_id),
         historySince: store.schedule.snapshot().config?.historySince ?? input.body.publishedAt,
         model: ai.model,
+        endpointFingerprint: aiEndpointFingerprint(ai),
+        reasoningEffort: aiReasoningEffort(ai),
         runtimeDir: this.options.runtimeDir,
         signal,
         qianwen,
@@ -144,6 +155,7 @@ export class ProcessingTrial {
             : published.filter(
                 (item) =>
                   item.input.seq !== input.seq &&
+                  inputReadState(item.input, store.entry.bind(store)) === false &&
                   item.decision.policy.aggregation !== "deny" &&
                   item.decision.status !== "needs_context" &&
                   !store.stories.isMaterialWithdrawn(item.input.seq) &&

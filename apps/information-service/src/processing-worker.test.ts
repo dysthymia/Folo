@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { AIConfigStore } from "./ai-config"
 import type { Source, SourceEntry } from "./folo"
 import { FoloReader } from "./folo"
+import { processListLoaded } from "./processing-list-load"
 import { runProcessingWorker } from "./processing-worker"
 import { PublicArticleError } from "./public-article"
 import { Store } from "./store"
@@ -60,6 +61,53 @@ function fixture() {
 }
 
 describe("调度到处理的后台链路", () => {
+  it("未知读态不水合、不扩大空模型批，并报告等待上下文", async () => {
+    const options = fixture()
+    try {
+      options.store.saveEntry({
+        id: "unknown",
+        sourceKey: "feed/1",
+        title: "读态待同步",
+        url: null,
+        publishedAt: "2026-01-01T00:00:00Z",
+        read: null,
+        content: "真实正文",
+        description: null,
+      })
+      options.store.schedule.save(
+        {
+          sourceKeys: ["feed/1"],
+          historySince: "2026-01-01T00:00:00Z",
+          timeZone: "UTC",
+          enabled: false,
+        },
+        0,
+      )
+      options.store.automation.publish(0, { mode: "future" }, randomUUID())
+      options.store.schedule.manual(randomUUID(), new Date())
+      // 假引擎只记录范围，空批不能被解释为重新扫描全库。
+      const processEntries = vi.fn(async () => ({
+        completed: 0,
+        pending: 0,
+        failures: [],
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
+      const result = await runProcessingWorker(
+        { ...options, processEntries },
+        new AbortController().signal,
+      )
+      expect(result?.status).toBe("needs_context")
+      expect(options.sourceReader.detail).not.toHaveBeenCalled()
+      expect(processEntries).toHaveBeenCalledWith(expect.objectContaining({ inputSeqs: [] }))
+      expect(options.store.processingState.reports()[0]?.report).toMatchObject({
+        entries: { completed: 0, pending: 1 },
+      })
+      expect(options.store.automation.inputs()[0]?.status).toBe("pending")
+    } finally {
+      options.store.close()
+    }
+  })
+
   it("紧迫条目先补读并发布第一小批，后续普通材料尚未水合也不阻塞它", async () => {
     const options = fixture()
     try {
@@ -642,6 +690,256 @@ describe("调度到处理的后台链路", () => {
       )
     } finally {
       options.store.close()
+    }
+  })
+})
+
+// 列表链路复用真实捕获/水合，只注入假处理器，保证测试没有模型费用。
+describe("列表加载后台目标范围", () => {
+  const now = new Date("2026-10-04T10:00:00Z")
+  function setup() {
+    const options = fixture()
+    const draft = options.store.automation.draft()
+    options.store.automation.saveDraft(
+      {
+        ...draft.config,
+        rules: [
+          {
+            id: "list-ai",
+            name: "列表 AI",
+            ownerId: "owner",
+            enabled: true,
+            order: 0,
+            version: 1,
+            executionLocation: "processing_service",
+            when: { all: true },
+            actions: [{ type: "ai_transform", prompt: "提炼事实" }],
+          },
+        ],
+      },
+      draft.revision,
+    )
+    options.store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+    options.store.schedule.save(
+      {
+        scope: { mode: "rules" },
+        sourceKeys: ["feed/1"],
+        enabled: true,
+        historySince: "2026-10-04T00:00:00Z",
+        timeZone: "UTC",
+        times: ["23:59"],
+      },
+      0,
+    )
+    const entry = {
+      id: "listed",
+      sourceKey: "feed/1",
+      title: "本页文章",
+      publishedAt: "2026-10-04T09:00:00Z",
+      url: null,
+      read: false,
+      description: null,
+    }
+    processListLoaded(options.store, { entries: [entry] }, now)
+    return { options, entry }
+  }
+  it("范围内历史失败不能伪报成功，退避后只续跑本页授权未读目标", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const { options, entry } = setup()
+    try {
+      options.store.saveEntry({ ...entry, content: "已保存完整正文" })
+      const prepareFailure = (id: string, read: boolean, publishedAt = entry.publishedAt) => {
+        options.store.saveEntry({ ...entry, id, read, publishedAt, content: "已保存完整正文" })
+        const current = options.store.automation.current(entry.sourceKey, id)!
+        const target = options.store.processingState.prepare(current.seq, {
+          context: {
+            source_id: entry.sourceKey,
+            contextId: entry.sourceKey,
+            entry_title: entry.title,
+          },
+          provider: "codex",
+          model: "frozen-model",
+          sourceRole: "媒体",
+          metadataVersion: 1,
+        })
+        options.store.processingState.setMaterial(target.input, "complete")
+        options.store.processingState.fail(target.input, "codex_process_failed", now)
+        return target.input.seq
+      }
+      const selected = prepareFailure(entry.id, false)
+      const unloaded = prepareFailure("unloaded-failure", false)
+      const read = prepareFailure("read-failure", true)
+      const outside = prepareFailure("outside-window", false, "2026-10-03T09:00:00Z")
+      const processEntries = vi.fn(async () => ({
+        completed: 0,
+        pending: 0,
+        failures: [],
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
+      const result = await runProcessingWorker(
+        { ...options, processEntries },
+        new AbortController().signal,
+      )
+      expect(result?.status).toBe("retry_wait")
+      expect(processEntries).toHaveBeenCalledWith(expect.objectContaining({ inputSeqs: [] }))
+      expect(options.store.processingState.reports().at(-1)?.report).toMatchObject({
+        entries: { completed: 0, failures: [{ inputSeq: selected, code: "codex_process_failed" }] },
+      })
+      vi.setSystemTime(new Date(now.getTime() + 300_000))
+      processListLoaded(options.store, { entries: [entry] }, new Date())
+      processEntries.mockClear()
+      await runProcessingWorker({ ...options, processEntries }, new AbortController().signal)
+      expect(processEntries).toHaveBeenCalledWith(
+        expect.objectContaining({ inputSeqs: [selected] }),
+      )
+      expect(
+        options.store.automation.inputs().find((input) => input.seq === selected)?.status,
+      ).toBe("pending")
+      for (const seq of [unloaded, read, outside])
+        expect(options.store.automation.inputs().find((input) => input.seq === seq)?.status).toBe(
+          "failed",
+        )
+      expect(options.sourceReader.detail).not.toHaveBeenCalled()
+    } finally {
+      options.store.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("当前规则不再命中时，不自动复活旧发布版本的失败", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const { options, entry } = setup()
+    try {
+      options.store.saveEntry({ ...entry, content: "已保存完整正文" })
+      const target = options.store.processingState.prepare(
+        options.store.automation.current(entry.sourceKey, entry.id)!.seq,
+        {
+          context: {
+            source_id: entry.sourceKey,
+            contextId: entry.sourceKey,
+            entry_title: entry.title,
+          },
+          provider: "codex",
+          model: "frozen-model",
+          sourceRole: "媒体",
+          metadataVersion: 1,
+        },
+      )
+      options.store.processingState.setMaterial(target.input, "complete")
+      options.store.processingState.fail(
+        target.input,
+        "codex_process_failed",
+        new Date(now.getTime() - 300_000),
+      )
+      // 发布收窄后的规则，旧目标仍保留原发布版本，但不再获得当前授权。
+      const draft = options.store.automation.draft()
+      options.store.automation.saveDraft(
+        {
+          ...draft.config,
+          rules: draft.config.rules.map((rule) => ({
+            ...rule,
+            when: {
+              anyOf: [{ allOf: [{ field: "entry_title", operator: "eq", value: "另一个标题" }] }],
+            },
+          })),
+        },
+        draft.revision,
+      )
+      options.store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+      const processEntries = vi.fn(async () => ({
+        completed: 0,
+        pending: 0,
+        failures: [],
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
+      await runProcessingWorker({ ...options, processEntries }, new AbortController().signal)
+      expect(processEntries).toHaveBeenCalledWith(expect.objectContaining({ inputSeqs: [] }))
+      expect(options.store.automation.current(entry.sourceKey, entry.id)).toMatchObject({
+        status: "failed",
+        generation: target.input.generation,
+        releaseVersion: target.input.releaseVersion,
+      })
+    } finally {
+      options.store.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("不采集全来源历史，稳定目标身份穿过正文水合换代，未加载同源材料不处理", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const { options, entry } = setup()
+    try {
+      options.store.saveEntry({ ...entry, id: "unloaded", content: "不在列表的历史材料" })
+      const before = options.store.automation.current(entry.sourceKey, entry.id)!.seq
+      vi.mocked(options.sourceReader.detail).mockImplementation(async (_source, listed) => ({
+        ...listed,
+        content: "正文经补读后换代",
+      }))
+      const dedupe = vi.fn(async () => ({
+        batches: 0,
+        candidates: 0,
+        duplicates: 0,
+        exactDuplicates: 0,
+        pending: 0,
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
+      const repair = vi.fn(async () => ({
+        repaired: [],
+        independent: [],
+        pending: [],
+        failures: [],
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
+      await runProcessingWorker({ ...options, dedupe, repair }, new AbortController().signal)
+      expect(options.acquire).not.toHaveBeenCalled()
+      expect(options.sourceReader.detail).toHaveBeenCalledTimes(1)
+      const after = options.store.automation.current(entry.sourceKey, entry.id)!.seq
+      expect(after).not.toBe(before)
+      expect(options.processEntries).toHaveBeenCalledWith(
+        expect.objectContaining({ inputSeqs: [after], sourceKeys: ["feed/1"] }),
+      )
+      expect(dedupe).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targets: [{ sourceKey: "feed/1", itemId: entry.id }],
+          sourceKeys: ["feed/1"],
+          cutoffAt: now.toISOString(),
+          preparedEvaluations: [],
+        }),
+      )
+      // 单篇结果先落定，再执行去重与事件综合；原规则 order 不再代替执行依赖。
+      expect(options.processEntries.mock.invocationCallOrder[0]).toBeLessThan(
+        dedupe.mock.invocationCallOrder[0]!,
+      )
+      expect(dedupe.mock.invocationCallOrder[0]).toBeLessThan(repair.mock.invocationCallOrder[0]!)
+      expect(options.store.automation.current(entry.sourceKey, "unloaded")?.status).toBe("pending")
+      // 记住水合后版本，同一加载不能被水合换代误认为新内容。
+      expect(processListLoaded(options.store, { entries: [entry] }, now).trigger).toBeNull()
+    } finally {
+      options.store.close()
+      vi.useRealTimers()
+    }
+  })
+  it("排队后总暂停会取消目标，不抓详情也不执行处理", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const { options } = setup()
+    try {
+      options.store.schedule.save(
+        { ...options.store.schedule.snapshot().config!, enabled: false },
+        1,
+      )
+      expect(await runProcessingWorker(options, new AbortController().signal)).toMatchObject({
+        status: "cancelled",
+      })
+      expect(options.acquire).not.toHaveBeenCalled()
+      expect(options.sourceReader.detail).not.toHaveBeenCalled()
+      expect(options.processEntries).not.toHaveBeenCalled()
+    } finally {
+      options.store.close()
+      vi.useRealTimers()
     }
   })
 })

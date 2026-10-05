@@ -40,7 +40,7 @@ async function fixture() {
     store.close()
     await rm(directory, { recursive: true, force: true })
   })
-  return { store, chat, reader, read, observed: () => observed }
+  return { store, chat, config, reader, read, observed: () => observed }
 }
 
 it("聊天沿用后台模型和 CLI，保留对话但剔除编辑器状态与历史工具负载", async () => {
@@ -135,4 +135,17 @@ it("无效与过大上下文在运行 CLI 前被拒绝", async () => {
     ),
   ).rejects.toThrow("chat_context_too_large")
   expect(f.observed()).toBeUndefined()
+})
+
+it("推理强度聊天使用同一次私有快照，旧设置维持low", async () => {
+  const f = await fixture()
+  const input = { messages: [{ role: "user", parts: [{ type: "text", text: "请总结" }] }] }
+  await f.chat.run(input, new AbortController().signal)
+  expect(f.observed()?.reasoningEffort).toBe("low")
+  const read = vi
+    .spyOn(f.config, "read")
+    .mockResolvedValue({ provider: "codex", model: "test-model", reasoningEffort: "ultra" })
+  await f.chat.run(input, new AbortController().signal)
+  expect(f.observed()).toMatchObject({ model: "test-model", reasoningEffort: "ultra" })
+  expect(read).toHaveBeenCalledTimes(1)
 })

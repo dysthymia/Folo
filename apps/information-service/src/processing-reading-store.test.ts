@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto"
 
+import type { RuleSet } from "@follow/information-core"
 import { afterEach, describe, expect, it } from "vitest"
 
+import type { ProcessingInput } from "./automation-store"
 import type { SourceEntry } from "./folo"
 import type { GeneratedFeedPage } from "./generated-feeds"
+import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingApi } from "./processing-api"
+import { activeDedupeActions } from "./processing-dedupe"
 import type { ProcessingEntryRole } from "./processing-reading-store"
+import { semanticDuplicatePairKey } from "./semantic-dedupe"
 import { Store } from "./store"
 import { sourceSpanFragmentId } from "./story-store"
 
@@ -162,6 +167,521 @@ function rolesOf(store: Store) {
 }
 
 afterEach(() => stores.splice(0).forEach((store) => store.close()))
+
+// 只写入已通过包含判定的关系，避免角色投影测试重复请求模型。
+function saveContainmentMerge(
+  store: Store,
+  keep: ProcessingInput,
+  hide: ProcessingInput,
+  keepReference = false,
+) {
+  const action = activeDedupeActions(
+    store.automation.release(store.automation.releases()[0]!.version),
+  )[0]!
+  const pairKey = semanticDuplicatePairKey(keep.itemId, hide.itemId)
+  store.dedupe.saveBatch({
+    configFingerprint: action.fingerprint,
+    ruleId: action.ruleId,
+    provider: "codex",
+    model: "test",
+    decisions: [
+      {
+        keep,
+        hide,
+        keepReference,
+        candidate: {
+          pairKey,
+          keepEntryId: keep.itemId,
+          testEntryId: hide.itemId,
+          similarity: 1,
+          entries: [keep, hide].map((input) => ({
+            itemId: input.itemId,
+            title: input.itemId,
+            sourceTitle: "来源",
+            description: "",
+            publishedAt: "2026-01-01T00:00:00.000Z",
+            urlHost: "example.test",
+          })) as [
+            import("./semantic-dedupe").SemanticDuplicateEntry,
+            import("./semantic-dedupe").SemanticDuplicateEntry,
+          ],
+        },
+        evaluation: {
+          pairKey,
+          duplicate: true,
+          confidence: 0.95,
+          keepEntryId: keep.itemId,
+          hideEntryId: hide.itemId,
+          reason: "保留方包含隐藏方全部事实",
+        },
+      },
+    ],
+  })
+}
+
+// 直接保存已通过语义比较的包含关系，专项验证角色投影，不重复调用模型。
+function containmentFixture(reverse: boolean, standalone: "auto" | "always" = "auto") {
+  const store = fixture()
+  const draft = store.automation.draft()
+  store.automation.saveDraft(
+    {
+      ...draft.config,
+      rules: [
+        {
+          actions: [{ scope: { all: true }, type: "ai_dedupe" }],
+          enabled: true,
+          executionLocation: "processing_service",
+          id: "dedupe-chain",
+          name: "包含链去重",
+          order: 0,
+          ownerId: "owner",
+          version: 1,
+          when: { all: true },
+        },
+      ],
+    },
+    draft.revision,
+  )
+  store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+  const c = publishDecision(store, entry("C", "2026-01-01T00:00:00.000Z", true))
+  const b = publishDecision(store, entry("B", "2026-01-02T00:00:00.000Z"), { standalone })
+  const a = publishDecision(store, entry("A", "2026-01-03T00:00:00.000Z"))
+  const save = (keep: ProcessingInput, hide: ProcessingInput) =>
+    saveContainmentMerge(store, keep, hide)
+  if (reverse) {
+    save(a, b)
+    save(b, c)
+  } else {
+    save(b, c)
+    save(a, b)
+  }
+  return { store, a, b, c }
+}
+
+describe("语义去重包含链角色", () => {
+  it.each([false, true])("两种判定顺序都将链成员指向最终代表并保留读态：%s", (reverse) => {
+    const { store } = containmentFixture(reverse)
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "C", kind: "merged", relatedEntryIds: ["A"] }),
+      expect.objectContaining({ itemId: "B", kind: "merged", relatedEntryIds: ["A"] }),
+      expect.objectContaining({
+        itemId: "A",
+        kind: "keeper",
+        relatedEntryIds: ["C", "B"],
+        materialCount: 3,
+      }),
+    ])
+    const snapshot = store.reading.refresh()
+    expect(store.reading.counts(snapshot.id).standalone).toBe(1)
+    expect(store.entry(source.key, "C")?.read).toBe(true)
+    // 单来源范围仍保留所有原文，不因全局包含链而吞掉源内条目。
+    expect(
+      store.reading.generatedPage(
+        generatedFeedQuerySchema.parse({ mode: "smart", sourceKeys: [source.key] }),
+      ).items,
+    ).toHaveLength(3)
+  })
+
+  it("人工恢复中间成员会断开包含链且不再吞掉链尾", () => {
+    const { store, b } = containmentFixture(false)
+    store.processingState.setOverride(b.seq, "restore", 0)
+    expect(rolesOf(store).filter((role) => role.kind === "merged")).toEqual([])
+    expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(3)
+  })
+
+  it("显式始终保留的中间成员不会参与包含链", () => {
+    const { store } = containmentFixture(false, "always")
+    expect(rolesOf(store)).toEqual([])
+    expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(3)
+  })
+
+  it("已有综述角色的中间成员不会被包含链覆盖", () => {
+    const { store, b } = containmentFixture(false)
+    const other = publishDecision(store, entry("D", "2026-01-04T00:00:00.000Z"))
+    createAggregateStory(store, [b, other], "独立综述")
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "B", kind: "merged", relatedEntryIds: ["D"] }),
+      expect.objectContaining({ itemId: "D", kind: "story", relatedEntryIds: ["B"] }),
+    ])
+  })
+})
+
+// 已读参考保持原读态和未发布状态，只让被覆盖的未读条目获得合并角色。
+function readReferenceFixture(keepReference = true) {
+  const { store } = containmentFixture(false)
+  const draft = store.automation.draft()
+  store.automation.saveDraft(
+    {
+      ...draft.config,
+      rules: [
+        ...draft.config.rules,
+        {
+          ...draft.config.rules[0]!,
+          id: "context-guard",
+          order: 1,
+          when: { anyOf: [{ allOf: [{ field: "title", operator: "eq", value: "blocked" }] }] },
+          actions: [{ type: "presentation", policy: { standalone: "always" } }],
+        },
+      ],
+    },
+    draft.revision,
+  )
+  store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+  const reference = entry("reference", "2026-01-03T00:00:00.000Z", true)
+  store.saveEntry(reference)
+  const keep = store.automation.inputs().at(-1)!
+  store.processingState.setMaterial(keep, "complete")
+  store.processingState.settleRead([keep.seq], [])
+  const currentKeep = store.automation.inputs().find((input) => input.seq === keep.seq)!
+  const hide = publishInput(store, entry("covered", "2026-01-03T01:00:00.000Z"))
+  saveContainmentMerge(store, currentKeep, hide, keepReference)
+  return { store, keep: currentKeep, hide, reference }
+}
+
+describe("已读缓存参考的合并投影", () => {
+  it("未发布已读参考可隐藏完整覆盖的未读条目，读态与处理状态保持不变", () => {
+    const { store, keep } = readReferenceFixture()
+    expect(rolesOf(store)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          itemId: "covered",
+          kind: "merged",
+          relatedEntryIds: ["reference"],
+        }),
+        expect.objectContaining({ itemId: "reference", kind: "keeper" }),
+      ]),
+    )
+    const page = store.reading.generatedPage(
+      generatedFeedQuerySchema.parse({ mode: "smart", unreadOnly: true }),
+    )
+    expect(page.items.some((item) => item.id === "covered")).toBe(false)
+    // 来源页保留原文供逐篇核对；全局未读列表才折叠已读事实覆盖的重复内容。
+    expect(
+      store.reading
+        .generatedPage(
+          generatedFeedQuerySchema.parse({
+            mode: "smart",
+            sourceKeys: [source.key],
+            unreadOnly: true,
+          }),
+        )
+        .items.some((item) => item.id === "covered"),
+    ).toBe(true)
+    expect(store.entry(source.key, "reference")?.read).toBe(true)
+    expect(store.automation.inputs().find((input) => input.seq === keep.seq)?.status).toBe(
+      "skipped",
+    )
+    expect(store.processingState.published().some((item) => item.input.seq === keep.seq)).toBe(
+      false,
+    )
+  })
+
+  it("未标记参考的未发布条目不能成为隐藏代表", () => {
+    const { store } = readReferenceFixture(false)
+    expect(rolesOf(store).some((role) => role.itemId === "covered")).toBe(false)
+  })
+
+  it.each(["unread", "restore", "material", "body", "context", "always", "disabled"] as const)(
+    "参考资格失效后不再隐藏未读条目：%s",
+    (change) => {
+      const { store, keep, reference } = readReferenceFixture()
+      if (change === "unread") store.saveEntry({ ...reference, read: false })
+      if (change === "restore") store.processingState.setOverride(keep.seq, "restore", 0)
+      if (change === "material") store.processingState.setMaterial(keep, "missing")
+      if (change === "body") store.saveEntry({ ...reference, content: "改变后的事实" })
+      if (change === "context") store.replaceSources([{ ...source, title: "blocked" }])
+      if (change === "always" || change === "disabled") {
+        const draft = store.automation.draft()
+        const rules: RuleSet["rules"] = draft.config.rules.map((rule) => ({
+          ...rule,
+          enabled: change !== "disabled",
+        }))
+        if (change === "always") {
+          rules.push({
+            ...rules[0]!,
+            id: "always-reference",
+            order: 2,
+            when: {
+              anyOf: [
+                { allOf: [{ field: "entry_title", operator: "eq", value: reference.title }] },
+              ],
+            },
+            actions: [{ type: "presentation", policy: { standalone: "always" } }],
+          })
+        }
+        store.automation.saveDraft({ ...draft.config, rules }, draft.revision)
+        store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+      }
+      expect(rolesOf(store).some((role) => role.itemId === "covered")).toBe(false)
+      expect(
+        store.reading
+          .generatedPage(generatedFeedQuerySchema.parse({ mode: "smart", unreadOnly: true }))
+          .items.some((item) => item.id === "covered"),
+      ).toBe(true)
+    },
+  )
+})
+
+describe("原生收藏与深链投影", () => {
+  it("全局分类接受 all 并跨视图合并同名来源，数字视图分类保持局部范围", () => {
+    expect(
+      generatedFeedQuerySchema.parse({ category: { view: "all", name: "Blockchain" } }).category,
+    ).toEqual({ view: "all", name: "Blockchain" })
+    expect(() =>
+      generatedFeedQuerySchema.parse({ category: { view: -1, name: "Blockchain" } }),
+    ).toThrow()
+    const store = fixture()
+    store.replaceSources([
+      { ...source, category: "Blockchain" },
+      { ...source, key: "feed/f2", id: "f2", view: 1, category: "Blockchain" },
+      { ...source, key: "feed/f3", id: "f3", category: "Other" },
+    ])
+    publishRelease(store)
+    const first = publishDecision(store, entry("member-0", "2026-01-01T00:00:00.000Z"))
+    const second = publishDecision(store, {
+      ...entry("member-1", "2026-01-02T00:00:00.000Z"),
+      sourceKey: "feed/f2",
+    })
+    const storyId = createAggregateStory(store, [first, second], "跨视图同事件")
+    const original0 = entry("original-0", "2026-01-03T00:00:00.000Z")
+    const original1 = { ...entry("original-1", "2026-01-04T00:00:00.000Z"), sourceKey: "feed/f2" }
+    const other = { ...entry("other", "2026-01-05T00:00:00.000Z"), sourceKey: "feed/f3" }
+    publishDecision(store, original0)
+    publishDecision(store, original1)
+    publishDecision(store, other)
+    const query = generatedFeedQuerySchema.parse({
+      mode: "smart",
+      category: { view: "all", name: "Blockchain" },
+      refresh: true,
+    })
+    const all = store.reading.generatedPage(query)
+    expect(all.items.map((item) => item.id).sort()).toEqual(
+      [storyId, "original-0", "original-1"].sort(),
+    )
+    const scoped = store.reading.generatedPage({
+      ...query,
+      category: { view: 0, name: "Blockchain" },
+    })
+    expect(scoped.items.filter((item) => item.kind === "entry").map((item) => item.id)).toEqual([
+      "original-0",
+    ])
+    expect(scoped.items.some((item) => item.id === "other")).toBe(false)
+    store.reading.replaceOfficialCollections(
+      [original0, original1, other].map((item) => ({ ...item, collected: true })),
+    )
+    expect(
+      store.reading
+        .generatedPage({ ...query, mode: "collections", view: 0 })
+        .items.map((item) => item.id)
+        .sort(),
+    ).toEqual(["original-0", "original-1"].sort())
+    expect(
+      store.reading
+        .generatedPage({ ...query, mode: "collections", category: { view: 1, name: "Blockchain" } })
+        .items.map((item) => item.id),
+    ).toEqual(["original-1"])
+  })
+  it("空列表诊断保持同一来源库存口径，搜索与读态筛选不伪装为空源", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishDecision(store, entry("hidden", "2026-01-01T00:00:00.000Z"), { status: "hide" })
+    publishDecision(store, entry("context", "2026-01-02T00:00:00.000Z"), {
+      status: "needs_context",
+    })
+    publishDecision(store, entry("ready", "2026-01-03T00:00:00.000Z"))
+    store.saveEntry(entry("unassigned", "2026-01-04T00:00:00.000Z"))
+    const query = {
+      mode: "smart" as const,
+      limit: 30,
+      unreadOnly: false,
+      collectedOnly: false,
+      refresh: true,
+    }
+    const base = store.reading.generatedPage(query)
+    const empty = store.reading.generatedPage({ ...query, search: "不存在的词", unreadOnly: true })
+    expect(empty.total).toBe(0)
+    expect(empty.counts).toEqual(base.counts)
+    expect(empty.counts).toMatchObject({
+      inputs: 4,
+      uncovered: 1,
+      hidden: 1,
+      folded: 0,
+      pending: 1,
+      needsContext: 1,
+    })
+    expect(
+      store.reading.generatedPage({ ...query, sourceKeys: ["feed/other"] }).counts,
+    ).toMatchObject({ inputs: 0, uncovered: 0, hidden: 0, folded: 0, pending: 0, needsContext: 0 })
+  })
+  it("保留未处理、待补、隐藏和已并入 Story 的全部显式收藏原文", () => {
+    const store = fixture()
+    publishRelease(store)
+    const member = publishDecision(store, entry("member", "2026-01-04T00:00:00.000Z"))
+    publishDecision(store, entry("hidden", "2026-01-03T00:00:00.000Z"), { status: "hide" })
+    publishDecision(store, entry("context", "2026-01-02T00:00:00.000Z"), {
+      status: "needs_context",
+    })
+    const otherMember = publishDecision(store, entry("other-member", "2026-01-05T00:00:00.000Z"))
+    const storyId = createAggregateStory(store, [member, otherMember], "收藏综述")
+    store.reading.generatedStoryState(storyId, { collected: true })
+    expect(store.reading.generatedStats()).toEqual({
+      feedId: "generated:events",
+      total: 1,
+      unread: 1,
+      collected: 1,
+    })
+    store.reading.generatedStoryState(storyId, { read: true })
+    expect(store.reading.generatedStats().unread).toBe(0)
+    const entries = ["member", "hidden", "context", "unprocessed"].map((id, index) => ({
+      ...entry(id, `2026-01-0${4 - index}T00:00:00.000Z`),
+      collected: true,
+      view: 0,
+    }))
+    store.reading.replaceOfficialCollections(entries)
+    const page = store.reading.generatedPage({
+      mode: "collections",
+      limit: 30,
+      unreadOnly: false,
+      collectedOnly: false,
+      refresh: true,
+    })
+    expect(page.items.map((item) => item.id)).toEqual(
+      expect.arrayContaining([...entries.map((item) => item.id), storyId]),
+    )
+    expect(page.total).toBe(5)
+    expect(page.items.find((item) => item.id === "unprocessed")).toMatchObject({
+      inputSeq: null,
+      decisionId: null,
+    })
+    expect(store.automation.inputs()).toHaveLength(4)
+    store.reading.replaceOfficialCollections(entries.filter((item) => item.id !== "hidden"))
+    expect(
+      store.reading
+        .generatedPage({
+          mode: "collections",
+          limit: 30,
+          unreadOnly: false,
+          collectedOnly: false,
+          refresh: false,
+          snapshotId: page.snapshotId,
+        })
+        .items.some((item) => item.id === "hidden"),
+    ).toBe(false)
+  })
+
+  it("收藏可覆盖已经退订的真实来源，不改变普通 AI 来源资格", () => {
+    const store = fixture()
+    store.reading.replaceOfficialCollections([
+      {
+        ...entry("saved", "2026-01-01T00:00:00.000Z"),
+        sourceKey: "feed/unsubscribed",
+        collected: true,
+        view: 1,
+      },
+    ])
+    expect(
+      store.reading.generatedPage({
+        mode: "collections",
+        limit: 30,
+        unreadOnly: false,
+        collectedOnly: false,
+        refresh: true,
+        view: 1,
+      }).items,
+    ).toHaveLength(1)
+    expect(
+      store.reading.generatedPage({
+        mode: "collections",
+        limit: 30,
+        unreadOnly: false,
+        collectedOnly: false,
+        refresh: true,
+        view: 0,
+      }).items,
+    ).toHaveLength(0)
+  })
+
+  it("深链定位首批之外的冻结页，且不能把该快照用于其它来源范围", () => {
+    const store = fixture()
+    publishRelease(store)
+    for (let index = 0; index < 63; index++)
+      publishDecision(
+        store,
+        entry(`entry-${index}`, new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString()),
+      )
+    const query = {
+      mode: "smart" as const,
+      limit: 7,
+      unreadOnly: false,
+      collectedOnly: false,
+      refresh: true,
+    }
+    const first = store.reading.generatedPage(query)
+    const target = store.reading.locateGenerated(
+      { ...query, refresh: false, snapshotId: first.snapshotId },
+      { entryId: "entry-0" },
+    )!
+    expect(target.cursor).not.toBeNull()
+    const previous = store.reading.generatedPage({
+      ...query,
+      refresh: false,
+      snapshotId: target.snapshotId,
+      cursor: target.previousCursor ?? undefined,
+    })
+    expect(previous.items).toHaveLength(7)
+    expect(previous.nextCursor).toBe(target.cursor)
+    expect(
+      store.reading
+        .generatedPage({
+          ...query,
+          refresh: false,
+          snapshotId: target.snapshotId,
+          cursor: target.cursor!,
+        })
+        .items.some((item) => item.id === "entry-0"),
+    ).toBe(true)
+    expect(() =>
+      store.reading.locateGenerated(
+        { ...query, snapshotId: first.snapshotId, sourceKeys: ["feed/other"] },
+        { entryId: "entry-0" },
+      ),
+    ).toThrow("invalid_pagination")
+    expect(store.reading.generatedEntryState("entry-0")).toMatchObject({
+      status: "ready",
+      item: { id: "entry-0" },
+    })
+    expect(store.reading.generatedEntryState("unknown")).toMatchObject({
+      status: "unprocessed",
+      item: null,
+      target: null,
+    })
+  })
+
+  it("隐藏与缺上下文深链给出原因并保留原文身份", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishDecision(store, entry("hidden", "2026-01-01T00:00:00.000Z"), {
+      status: "hide",
+      reason: "重复营销",
+    })
+    publishDecision(store, entry("context", "2026-01-02T00:00:00.000Z"), {
+      status: "needs_context",
+      reason: "缺串文",
+    })
+    expect(store.reading.generatedEntryState("hidden")).toMatchObject({
+      status: "hidden",
+      reason: "重复营销",
+      target: null,
+      item: { id: "hidden" },
+    })
+    expect(store.reading.generatedEntryState("context")).toMatchObject({
+      status: "needs_context",
+      reason: "缺串文",
+      target: null,
+      item: { id: "context" },
+    })
+  })
+})
 
 describe("时间线角色投影", () => {
   it("隐藏决定落成 hidden，always 例外与未处理输入都不产生角色", () => {

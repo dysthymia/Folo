@@ -17,7 +17,7 @@ export const generatedEventsFeed = {
 export const generatedFeedQuerySchema = z
   .object({
     feedId: z.literal(GENERATED_EVENTS_FEED_ID).optional(),
-    mode: z.enum(["stories", "smart"]).default("stories"),
+    mode: z.enum(["stories", "smart", "collections"]).default("stories"),
     snapshotId: z.uuid().optional(),
     cursor: z.string().min(1).max(500).optional(),
     limit: z.number().int().min(1).max(50).default(30),
@@ -29,7 +29,11 @@ export const generatedFeedQuerySchema = z
     view: z.union([z.number().int().min(0).max(5), z.literal("all")]).optional(),
     sourceKeys: z.array(z.string().min(1).max(300)).max(10000).optional(),
     category: z
-      .object({ view: z.number().int().min(0).max(5), name: z.string().max(200) })
+      // 全局分类按名称跨视图读取；单视图分类仍保留 view 与名称的联合身份。
+      .object({
+        view: z.union([z.number().int().min(0).max(5), z.literal("all")]),
+        name: z.string().max(200),
+      })
       .strict()
       .optional(),
     since: z.iso.datetime({ offset: true }).optional(),
@@ -57,6 +61,7 @@ type GeneratedItemFields = {
   updatedAt: string
   read: boolean
   collected: boolean
+  collectedAt?: string | null
   materialCount: number
   topics: string[]
   sourceKeys: string[]
@@ -73,13 +78,24 @@ export type GeneratedStoryItem = GeneratedItemFields & {
 export type GeneratedEntryItem = GeneratedItemFields & {
   kind: "entry"
   origin: "original"
-  inputSeq: number
+  inputSeq: number | null
   sourceKey: string
-  decisionId: string
+  decisionId: string | null
   storyIds: string[]
+  view?: number
+  officialCollection?: true
 }
 export type GeneratedReaderItem = GeneratedStoryItem | GeneratedEntryItem
-export type GeneratedFeedCounts = { pending: number; failed: number; needsContext: number }
+export type GeneratedFeedCounts = {
+  pending: number
+  failed: number
+  needsContext: number
+  // 库存计数在搜索、读态、收藏与时间筛选前计算，表示当前来源范围的处理材料。
+  inputs?: number
+  uncovered?: number
+  hidden?: number
+  folded?: number
+}
 export type GeneratedFeedPage = {
   feed: typeof generatedEventsFeed
   snapshotId: string
@@ -239,6 +255,47 @@ export class GeneratedFeedStore {
       hasImportantUpdate: state.unread && state.readSubstantiveRevision > 0,
       link: this.stories.resolveLink(storyId),
     }
+  }
+
+  // 深链通过同一范围与冻结快照定位，不能按首批结果猜测，也不能绕过账号资格。
+  locate(query: GeneratedFeedQuery, target: { entryId?: string; storyId?: string }) {
+    const page = this.page(query)
+    const row = this.db
+      .prepare("SELECT body FROM generated_reader_snapshots WHERE id=? AND owner_id=?")
+      .get(page.snapshotId, this.requireOwner())!
+    const saved = JSON.parse(String(row.body)) as { projection: GeneratedReaderProjection }
+    const frozen = saved.projection.reservoir ?? saved.projection.items
+    const captured = new Set(saved.projection.items.map((item) => this.itemKey(item)))
+    let visibleCount = 0
+    let pageOffset = 0
+    let previousPageOffset = 0
+    for (let index = 0; index < frozen.length; index++) {
+      const item = frozen[index]!
+      const state = this.liveState(item)
+      if (!state.allowed || (!captured.has(this.itemKey(item)) && !state.restored)) continue
+      if (visibleCount > 0 && visibleCount % query.limit === 0) {
+        previousPageOffset = pageOffset
+        pageOffset = index
+      }
+      const matches =
+        item.kind === "entry" ? item.id === target.entryId : item.storyId === target.storyId
+      if (matches)
+        return {
+          snapshotId: page.snapshotId,
+          cursor: pageOffset
+            ? Buffer.from(
+                JSON.stringify({ snapshotId: page.snapshotId, offset: pageOffset }),
+              ).toString("base64url")
+            : null,
+          previousCursor: previousPageOffset
+            ? Buffer.from(
+                JSON.stringify({ snapshotId: page.snapshotId, offset: previousPageOffset }),
+              ).toString("base64url")
+            : null,
+        }
+      visibleCount++
+    }
+    return null
   }
 
   private withReaderState(item: GeneratedStoryItem, ownerId: string): GeneratedStoryItem {

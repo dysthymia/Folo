@@ -4,6 +4,10 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:
 
 import { join, resolve } from "pathe"
 
+import type { AIChatExecution } from "./ai-config"
+import type { ReasoningEffort } from "./ai-reasoning"
+import { reasoningEffortSchema } from "./ai-reasoning"
+import { resolveCodexCommand } from "./codex-command"
 import { CodexExecutionQueueError, runSerialized } from "./codex-execution-queue"
 import { startQianwenResponsesBridge } from "./qianwen-responses-bridge"
 
@@ -41,6 +45,10 @@ export type CodexRunErrorCode =
   | "TIMEOUT"
   | "SPAWN_FAILED"
   | "PROCESS_FAILED"
+  | "INVALID_SCHEMA"
+  | "AUTHORIZATION"
+  | "RATE_LIMIT"
+  | "CONNECTION"
   | "OUTPUT_LIMIT"
   | "INVALID_JSONL"
   | "TOOL_CALL"
@@ -73,18 +81,56 @@ export interface CodexJsonOptions<T> {
   schema: object
   validate: (value: unknown) => value is T
   model: string
-  reasoningEffort?: string
+  reasoningEffort?: ReasoningEffort
   runtimeDir: string
   timeoutMs?: number
   signal?: AbortSignal
   command?: string
   purpose?: "entry" | "story" | "dedupe" | "chat" | "preview" | "unknown"
   // 自定义模型只影响这个 CLI 任务；上游密钥只留在本机协议转换器内存中。
-  qianwen?: { apiKey: string }
+  qianwen?: AIChatExecution
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
+
+// CLI 有时把上游错误编码成 message 内的 JSON 字符串，只提取分类，不保留原文。
+function classifyProcessFailure(event: Record<string, unknown>): CodexRunErrorCode {
+  const parts: string[] = []
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 4) return
+    if (typeof value === "string") {
+      parts.push(value)
+      if (value.trim().startsWith("{")) {
+        try {
+          visit(JSON.parse(value), depth + 1)
+        } catch {
+          // 非 JSON 的消息同样只能参与固定分类，不能透传到界面或日志。
+        }
+      }
+    } else if (isRecord(value)) {
+      for (const key of ["code", "type", "status", "message", "error"]) {
+        const nested = value[key]
+        if (typeof nested === "number" && key === "status") parts.push(`status:${nested}`)
+        else visit(nested, depth + 1)
+      }
+    }
+  }
+  visit(event, 0)
+  const detail = parts.join("\n")
+  if (/invalid_json_schema|invalid schema for response_format/iu.test(detail))
+    return "INVALID_SCHEMA"
+  if (
+    /invalid_api_key|authentication_error|unauthorized|not authenticated|status:40[13]/iu.test(
+      detail,
+    )
+  )
+    return "AUTHORIZATION"
+  if (/rate_limit|usage_limit_reached|quota exceeded|status:429/iu.test(detail)) return "RATE_LIMIT"
+  if (/stream disconnected|connection (?:reset|refused)|connect error|network error/iu.test(detail))
+    return "CONNECTION"
+  return "PROCESS_FAILED"
+}
 
 const readUsage = (value: unknown): CodexUsage | null => {
   if (!isRecord(value)) return null
@@ -245,7 +291,7 @@ const execute = ({
         return
       }
       if (event.type === "error" || event.type === "turn.failed") {
-        stop("PROCESS_FAILED")
+        stop(classifyProcessFailure(event))
         return
       }
       if (event.type === "turn.completed") {
@@ -258,7 +304,7 @@ const execute = ({
           return
         }
         if (event.item.type === "error") {
-          stop("PROCESS_FAILED")
+          stop(classifyProcessFailure(event.item))
           return
         }
         // 只接受推理与文本消息，未知条目同样按工具活动中止，防止新增工具漏检。
@@ -328,7 +374,7 @@ const runCodexJsonUnlocked = async <T>({
   runtimeDir,
   timeoutMs = 120_000,
   signal,
-  command = process.env.CODEX_BIN || "codex",
+  command = resolveCodexCommand(),
   qianwen,
   purpose = "unknown",
 }: CodexJsonOptions<T>): Promise<{
@@ -343,7 +389,7 @@ const runCodexJsonUnlocked = async <T>({
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
     timeoutMs > 2_147_483_647 ||
-    !["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoningEffort)
+    !reasoningEffortSchema.safeParse(reasoningEffort).success
   ) {
     throw new CodexRunError("INVALID_OPTIONS")
   }
@@ -364,7 +410,13 @@ const runCodexJsonUnlocked = async <T>({
     if (qianwen) {
       if (!qianwen.apiKey.trim()) throw new CodexRunError("INVALID_OPTIONS")
       // Codex 保持 Responses harness；转换器向千问启用真正的 JSON Schema 约束。
-      bridge = await startQianwenResponsesBridge({ apiKey: qianwen.apiKey, model, schema, signal })
+      bridge = await startQianwenResponsesBridge({
+        apiKey: qianwen.apiKey,
+        baseUrl: qianwen.baseUrl,
+        model,
+        schema,
+        signal,
+      })
       // CLI 0.134+ 使用独立 profile 文件；每次运行创建专用 HOME，完全隔离客户端配置。
       const codexHome = join(taskDir, "codex-home")
       await mkdir(codexHome, { mode: 0o700 })
@@ -377,7 +429,7 @@ const runCodexJsonUnlocked = async <T>({
             {
               slug: model,
               display_name: model,
-              description: "Folo Qianwen",
+              description: "Folo OpenAI-compatible model",
               supported_reasoning_levels: [],
               // 新版 CLI 的 default 是 unified_exec 别名；必须通过模型能力明确禁用。
               shell_type: "disabled",
@@ -485,7 +537,7 @@ const runCodexJsonUnlocked = async <T>({
             startedAt: new Date(startedAt).toISOString(),
             finishedAt: new Date().toISOString(),
             model,
-            provider: qianwen ? "qianwen" : "codex",
+            provider: qianwen ? (qianwen.provider ?? "qianwen") : "codex",
             purpose,
             status: resultCode,
             usage: recordedUsage,

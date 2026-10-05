@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite"
 import type { ConditionSet, RuleSet } from "@follow/information-core"
 import { dirname } from "pathe"
 
+import type { AIProvider } from "./ai-config"
+import type { ReasoningEffort } from "./ai-reasoning"
 import { AutomationStore } from "./automation-store"
 import { ExportStore } from "./export-store"
 import type { Source, SourceEntry } from "./folo"
@@ -28,7 +30,10 @@ export type Job = {
   sourceKey: string
   itemId: string | null
   model: string | null
-  provider?: "codex" | "qianwen"
+  provider?: AIProvider
+  baseUrl?: string
+  // 队列创建时固定强度，后续设置变化不能替换旧任务的推理预算。
+  reasoningEffort?: ReasoningEffort
   error: string | null
   createdAt: string
   updatedAt: string
@@ -141,6 +146,12 @@ export class Store {
       this.stories,
       this.dedupe,
       () => this.schedule.snapshot().config,
+      // 已读参考无需单篇决定，但投影仍须核对当前分类、标签与显式规则。
+      {
+        sourceSync: this.sourceSync,
+        subscriptionTags: this.subscriptionTags,
+        sources: () => this.sources(),
+      },
     )
     // 首次增加版本层时迁入已有材料；新增表失败会保留旧库，不重建或清空数据。
     if (
@@ -302,6 +313,8 @@ export class Store {
     itemId?: string
     model?: string
     provider?: Job["provider"]
+    baseUrl?: string
+    reasoningEffort?: ReasoningEffort
     limit?: number
     pages?: number
   }): Job {
@@ -314,6 +327,8 @@ export class Store {
       itemId: input.itemId ?? null,
       model: input.model ?? null,
       provider: input.provider,
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       error: null,
       createdAt: now,
       updatedAt: now,

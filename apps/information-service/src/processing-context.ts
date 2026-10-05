@@ -21,7 +21,7 @@ function platformFromUrl(value: string | null | undefined): string | null {
 
 // 运行前由 engine 传入已冻结的 entry；read/collected 变化不会在同一批内重新匹配。
 export function processingRuleInput(
-  store: Store,
+  store: Pick<Store, "sourceSync" | "sources" | "subscriptionTags">,
   sourceKey: string,
   entry: SourceEntry,
   text: string | null,

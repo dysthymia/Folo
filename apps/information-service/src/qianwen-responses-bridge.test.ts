@@ -401,3 +401,36 @@ describe("Qianwen Responses loopback bridge", () => {
     expect(upstreamAborted).toBe(true)
   })
 })
+
+it("自定义Chat Completions网关复用严格Schema和回环转换，不发送千问扩展或上游密钥给CLI", async () => {
+  const fetcher = vi.fn<
+    NonNullable<Parameters<typeof startQianwenResponsesBridge>[0]["fetchImpl"]>
+  >(async () =>
+    Response.json(completion({}, { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 })),
+  )
+  const bridge = await startQianwenResponsesBridge({
+    apiKey: "gateway-private-key",
+    baseUrl: "https://gateway.test/custom/v1/",
+    model: "qwen3.8-flash",
+    schema,
+    fetchImpl: fetcher,
+  })
+  bridges.add(bridge)
+  const response = await callBridge(bridge)
+  expect(response.status).toBe(200)
+  expect(fetcher.mock.calls[0]?.[0]).toBe("https://gateway.test/custom/v1/chat/completions")
+  const request = fetcher.mock.calls[0]?.[1]
+  expect(request?.headers).toEqual({
+    Authorization: "Bearer gateway-private-key",
+    "Content-Type": "application/json",
+  })
+  const body = JSON.parse(String(request?.body))
+  expect(body).not.toHaveProperty("enable_thinking")
+  expect(body.response_format).toEqual({
+    type: "json_schema",
+    json_schema: { name: "codex_output_schema", strict: true, schema },
+  })
+  expect(bridge.accessToken).not.toBe("gateway-private-key")
+  expect(await response.text()).not.toContain("gateway-private-key")
+  expect(bridge.getUsage()).toEqual({ inputTokens: 12, outputTokens: 5, cachedInputTokens: 0 })
+})

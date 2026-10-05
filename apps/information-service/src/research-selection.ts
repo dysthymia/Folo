@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
+import { aiReasoningEffort } from "./ai-reasoning"
 import type { CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import type { FoloReader, Source, SourceEntry } from "./folo"
@@ -337,7 +338,7 @@ export class ResearchSelectionService {
     const startedAt = Date.now()
     try {
       const ai = await this.options.aiConfig.read()
-      const qianwen = await this.options.aiConfig.execution(ai.provider)
+      const qianwen = await this.options.aiConfig.execution(ai)
       if (store.ownerId !== owner) throw new ResearchSelectionError("owner_changed")
       this.assertCurrent(frozen.materials)
       await this.assertUncaptured(frozen.materials, owner, signal)
@@ -414,6 +415,7 @@ export class ResearchSelectionService {
       }
       const response = await (this.options.execute ?? runCodexJson)({
         model: ai.model,
+        reasoningEffort: aiReasoningEffort(ai),
         qianwen,
         runtimeDir: this.options.runtimeDir,
         signal,
@@ -453,6 +455,7 @@ export class ResearchSelectionService {
       })
       const verification = await (this.options.execute ?? runCodexJson)({
         model: ai.model,
+        reasoningEffort: aiReasoningEffort(ai),
         qianwen,
         runtimeDir: this.options.runtimeDir,
         signal,

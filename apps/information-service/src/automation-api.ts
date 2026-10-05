@@ -11,7 +11,8 @@ import { z } from "zod"
 import { AutomationError } from "./automation-store"
 import { processingApi } from "./processing-api"
 import { processingRuleInput } from "./processing-engine"
-import { activateRuleSchedule } from "./processing-rule-scope"
+import { nextProcessingRunAt } from "./processing-next-run"
+import { activateRuleSchedule, resolveAIRuleSourceKeys } from "./processing-rule-scope"
 import { legacyRuleUpgradePreview, prepareLegacyRuleUpgrade } from "./processing-rule-upgrade"
 import { sourceText } from "./service"
 import type { Store } from "./store"
@@ -26,17 +27,160 @@ export function automationApi(store: Store, method: string, path: string, body: 
   const draft = repository.draft()
   const save = (config: typeof draft.config, expectedRevision: number) =>
     repository.saveDraft(config, expectedRevision)
+  // 首屏和独立接口共用来源快照结构，避免汇总接口与旧接口的字段逐渐漂移。
+  const readSourceMetadata = () => ({
+    sources: store.sources(),
+    sourceInventoryKnown: store.sourceInventoryKnown(),
+    subscriptionTags: store.subscriptionTags.snapshot(),
+    sourceTags: store.subscriptionTags.sourceTagBindings().bindings,
+    // List 成员只读取已持久化的事实，首屏不触发官方来源刷新。
+    listMemberships: store.sourceSync.listMemberships(),
+  })
+  const readEditor = (metadata = readSourceMetadata()) => ({
+    ...draft,
+    releases: repository.releases(),
+    ...metadata,
+    // 编辑器只返回样本标题等元数据，正文不能进入配置响应。
+    items: store.snapshot().items,
+    capabilities: { automaticProcessing: true },
+  })
+  const readEffective = (metadata = readSourceMetadata()) => ({
+    revision: draft.revision,
+    ...repository.effective(),
+    ...metadata,
+  })
+  if (path === "/automation/editor" && method === "GET") {
+    // 一次鉴权后同步构建首屏的三个只读结果，不再串行等待多次官方凭据交换。
+    const metadata = readSourceMetadata()
+    return {
+      editor: readEditor(metadata),
+      effective: readEffective(metadata),
+      upgrade: legacyRuleUpgradePreview(store),
+    }
+  }
+  if (path === "/automation/status" && method === "GET") {
+    const effective = repository.effective().config
+    const scheduleConfig = store.schedule.snapshot().config
+    // 尚未迁移的旧固定计划仍按明确名单展示覆盖，不能把 ALL 草稿暗示为全订阅已启用。
+    const actualRange = (keys: string[]) =>
+      scheduleConfig && scheduleConfig.scope.mode !== "rules"
+        ? keys.filter((key) => scheduleConfig.sourceKeys.includes(key))
+        : keys
+    const sourceKeys = actualRange(resolveAIRuleSourceKeys(store, effective))
+    const covered = new Set(sourceKeys)
+    const inputs = repository.inputs().filter((input) => input.current)
+    const published = store.processingState.published().filter((item) => item.input.current)
+    const processed = new Set(published.map((item) => item.input.seq))
+    const schedule = store.schedule.readingStatus()
+    const now = Date.now()
+    const inScheduledRange = (input: (typeof inputs)[number]) =>
+      covered.has(input.sourceKey) &&
+      (!scheduleConfig ||
+        Date.parse(input.body.publishedAt) >= Date.parse(scheduleConfig.historySince)) &&
+      Date.parse(input.body.publishedAt) <= now
+    // 最近处理按当时发布版本和已冻结上下文归属，不能用当前草稿重新匹配历史来虚增计数。
+    const appliedRules = new Map(
+      published.map((item) => {
+        const release =
+          item.input.releaseVersion === null ? null : repository.release(item.input.releaseVersion)
+        return [
+          item.input.seq,
+          new Set(
+            release
+              ? compileInstructions(release, item.decision.context ?? {}).matched.map(
+                  (rule) => rule.id,
+                )
+              : [],
+          ),
+        ] as const
+      }),
+    )
+    const rules = (effective?.rules ?? []).map((rule) => {
+      const keys = actualRange(resolveAIRuleSourceKeys(store, { ...effective!, rules: [rule] }))
+      const matching = published.filter((item) => appliedRules.get(item.input.seq)?.has(rule.id))
+      return {
+        ruleId: rule.id,
+        sourceKeys: keys,
+        unknownSourceKeys: keys.filter(
+          (key) =>
+            store.sourceSync.contextFor(key, {
+              id: "status",
+              sourceKey: key,
+              title: "",
+              url: null,
+              publishedAt: "1970-01-01T00:00:00Z",
+              read: null,
+              content: null,
+              description: null,
+            }).metadata.sourceSyncedAt === null,
+        ),
+        processed: matching.length,
+        lastProcessedAt:
+          matching
+            .map((item) => item.decision.generatedAt)
+            .sort()
+            .at(-1) ?? null,
+      }
+    })
+    return {
+      sourceInventory: {
+        available: store.sources().length,
+        covered: sourceKeys.length,
+        unknown: new Set(rules.flatMap((rule) => rule.unknownSourceKeys)).size,
+      },
+      counts: {
+        processed: published.filter((item) => covered.has(item.input.sourceKey)).length,
+        pending: inputs.filter(
+          (input) =>
+            inScheduledRange(input) &&
+            !processed.has(input.seq) &&
+            ["pending", "running"].includes(input.status),
+        ).length,
+        needsContext: published.filter(
+          (item) => inScheduledRange(item.input) && item.decision.status === "needs_context",
+        ).length,
+        uncovered: inputs.filter((input) => !covered.has(input.sourceKey)).length,
+      },
+      nextRunAt: nextProcessingRunAt(schedule),
+      scheduleEnabled: schedule.enabled,
+      timeZone: schedule.timeZone,
+      nextScheduledStartLocal: schedule.nextScheduledStartLocal,
+      nextPollAt: schedule.nextPollAt,
+      rules,
+    }
+  }
+  if ((path === "/rules/activate-batch" || path === "/rules/reorder-active") && method === "POST") {
+    if (legacyRuleUpgradePreview(store).required)
+      throw new AutomationError("legacy_scope_migration_required")
+    const input = (
+      path === "/rules/activate-batch"
+        ? z
+            .object({
+              expectedRevision: revision,
+              requestId: z.uuid(),
+              rules: z.array(ruleSchema).min(1).max(200),
+            })
+            .strict()
+        : z
+            .object({
+              expectedRevision: revision,
+              requestId: z.uuid(),
+              ruleIds: z.array(z.string()).max(200),
+            })
+            .strict()
+    ).parse(body)
+    const callback = () => {
+      activateRuleSchedule(store)
+    }
+    const result =
+      "rules" in input
+        ? repository.activateRules(input.rules, input.expectedRevision, input.requestId, callback)
+        : repository.reorderRules(input.ruleIds, input.expectedRevision, input.requestId, callback)
+    return { ...result, schedule: store.schedule.snapshot() }
+  }
   if (path === "/configuration/effective" && method === "GET") {
     // 浏览器普通动作镜像只读取已发布配置，草稿不会在刷新后提前生效。
-    return {
-      revision: draft.revision,
-      ...repository.effective(),
-      sources: store.sources(),
-      sourceInventoryKnown: store.sourceInventoryKnown(),
-      subscriptionTags: store.subscriptionTags.snapshot(),
-      sourceTags: store.subscriptionTags.sourceTagBindings().bindings,
-      listMemberships: store.sourceSync.listMemberships(),
-    }
+    return readEffective()
   }
   if (path === "/rules/upgrade-preview" && method === "GET") return legacyRuleUpgradePreview(store)
   if (path === "/rules/upgrade" && method === "POST") {
@@ -93,20 +237,7 @@ export function automationApi(store: Store, method: string, path: string, body: 
     return { ...result, schedule: store.schedule.snapshot() }
   }
   if (path === "/configuration") {
-    if (method === "GET")
-      return {
-        ...draft,
-        releases: repository.releases(),
-        // 编辑器一次授权读取真实来源和样本标题，不把正文装入配置响应。
-        sources: store.sources(),
-        sourceInventoryKnown: store.sourceInventoryKnown(),
-        items: store.snapshot().items,
-        subscriptionTags: store.subscriptionTags.snapshot(),
-        sourceTags: store.subscriptionTags.sourceTagBindings().bindings,
-        // List 成员只能读取已持久化的同步事实；配置 GET 不触发新的官方 API 请求。
-        listMemberships: store.sourceSync.listMemberships(),
-        capabilities: { automaticProcessing: true },
-      }
+    if (method === "GET") return readEditor()
     if (method === "PUT") {
       const input = configUpdate.parse(body)
       return save(input.config, input.expectedRevision)

@@ -293,6 +293,36 @@ afterEach(() => {
 })
 
 describe("Story repair", () => {
+  it.each([true, null, undefined] as const)(
+    "当前读态 %s 时保留原 Story 而不付费修复",
+    async (read) => {
+      const { db, stories, aiConfig, runtimeDir } = fixture()
+      const values = [add(db, 1), add(db, 2), add(db, 3)]
+      const original = stories.create(draft(values))
+      stories.removeMember(original.storyId, 1, 3)
+      // 修复不能借旧未读快照绕过守卫，也不能因跳过付费移除剩余成员。
+      let calls = 0
+      const result = await runStoryRepair({
+        decisions: values,
+        currentEntry: () => (read === undefined ? undefined : { read }),
+        ruleSets: [rules()],
+        stories,
+        aiConfig,
+        runtimeDir,
+        signal: new AbortController().signal,
+        execute: async () => {
+          calls++
+          throw new Error("unexpected_model")
+        },
+      })
+      expect(calls).toBe(0)
+      expect(result.repaired).toEqual([])
+      expect(result.independent).toEqual([])
+      expect(result.pending).toEqual([{ storyId: original.storyId, reason: "excluded" }])
+      expect(stories.repairQueue()).toHaveLength(1)
+    },
+  )
+
   it("移除三成员之一后沿用原 ID 修复为两成员", async () => {
     const { db, stories, aiConfig, runtimeDir } = fixture()
     const values = [add(db, 1), add(db, 2), add(db, 3)]
@@ -661,4 +691,56 @@ describe("Story repair", () => {
     })
     expect(stories.resolveLink(story.storyId)).toMatchObject({ kind: "independent" })
   })
+})
+
+it("推理强度Story修复使用当前一次读取快照", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const values = [add(db, 1), add(db, 2), add(db, 3)]
+  const original = stories.create(draft(values))
+  stories.removeMember(original.storyId, 1, 3)
+  let reads = 0
+  aiConfig.read = async () => {
+    reads++
+    return { provider: "codex", model: "test-model", reasoningEffort: "high" }
+  }
+  const result = await runStoryRepair({
+    decisions: values,
+    ruleSets: [rules()],
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute: async <T>(request: CodexJsonOptions<T>) => {
+      expect(request.reasoningEffort).toBe("high")
+      return execute(output([1, 2], ["证据 1", "证据 2"]))<T>(request)
+    },
+  })
+  expect(reads).toBe(1)
+  expect(result.repaired).toHaveLength(1)
+})
+
+// 既有历史修复队列不能因打开无关列表被整体推进。
+it("列表目标不属于 Story 成员时保留修复队列且不调用模型", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const values = [add(db, 1), add(db, 2), add(db, 3)]
+  const original = stories.create(draft(values))
+  stories.removeMember(original.storyId, 1, 3)
+  let calls = 0
+  const result = await runStoryRepair({
+    decisions: values,
+    ruleSets: [rules()],
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    targets: [{ sourceKey: "feed/unloaded", itemId: "unloaded" }],
+    execute: async () => {
+      calls++
+      throw new Error("unexpected_model")
+    },
+  })
+  expect(calls).toBe(0)
+  expect(result.repaired).toEqual([])
+  expect(result.pending).toEqual([])
+  expect(stories.repairQueue()).toHaveLength(1)
 })

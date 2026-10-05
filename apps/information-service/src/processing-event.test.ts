@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import { createEntryModelSelectionSchema } from "./processing-decision"
 import type { EventIdentity, EventSelection } from "./processing-event"
-import { compatibleEvents, materializeEvent, traceableEvent } from "./processing-event"
+import {
+  compatibleEvents,
+  eventIdentitySchema,
+  materializeEvent,
+  traceableEvent,
+} from "./processing-event"
 import { createEvidenceCatalog } from "./processing-evidence"
 
 function selected(evidenceId: string): EventSelection {
@@ -19,6 +25,36 @@ function selected(evidenceId: string): EventSelection {
 }
 
 describe("可追溯的事件身份", () => {
+  it("单篇和批量模型格式的嵌套属性均必填，未知时区用 null 且兼容旧身份记录", () => {
+    const catalog = createEvidenceCatalog("OpenAI 于 2026-10-04 发布 GPT 5.2。")
+    const single = createEntryModelSelectionSchema("entry-1", catalog)
+    const batch = z.object({
+      items: z.array(z.union([single, createEntryModelSelectionSchema("entry-2", catalog)])),
+    })
+    // 这是官方严格结构化输出的请求条件，不能只验证本地 Zod 能解析返回值。
+    const verifyRequiredProperties = (value: unknown) => {
+      if (Array.isArray(value)) return value.forEach(verifyRequiredProperties)
+      if (!value || typeof value !== "object") return
+      const node = value as Record<string, unknown>
+      if (node.type === "object" && node.properties && typeof node.properties === "object")
+        expect(node.required).toEqual(expect.arrayContaining(Object.keys(node.properties)))
+      Object.values(node).forEach(verifyRequiredProperties)
+    }
+    verifyRequiredProperties(z.toJSONSchema(single))
+    verifyRequiredProperties(z.toJSONSchema(batch))
+    const selection = {
+      ...selected(catalog.fragments[0]!.evidenceId),
+      anchor: {
+        value: "2026-10-04",
+        evidenceId: catalog.fragments[0]!.evidenceId,
+        kind: "event_date" as const,
+        timeZone: null,
+      },
+    }
+    const identity = materializeEvent(catalog, selection)!
+    const { timeZone: _zone, ...legacyAnchor } = identity.anchor!
+    expect(eventIdentitySchema.safeParse({ ...identity, anchor: legacyAnchor }).success).toBe(true)
+  })
   it("中英文原文通过材料明示的版本和实体识别同事件，事件日期缺失仍可综合", () => {
     const chinese = "OpenAI 发布 GPT 5.2，原始公告 https://openai.com/index/gpt-5-2/ 。"
     const english =

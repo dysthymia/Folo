@@ -201,3 +201,36 @@ describe("处理计划", () => {
     })
   })
 })
+
+describe("列表批次持久化与范围", () => {
+  it("旧配置默认启用列表触发，非法开关拒绝保存", () => {
+    const { schedule } = fixture()
+    expect(configure(schedule).config?.runOnListLoad).toBe(true)
+    expect(() =>
+      schedule.save({ ...schedule.snapshot().config!, runOnListLoad: "yes" as never }, 1),
+    ).toThrow("invalid_schedule")
+  })
+  it("动态范围领取不扩大列表目标，重开后目标仍然冻结", () => {
+    const { db } = fixture()
+    const schedule = new ProcessingScheduleStore(
+      db,
+      () => "owner",
+      () => ["feed/a", "feed/b"],
+    )
+    configure(schedule, { scope: { mode: "rules" }, sourceKeys: ["feed/a", "feed/b"] })
+    const trigger = schedule.listLoaded(
+      [{ sourceKey: "feed/a", itemId: "item" }],
+      "2026-10-04T00:00:00Z",
+    )!
+    const reopened = new ProcessingScheduleStore(
+      db,
+      () => "owner",
+      () => ["feed/a", "feed/b", "feed/new"],
+    )
+    expect(reopened.claim("2026-10-04T00:00:01Z")).toMatchObject({
+      id: trigger.id,
+      sourceKeys: ["feed/a"],
+      targets: [{ sourceKey: "feed/a", itemId: "item" }],
+    })
+  })
+})

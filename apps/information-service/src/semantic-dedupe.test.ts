@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest"
 
+import type { CodexJsonOptions } from "./codex"
 import type { SemanticDuplicateCandidate, SemanticDuplicateEntry } from "./semantic-dedupe"
 import {
   createSemanticDuplicatePrompt,
+  dedupeContentEvidence,
   evaluateSemanticDuplicateCandidates,
   getSemanticDuplicateCandidates,
+  MAX_DEDUPE_CONTENT_LENGTH,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeDedupeText,
+  semanticDuplicateOutputSchema,
   semanticDuplicatePairKey,
   truncateDedupeDescription,
 } from "./semantic-dedupe"
@@ -19,6 +23,8 @@ function entry(
 ): SemanticDuplicateEntry {
   return {
     description,
+    content: `${title} 完整正文`,
+    contentComplete: true,
     itemId,
     publishedAt,
     sourceTitle: "来源",
@@ -29,6 +35,42 @@ function entry(
 
 const base = Date.parse("2026-01-10T00:00:00.000Z")
 const at = (hours: number) => new Date(base + hours * 60 * 60 * 1000).toISOString()
+
+it("推理强度语义去重沿用私有配置，外部模型仍维持low", async () => {
+  const candidates = getSemanticDuplicateCandidates([
+    entry("older", "同一事件正式发布", at(0)),
+    entry("newer", "同一事件正式发布", at(1)),
+  ])
+  const efforts: Array<string | undefined> = []
+  const execute = async <T>(request: CodexJsonOptions<T>) => {
+    efforts.push(request.reasoningEffort)
+    const result: unknown = {
+      results: candidates.map((candidate) => ({
+        pairKey: candidate.pairKey,
+        duplicate: false,
+        factComparison: { verdict: "different", onlyInFirst: [], onlyInSecond: [] },
+        keepEntryId: candidate.keepEntryId,
+        hideEntryId: null,
+        confidence: 0.9,
+        reason: "保留增量",
+      })),
+    }
+    if (!request.validate(result)) throw new Error("invalid_test_result")
+    return { result, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
+  }
+  for (const aiConfig of [
+    { provider: "codex" as const, model: "test", reasoningEffort: "high" as const },
+    { provider: "qianwen" as const, model: "test", apiKey: "fake" },
+  ])
+    await evaluateSemanticDuplicateCandidates({
+      candidates,
+      aiConfig,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+      execute,
+    })
+  expect(efforts).toEqual(["high", "low"])
+})
 
 describe("语义去重候选预筛", () => {
   it("同一事件的两条互为候选，默认保留较旧的一条", () => {
@@ -127,6 +169,7 @@ describe("语义去重判定归一化", () => {
           {
             confidence: 0.91,
             duplicate: true,
+            factComparison: { verdict: "equivalent", onlyInFirst: [], onlyInSecond: [] },
             hideEntryId: "older",
             keepEntryId: "older",
             pairKey: candidates[0]!.pairKey,
@@ -157,6 +200,7 @@ describe("语义去重判定归一化", () => {
           {
             confidence: 0.9,
             duplicate: true,
+            factComparison: { verdict: "equivalent", onlyInFirst: [], onlyInSecond: [] },
             hideEntryId: "陌生条目",
             keepEntryId: "陌生条目",
             pairKey: candidates[0]!.pairKey,
@@ -206,6 +250,161 @@ describe("语义去重判定归一化", () => {
         reason: "模型未返回该候选的判定。",
       },
     ])
+  })
+
+  // 比较结论独立于模型的布尔值：未证明单向覆盖或证据矛盾时均不能隐藏。
+  it.each([
+    { verdict: "different", onlyInFirst: ["通过投票后再执行第二阶段。"], onlyInSecond: [] },
+    { verdict: "different", onlyInFirst: [], onlyInSecond: ["只有完成资格审核的用户可申请。"] },
+    { verdict: "uncertain", onlyInFirst: [], onlyInSecond: [] },
+    { verdict: "equivalent", onlyInFirst: [], onlyInSecond: ["正式执行日改为下周。"] },
+    { verdict: "first_contains_second", onlyInFirst: [], onlyInSecond: ["另一侧独有条件。"] },
+    { verdict: "second_contains_first", onlyInFirst: ["另一侧独有条件。"], onlyInSecond: [] },
+    { verdict: "first_contains_second", onlyInFirst: [], onlyInSecond: [] },
+    {
+      verdict: "second_contains_first",
+      onlyInFirst: ["第一条补充执行时间。"],
+      onlyInSecond: ["第二条补充申请条件。"],
+    },
+  ] as const)("有信息差或不确定时否决正向判重：%j", async (factComparison) => {
+    const result = {
+      results: [
+        {
+          pairKey: candidates[0]!.pairKey,
+          factComparison,
+          duplicate: true,
+          confidence: 0.99,
+          keepEntryId: "older",
+          hideEntryId: "newer",
+          reason: "同一事件的更完整报道",
+        },
+      ],
+    }
+    const execute = vi.fn(async () => ({ result, durationMs: 1, usage: null, toolCalls: 0 }))
+    const run = await evaluateSemanticDuplicateCandidates({
+      aiConfig,
+      candidates,
+      execute: execute as never,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+    })
+    expect(run.evaluations[0]).toMatchObject({
+      duplicate: false,
+      hideEntryId: null,
+      keepEntryId: null,
+    })
+    expect(run.evaluations[0]!.reason).toContain("保留原文")
+    for (const quote of [...factComparison.onlyInFirst, ...factComparison.onlyInSecond])
+      expect(run.evaluations[0]!.reason).toContain(quote)
+  })
+
+  it.each([
+    {
+      verdict: "first_contains_second",
+      onlyInFirst: ["通过投票后再执行第二阶段。"],
+      onlyInSecond: [],
+      keep: "newer",
+      hide: "older",
+    },
+    {
+      verdict: "second_contains_first",
+      onlyInFirst: [],
+      onlyInSecond: ["只有完成资格审核的用户可申请。"],
+      keep: "older",
+      hide: "newer",
+    },
+  ] as const)("单向完整包含始终保留完整篇：$verdict", async (comparison) => {
+    // 故意让模型选反保留方向，归一化仍必须按事实覆盖关系保留完整篇。
+    const result = {
+      results: [
+        {
+          pairKey: candidates[0]!.pairKey,
+          factComparison: {
+            verdict: comparison.verdict,
+            onlyInFirst: comparison.onlyInFirst,
+            onlyInSecond: comparison.onlyInSecond,
+          },
+          duplicate: true,
+          confidence: 0.99,
+          keepEntryId: comparison.hide,
+          hideEntryId: comparison.keep,
+          reason: "完整报道覆盖简版全部信息",
+        },
+      ],
+    }
+    const execute = vi.fn(async () => ({ result, durationMs: 1, usage: null, toolCalls: 0 }))
+    const run = await evaluateSemanticDuplicateCandidates({
+      aiConfig,
+      candidates,
+      execute: execute as never,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+    })
+    expect(run.evaluations[0]).toMatchObject({
+      duplicate: true,
+      keepEntryId: comparison.keep,
+      hideEntryId: comparison.hide,
+    })
+    expect(run.evaluations[0]!.reason).toContain("覆盖另一条的全部信息")
+  })
+
+  it("结构化输出必须包含逐侧事实比较，不能只提交重复布尔值", () => {
+    expect(
+      semanticDuplicateOutputSchema.safeParse({
+        results: [
+          {
+            pairKey: candidates[0]!.pairKey,
+            duplicate: true,
+            confidence: 0.99,
+            keepEntryId: "older",
+            hideEntryId: "newer",
+            reason: "同一事件",
+          },
+        ],
+      }).success,
+    ).toBe(false)
+  })
+
+  it("缺失或超限正文不能仅凭同标题摘要请求模型或隐藏原文", async () => {
+    const execute = vi.fn()
+    for (const content of [null, "", "文".repeat(MAX_DEDUPE_CONTENT_LENGTH + 1)]) {
+      const unsafe = {
+        ...candidates[0]!,
+        entries: candidates[0]!.entries.map((entry) => ({
+          ...entry,
+          ...dedupeContentEvidence(content),
+        })) as [SemanticDuplicateEntry, SemanticDuplicateEntry],
+      }
+      const run = await evaluateSemanticDuplicateCandidates({
+        aiConfig,
+        candidates: [unsafe],
+        execute: execute as never,
+        runtimeDir: "/unused",
+        signal: new AbortController().signal,
+      })
+      expect(run).toMatchObject({
+        executed: false,
+        evaluations: [{ duplicate: false, confidence: 0 }],
+      })
+    }
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it("完整正文证据保留尾部新进展和独立观点，并约束同事实转载判定", () => {
+    const evidence = dedupeContentEvidence("旧报道背景。最后补充：新进展、独立观点和不同结论。")
+    const prompt = createSemanticDuplicatePrompt([
+      {
+        ...candidates[0]!,
+        entries: candidates[0]!.entries.map((entry) => ({ ...entry, ...evidence })) as [
+          SemanticDuplicateEntry,
+          SemanticDuplicateEntry,
+        ],
+      },
+    ])
+    expect(evidence.contentComplete).toBe(true)
+    expect(prompt).toContain("最后补充：新进展、独立观点和不同结论。")
+    expect(prompt).toContain("同一组事实的转载")
+    expect(prompt).toContain("独立观点")
   })
 
   it("提示词包含候选并要求保守判定", () => {

@@ -63,6 +63,19 @@ ${body}
 const hasCode = (code: string) => (error: unknown) =>
   error instanceof CodexRunError && error.code === code
 
+test("reasoning effort uses explicit CLI flags including none and ultra, with legacy low", async () => {
+  // 假 CLI 只记录参数；各强度都不会触发真实模型调用。
+  const f = await fixture(
+    `fs.writeFileSync(require("node:path").join(process.cwd(), "../../effort.json"), JSON.stringify(args)); result({summary:"测试"}); emit({type:"turn.completed"});`,
+  )
+  for (const reasoningEffort of [undefined, "none", "ultra"] as const) {
+    await f.run({ reasoningEffort })
+    const args = JSON.parse(await readFile(join(f.root, "effort.json"), "utf8")) as string[]
+    assert.ok(args.includes(`model_reasoning_effort=${JSON.stringify(reasoningEffort ?? "low")}`))
+    assert.ok(args.includes("--ignore-user-config"))
+  }
+})
+
 const waitForFile = async (path: string) => {
   for (let attempt = 0; attempt < 200; attempt++) {
     try {
@@ -218,6 +231,32 @@ test("classifies CLI error items as failures rather than tool activity", async (
   await assert.rejects(f.run(), hasCode("PROCESS_FAILED"))
 })
 
+test("classifies upstream schema, auth and transient failures without exposing raw messages", async () => {
+  const cases = [
+    ["invalid_json_schema", 400, "INVALID_SCHEMA"],
+    ["invalid_api_key", 401, "AUTHORIZATION"],
+    ["rate_limit_exceeded", 429, "RATE_LIMIT"],
+    ["stream disconnected", 502, "CONNECTION"],
+  ] as const
+  for (const [detail, status, code] of cases) {
+    // 与真实 CLI 一致：上游 JSON 错误可再次编码进 message 字符串。
+    const message = JSON.stringify({
+      error: { code: detail, message: "private credential" },
+      status,
+    })
+    const f = await fixture(
+      `emit({type:"error",message:${JSON.stringify(message)}}); setInterval(() => {},1000);`,
+    )
+    await assert.rejects(f.run(), (error: unknown) => {
+      assert.ok(error instanceof CodexRunError)
+      assert.equal(error.code, code)
+      assert.equal(error.message, `Codex run failed: ${code}`)
+      assert.equal(error.message.includes("private credential"), false)
+      return true
+    })
+  }
+})
+
 test("rejects malformed JSONL and malformed JSON result", async () => {
   const badEvent = await fixture(
     'process.stdout.write("not json\\n"); setInterval(() => {}, 1000);',
@@ -360,4 +399,25 @@ test("invalid structured output retains measured usage without raw model text", 
     assert.equal(error.message.includes("private-model-text"), false)
     return true
   })
+})
+
+test("custom endpoint keeps upstream credentials out of CLI and records its provider", async () => {
+  const f = await fixture(`
+const profile = fs.readFileSync(require('node:path').join(process.env.CODEX_HOME, 'folo.config.toml'), 'utf8');
+if (!profile.includes('http://127.0.0.1:') || profile.includes('gateway.test') || profile.includes('custom-private-key')) process.exit(2);
+if (args.join(' ').includes('custom-private-key') || process.env.OPENAI_API_KEY || process.env.OPENAI_BASE_URL) process.exit(3);
+result({summary:'custom'}); emit({type:'turn.completed'});`)
+  // 假CLI不访问上游；验证独立provider、回环token、日志白名单与隔离清理。
+  const result = await f.run({
+    qianwen: {
+      apiKey: "custom-private-key",
+      baseUrl: "https://gateway.test/v1",
+      provider: "openai-compatible",
+    },
+  })
+  assert.equal(result.result.summary, "custom")
+  const raw = await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8")
+  assert.equal(raw.includes("custom-private-key"), false)
+  assert.equal(raw.includes("gateway.test"), false)
+  assert.equal(JSON.parse(raw.trim()).provider, "openai-compatible")
 })

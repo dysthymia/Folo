@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import { join } from "pathe"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
@@ -77,7 +77,7 @@ describe("规则 AI 试运行", () => {
     ]
     return { config, sourceKey: entry.sourceKey, entryId: entry.id }
   }
-  function trial(beforeReturn?: () => void, prompts: string[] = []) {
+  function trial(beforeReturn?: () => void, prompts: string[] = [], effort = "low") {
     return new ProcessingTrial({
       store,
       aiConfig,
@@ -85,12 +85,24 @@ describe("规则 AI 试运行", () => {
       execute: async <T>(options: CodexJsonOptions<T>) => {
         prompts.push(options.prompt)
         expect(options.purpose).toBe("preview")
+        expect(options.reasoningEffort).toBe(effort)
         if (!options.validate(output)) throw new Error("bad_fixture")
         beforeReturn?.()
         return { result: output, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
       },
     })
   }
+  it.each([true, null] as const)("当前读态为 %s 时明确拒绝试运行且不调用模型", async (read) => {
+    // 只更新来源读态，输入的旧未读快照仍存在。
+    store.saveEntry({ ...entry, read })
+    const prompts: string[] = []
+    await expect(
+      trial(undefined, prompts).run(request(), new AbortController().signal),
+    ).rejects.toMatchObject({ code: read === true ? "target_read" : "read_state_unknown" })
+    expect(prompts).toEqual([])
+    expect(store.automation.current(entry.sourceKey, entry.id)?.status).toBe("pending")
+  })
+
   it("复用正式引用和显式策略，不发布规则、改队列或阅读结果", async () => {
     const dump = () =>
       JSON.stringify({
@@ -155,5 +167,13 @@ describe("规则 AI 试运行", () => {
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "stale_target" })
+  })
+  it("推理强度试运行沿用一次读取快照，不发布正式决定", async () => {
+    const read = vi
+      .spyOn(aiConfig, "read")
+      .mockResolvedValue({ provider: "codex", model: "test-model", reasoningEffort: "high" })
+    await trial(undefined, [], "high").run(request(), new AbortController().signal)
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(store.processingState.published()).toEqual([])
   })
 })

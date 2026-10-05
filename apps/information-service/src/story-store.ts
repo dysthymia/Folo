@@ -206,6 +206,14 @@ export class StoryStore {
       CREATE INDEX IF NOT EXISTS story_aggregation_exclusions_lookup ON story_aggregation_exclusions(aggregation_rule_id, aggregation_scope_version, input_seq_a, input_seq_b, active);
       CREATE INDEX IF NOT EXISTS story_current_member_index_story ON story_current_member_index(story_id);
     `)
+    // 新增可空收藏时间，旧记录保持原值，不为已有收藏伪造操作日期。
+    if (
+      !this.db
+        .prepare("PRAGMA table_info(story_reader_flags)")
+        .all()
+        .some((column) => column.name === "collected_at")
+    )
+      this.db.exec("ALTER TABLE story_reader_flags ADD COLUMN collected_at TEXT")
     this.rebuildCurrentMemberIndex()
   }
 
@@ -484,9 +492,22 @@ export class StoryStore {
     if (!readerId.trim()) throw new StoryStoreError("invalid_story")
     this.db
       .prepare(
-        "INSERT INTO story_reader_flags VALUES(?,?,?) ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=excluded.collected",
+        `INSERT INTO story_reader_flags(story_id,reader_id,collected,collected_at) VALUES(?,?,?,?)
+         ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=excluded.collected,
+           collected_at=CASE WHEN story_reader_flags.collected=0 AND excluded.collected=1
+             THEN excluded.collected_at ELSE story_reader_flags.collected_at END`,
       )
-      .run(storyId, readerId, Number(collected))
+      .run(storyId, readerId, Number(collected), collected ? new Date().toISOString() : null)
+  }
+
+  // 统一收藏列表沿用收藏时间排序；旧记录未存过时间时保持未知，不伪造历史。
+  collectedAt(storyId: string, readerId: string): string | null {
+    const row = this.db
+      .prepare(
+        "SELECT collected_at FROM story_reader_flags WHERE story_id=? AND reader_id=? AND collected=1",
+      )
+      .get(storyId, readerId)
+    return row?.collected_at ? String(row.collected_at) : null
   }
 
   isCollected(storyId: string, readerId: string): boolean {
@@ -1155,9 +1176,11 @@ export class StoryStore {
   private copyCollected(fromStoryId: string, toStoryId: string) {
     this.db
       .prepare(
-        `INSERT INTO story_reader_flags(story_id,reader_id,collected)
-      SELECT ?,reader_id,1 FROM story_reader_flags WHERE story_id=? AND collected=1
-      ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=1`,
+        `INSERT INTO story_reader_flags(story_id,reader_id,collected,collected_at)
+      SELECT ?,reader_id,1,collected_at FROM story_reader_flags WHERE story_id=? AND collected=1
+      ON CONFLICT(story_id,reader_id) DO UPDATE SET collected=1,
+        collected_at=CASE WHEN story_reader_flags.collected=0 THEN excluded.collected_at
+          ELSE COALESCE(story_reader_flags.collected_at,excluded.collected_at) END`,
       )
       .run(toStoryId, fromStoryId)
   }
