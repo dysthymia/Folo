@@ -34,6 +34,7 @@ import { useShowEntryDetailsColumn } from "~/hooks/biz/useShowEntryDetailsColumn
 import { useFeedSafeUrl } from "~/hooks/common/useFeedSafeUrl"
 import { useRequireLogin } from "~/hooks/common/useRequireLogin"
 
+import { useNativeReader } from "../../information/native-reader-context"
 import { getEntrySourceColorStyle } from "../source-color"
 
 const sourceColorListViews = new Set([
@@ -57,6 +58,7 @@ export const EntryItemWrapper: FC<
     style?: React.CSSProperties
   } & PropsWithChildren
 > = ({ entryId, view, children, itemClassName, style, isFirstItem }) => {
+  const reader = useNativeReader()
   const entry = useEntry(entryId, (state) => {
     const { feedId, inboxHandle } = state
 
@@ -177,6 +179,13 @@ export const EntryItemWrapper: FC<
       e.preventDefault()
       e.stopPropagation()
 
+      const projected = reader?.active
+        ? reader.items.find((item) => item.kind === "entry" && item.id === entryId)
+        : undefined
+      if (projected) {
+        reader?.selectItem(projected)
+        return
+      }
       const shouldNavigate = getRouteParams().entryId !== entry?.id
 
       if (!shouldNavigate) return
@@ -190,7 +199,7 @@ export const EntryItemWrapper: FC<
         entryId: entry.id,
       })
     },
-    [asRead, entry?.id, entry?.feedId, navigate, view],
+    [asRead, entry?.id, entry?.feedId, entryId, navigate, reader, view],
   )
   const { contextMenuProps, isContextMenuOpen, openContextMenuAt } = useEntryContextMenu({
     entryId,

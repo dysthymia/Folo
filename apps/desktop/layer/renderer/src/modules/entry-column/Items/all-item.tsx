@@ -37,6 +37,7 @@ import { MergedEntriesBadge } from "../merged-entries-badge"
 import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
+import { CompactListItemFrame } from "../templates/compact-list-item-frame"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
 
 const ViewTag = IN_ELECTRON ? "webview" : "iframe"
@@ -150,13 +151,7 @@ export function AllItem({
 
   const thisFeedTitle = getPreferredTitle(related, titleEntry)
   return (
-    <div
-      className={cn(
-        "group relative flex cursor-menu items-center py-2",
-        !isRead &&
-          "before:absolute before:-left-4 before:top-[14px] before:block before:size-2 before:rounded-full before:bg-accent",
-      )}
-    >
+    <CompactListItemFrame read={!!isRead}>
       <EntryProcessingStatusIcon entryId={entryId} />
       <EntryStarActionButton entryId={entryId} view={view} className="-ml-1" />
       {currentFeedTitle !== thisFeedTitle && (
@@ -211,7 +206,7 @@ export function AllItem({
         <MergedEntriesBadge entryId={entryId} />
         {!!displayTime && <RelativeTime date={displayTime} postfix="" />}
       </div>
-    </div>
+    </CompactListItemFrame>
   )
 }
 

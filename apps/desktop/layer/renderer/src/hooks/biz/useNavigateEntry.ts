@@ -113,7 +113,18 @@ export function getNavigateEntryPath(options: NavigateEntryOptions | ParsedNavig
  */
 export const navigateEntry = (options: NavigateEntryOptions) => {
   const parsedOptions = parseNavigateEntryOptions(options)
-  const path = getNavigateEntryPath(parsedOptions)
+  let path = getNavigateEntryPath(parsedOptions)
+  // 同一阅读范围内的原文使用原生路径，保留筛选并清除旧综述目标。
+  const currentRoute = getReadonlyRoute()
+  const search = new URLSearchParams(currentRoute.location.search)
+  if (currentRoute.params.feedId === decodeURIComponent(parsedOptions.feedId)) {
+    const retained = new URLSearchParams()
+    for (const key of ["aiSearch", "aiTopic", "aiSince", "aiUntil", "aiCollected"]) {
+      const value = search.get(key)
+      if (value) retained.set(key, value)
+    }
+    if (retained.size) path += `?${retained}`
+  }
   const { backPath } = options || {}
   const route = getReadonlyRoute()
   const currentPath = route.location.pathname + route.location.search

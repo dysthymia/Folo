@@ -3,15 +3,25 @@ import { z } from "zod"
 import { informationSnapshotSchema } from "./snapshot"
 
 const informationAISettingsSchema = z.object({
-  provider: z.enum(["qianwen", "codex"]),
+  // 兼容页也读取自定义模型的公开地址，不接收任何密钥字段。
+  provider: z.enum(["qianwen", "codex", "openai-compatible"]),
   model: z.string().min(1),
   hasApiKey: z.boolean(),
+  baseUrl: z.string().optional(),
+  reasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+    .optional(),
 })
 
 const informationAISettingsInputSchema = z.object({
-  provider: z.enum(["qianwen", "codex"]),
+  // 地址只在用户保存配置时提交，读取状态不会触发模型请求。
+  provider: z.enum(["qianwen", "codex", "openai-compatible"]),
   model: z.string().min(1),
   apiKey: z.string().min(1).optional(),
+  baseUrl: z.string().optional(),
+  reasoningEffort: z
+    .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+    .optional(),
 })
 
 export type InformationAISettings = z.infer<typeof informationAISettingsSchema>

@@ -1,7 +1,6 @@
-import { GeneratedTimeline } from "~/modules/information/GeneratedTimeline"
+import { AIEnhancedTimelineLayout } from "~/modules/app-layout/ai-enhanced-timeline"
 
-// 内置源是私人的阅读投影，不伪造官方 feedId，也不创建第二个工作台。
-const scope = { mode: "stories" } as const
+/** 内置源保留兼容地址，阅读仍进入原生时间线。 */
 export function Component() {
-  return <GeneratedTimeline scope={scope} />
+  return <AIEnhancedTimelineLayout />
 }

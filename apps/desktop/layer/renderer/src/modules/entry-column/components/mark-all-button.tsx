@@ -18,6 +18,7 @@ import { useRequireLogin } from "~/hooks/common/useRequireLogin"
 import { COMMAND_ID } from "~/modules/command/commands/id"
 import { useCommandBinding, useCommandShortcuts } from "~/modules/command/hooks/use-command-binding"
 
+import { useNativeReader } from "../../information/native-reader-context"
 import type { MarkAllFilter } from "../hooks/useMarkAll"
 import { markAllByRoute } from "../hooks/useMarkAll"
 
@@ -35,6 +36,7 @@ export const MarkAllReadButton = ({
   shortcut,
   fetchedTime,
 }: MarkAllButtonProps & { ref?: React.Ref<HTMLButtonElement | null> }) => {
+  const reader = useNativeReader()
   const { t } = useTranslation()
   const { t: commonT } = useTranslation("common")
   const { ensureLogin } = useRequireLogin()
@@ -63,12 +65,15 @@ export const MarkAllReadButton = ({
         cancel = true
       }
       const routerParams = getRouteParams()
+      // 确认时冻结已展示对象，延迟提交也不得包含后来到达或被折叠的原文。
+      const visible = reader?.active ? [...reader.items] : null
       const id = toast.warning("", {
         description: <ConfirmMarkAllReadInfo undo={undo} />,
         duration: 3000,
         onAutoClose() {
           if (cancel) return
-          markAllByRoute(routerParams, getSnapshotFilter(fetchedTime))
+          if (visible) for (const item of visible) void reader?.mutateItem(item, { read: true })
+          else markAllByRoute(routerParams, getSnapshotFilter(fetchedTime))
         },
         action: {
           label: (
@@ -83,7 +88,7 @@ export const MarkAllReadButton = ({
         },
       })
     })
-  }, [ensureLogin, fetchedTime, t])
+  }, [ensureLogin, fetchedTime, reader, t])
 
   const markAllAsReadShortcut = useCommandShortcuts()[COMMAND_ID.subscription.markAllAsRead]
   return (
@@ -107,7 +112,9 @@ export const MarkAllReadButton = ({
       ref={ref}
       onClick={() => {
         if (!ensureLogin()) return
-        markAllByRoute(getRouteParams(), getSnapshotFilter(fetchedTime))
+        if (reader?.active) {
+          for (const item of [...reader.items]) void reader.mutateItem(item, { read: true })
+        } else markAllByRoute(getRouteParams(), getSnapshotFilter(fetchedTime))
       }}
     >
       <i className="i-mgc-check-circle-cute-re" />

@@ -7,6 +7,7 @@ import type { EntryModel } from "@follow/store/entry/types"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { clsx, cn, formatEstimatedMins, formatTimeToSeconds, isSafari } from "@follow/utils/utils"
+import type { PropsWithChildren } from "react"
 import { useMemo } from "react"
 import { titleCase } from "title-case"
 
@@ -175,13 +176,7 @@ export function ListItem({
   }
 
   return (
-    <div
-      className={cn(
-        "group relative flex cursor-menu py-3.5",
-        !isRead &&
-          "before:absolute before:-left-3 before:top-5 before:block before:size-2 before:rounded-full before:bg-accent",
-      )}
-    >
+    <ArticleListItemFrame read={!!isRead}>
       <EntryProcessingStatusIcon entryId={entryId} className="mt-0.5" />
       <EntryStarActionButton entryId={entryId} view={view} className="-ml-1 mt-0.5" />
       <FeedIcon target={related} fallback entry={iconEntry} size={24} />
@@ -292,7 +287,7 @@ export function ListItem({
           blurhash={entry.firstMedia.blurhash}
         />
       )}
-    </div>
+    </ArticleListItemFrame>
   )
 }
 
@@ -380,6 +375,21 @@ function AudioCover({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/** 原文和私人综述共用文章行外壳，数据身份由各自适配器维护。 */
+export function ArticleListItemFrame({ read, children }: PropsWithChildren<{ read: boolean }>) {
+  return (
+    <div
+      className={cn(
+        "group relative flex cursor-menu py-3.5",
+        !read &&
+          "before:absolute before:-left-3 before:top-5 before:block before:size-2 before:rounded-full before:bg-accent",
+      )}
+    >
+      {children}
     </div>
   )
 }

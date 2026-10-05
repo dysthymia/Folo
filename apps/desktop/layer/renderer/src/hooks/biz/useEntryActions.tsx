@@ -29,6 +29,7 @@ import { useCommandShortcuts } from "~/modules/command/hooks/use-command-binding
 import { isMutationCommandId } from "~/modules/command/mutation-command-ids"
 import type { FollowCommandId, UnknownCommand } from "~/modules/command/types"
 import { useToolbarOrderMap } from "~/modules/customize-toolbar/hooks"
+import { useNativeReader } from "~/modules/information/native-reader-context"
 
 import { useRouteParams } from "./useRouteParams"
 
@@ -235,6 +236,7 @@ export const HIDE_ACTIONS_IN_ENTRY_TOOLBAR_ACTIONS: FollowCommandId[] = [
   ...HIDE_ACTIONS_IN_ENTRY_CONTEXT_MENU,
 ]
 export const useEntryActions = ({ entryId, view }: { entryId: string; view: FeedViewType }) => {
+  const reader = useNativeReader()
   const entry = useEntry(entryId, entrySelector)
   const { isCollection, entryId: routeEntryId } = useRouteParams()
   const isInCollection = useIsEntryStarred(entryId)
@@ -390,13 +392,31 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
       }),
       new EntryActionMenuItem({
         id: COMMAND_ID.entry.readAbove,
-        onClick: runCmdFn(COMMAND_ID.entry.readAbove, [{ publishedAt: entry.publishedAt }]),
+        onClick: reader?.active
+          ? () => {
+              const index = reader.items.findIndex(
+                (item) => item.kind === "entry" && item.id === entryId,
+              )
+              if (index >= 0)
+                for (const item of reader.items.slice(0, index))
+                  void reader.mutateItem(item, { read: true })
+            }
+          : runCmdFn(COMMAND_ID.entry.readAbove, [{ publishedAt: entry.publishedAt }]),
         hide: !!isCollection,
         entryId,
       }),
       new EntryActionMenuItem({
         id: COMMAND_ID.entry.readBelow,
-        onClick: runCmdFn(COMMAND_ID.entry.readBelow, [{ publishedAt: entry.publishedAt }]),
+        onClick: reader?.active
+          ? () => {
+              const index = reader.items.findIndex(
+                (item) => item.kind === "entry" && item.id === entryId,
+              )
+              if (index >= 0)
+                for (const item of reader.items.slice(index + 1))
+                  void reader.mutateItem(item, { read: true })
+            }
+          : runCmdFn(COMMAND_ID.entry.readBelow, [{ publishedAt: entry.publishedAt }]),
         hide: !!isCollection,
         entryId,
       }),
@@ -490,6 +510,7 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
     isShowAITranslationOnce,
     isCollection,
     isEntryInReadability,
+    reader,
     integrationSettings.customIntegration,
     integrationSettings.enableCustomIntegration,
     isOnboardingEntry,

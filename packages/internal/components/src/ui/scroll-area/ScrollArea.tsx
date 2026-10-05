@@ -100,7 +100,8 @@ const Viewport = ({
     return () => observer.disconnect()
   }, [mask])
 
-  React.useImperativeHandle(forwardedRef, () => ref.current as HTMLDivElement)
+  // DOM 节点保持挂载时稳定 handle，避免每次提交用 null→节点反复更新父级状态、阻塞 transition。
+  React.useImperativeHandle(forwardedRef, () => ref.current as HTMLDivElement, [])
   return (
     <ScrollAreaBase.Viewport
       {...rest}
@@ -168,7 +169,8 @@ export const ScrollArea = ({
   viewportProps?: React.ComponentProps<typeof ScrollAreaBase.Viewport>
 } & { ref?: React.Ref<HTMLDivElement | null> }) => {
   const [viewportRef, setViewportRef] = React.useState<HTMLDivElement | null>(null)
-  React.useImperativeHandle(ref, () => viewportRef as HTMLDivElement)
+  // 初次绑定和实际节点改变时才通知调用方；React 会自动处理 ref 身份改变和卸载。
+  React.useImperativeHandle(ref, () => viewportRef as HTMLDivElement, [viewportRef])
 
   const events = React.useMemo(() => ({ onUpdateMaxScroll }), [onUpdateMaxScroll])
 

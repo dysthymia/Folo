@@ -3,6 +3,8 @@ import { createContext, use, useCallback, useLayoutEffect, useMemo, useRef } fro
 
 import { useRouteParams } from "~/hooks/biz/useRouteParams"
 
+import { NativeReaderContext, useNativeReader } from "../../information/native-reader-context"
+import { useNativeTimelineOverlay } from "../../information/use-native-timeline-overlay"
 import { useEntriesByView } from "../hooks/useEntriesByView"
 
 type EntriesStateContextValue = {
@@ -43,6 +45,14 @@ export const EntriesProvider: React.FC<React.PropsWithChildren> = ({ children })
     },
   })
 
+  const reader = useNativeTimelineOverlay(useNativeReader(), entries)
+  const originalProjectionIds = useMemo(
+    () =>
+      reader?.active
+        ? reader.items.flatMap((item) => (item.kind === "entry" ? [item.id] : []))
+        : null,
+    [reader?.active, reader?.items],
+  )
   const { type: syncType } = entries
 
   const idToIndex = useMemo(() => {
@@ -106,7 +116,7 @@ export const EntriesProvider: React.FC<React.PropsWithChildren> = ({ children })
   const stateValue: EntriesStateContextValue = useMemo(
     () => ({
       type: syncType,
-      entriesIds: entries.entriesIds,
+      entriesIds: originalProjectionIds ?? entries.entriesIds,
       groupedCounts: entries.groupedCounts,
       hasNextPage: entries.hasNextPage,
       isFetchingNextPage: entries.isFetchingNextPage,
@@ -116,7 +126,7 @@ export const EntriesProvider: React.FC<React.PropsWithChildren> = ({ children })
       view: view!,
       fetchedTime: entries.fetchedTime,
     }),
-    [entries, view, syncType],
+    [entries, view, syncType, originalProjectionIds],
   )
 
   const actionsValue: EntriesActionsContextValue = useMemo(
@@ -131,7 +141,10 @@ export const EntriesProvider: React.FC<React.PropsWithChildren> = ({ children })
 
   return (
     <EntriesStateContext value={stateValue}>
-      <EntriesActionsContext value={actionsValue}>{children}</EntriesActionsContext>
+      <EntriesActionsContext value={actionsValue}>
+        {/* 内层桥接使用已取得的官方条目，外层来源仍消费独立综述状态。 */}
+        <NativeReaderContext value={reader}>{children}</NativeReaderContext>
+      </EntriesActionsContext>
     </EntriesStateContext>
   )
 }

@@ -21,6 +21,10 @@ import { useRouteParams, useRouteParamsSelector } from "~/hooks/biz/useRoutePara
 import { useFeedQuery } from "~/queries/feed"
 import { useFeedHeaderTitle } from "~/store/feed/hooks"
 
+import { generatedItemKey } from "../information/generated-feed-identity"
+import { useNativeReader } from "../information/native-reader-context"
+import { NativeReaderFilters } from "../information/NativeReaderFilters"
+import { NativeReaderRow } from "../information/NativeReaderRow"
 import { aiTimelineEnabledAtom } from "./atoms/ai-timeline"
 import { AITimelineLoadingOverlay } from "./components/ai-timeline-loading/AITimelineLoadingOverlay"
 import { EntryColumnWrapper } from "./components/entry-column-wrapper/EntryColumnWrapper"
@@ -46,6 +50,16 @@ function EntryColumnContent() {
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const { t } = useTranslation()
   const state = useEntriesState()
+  const reader = useNativeReader()
+  const generated = !!reader?.active
+  const listScrollRef = reader?.listScrollRef
+  useLayoutEffect(() => {
+    if (!listScrollRef) return
+    listScrollRef.current = (index) => listRef.current?.scrollToIndex(index, { align: "auto" })
+    return () => {
+      listScrollRef.current = null
+    }
+  }, [listScrollRef])
 
   const isInteracted = useRef(false)
   const scrollMarkReadAnchorIndexRef = useRef<number | null>(null)
@@ -91,8 +105,20 @@ function EntryColumnContent() {
     return () => actions.setOnReset(null)
   }, [actions, scrollTimelineToTop])
 
-  const { entriesIds, groupedCounts } = state
-  useSnapEntryIdList(entriesIds)
+  const entriesIds = useMemo(
+    () => (generated ? reader.items.map(generatedItemKey) : state.entriesIds),
+    [generated, reader?.items, state.entriesIds],
+  )
+  const groupedCounts = generated ? undefined : state.groupedCounts
+  // AI 聊天的原文选择快照只含真实 entryId，综述不得伪装成官方条目。
+  const originalIds = useMemo(
+    () =>
+      generated
+        ? reader.items.flatMap((item) => (item.kind === "entry" ? [item.id] : []))
+        : entriesIds,
+    [entriesIds, generated, reader?.items],
+  )
+  useSnapEntryIdList(originalIds)
 
   const {
     entryId: activeEntryId,
@@ -110,19 +136,24 @@ function EntryColumnContent() {
   const title = useFeedHeaderTitle()
   useTitle(title)
   const isLoggedIn = useIsLoggedIn()
-  const timelineIdentity = `${view}:${routeFeedId ?? ""}`
+  const timelineIdentity = generated ? reader.queryKey : `${view}:${routeFeedId ?? ""}`
 
   useEffect(() => {
-    if (!activeEntryId) return
+    if (generated || !activeEntryId) return
 
     if (isCollection || isPendingEntry) return
     if (!entry?.feedId) return
 
     if (!isLoggedIn) return
     unreadSyncService.markEntryAsRead(activeEntryId)
-  }, [activeEntryId, entry?.feedId, isCollection, isPendingEntry, isLoggedIn])
+  }, [activeEntryId, entry?.feedId, isCollection, isPendingEntry, isLoggedIn, generated])
 
-  const isRefreshing = state.isFetching && !state.isFetchingNextPage
+  // 双流分页仍沿用原生分页语义，不能把加载下一页误认为刷新而清空滚动位置。
+  const isRefreshing = generated
+    ? reader.loading && !reader.isFetchingNextPage
+    : state.isFetching && !state.isFetchingNextPage
+  const isLoading = generated ? reader.loading && !reader.failed : state.isLoading
+  const refetch = generated ? reader.refresh : actions.refetch
   const pauseScrollMarkRead = useScrollMarkReadGracePeriod(
     isRefreshing,
     undefined,
@@ -162,13 +193,16 @@ function EntryColumnContent() {
     scrollTimelineToTop()
   }, [isRefreshing, scrollTimelineToTop])
 
-  const { handleRenderMarkRead, handleScrollMarkRead } = useEntryMarkReadHandler(entriesIds, {
-    pauseScrollMarkRead,
-  })
+  const { handleRenderMarkRead, handleScrollMarkRead } = useEntryMarkReadHandler(
+    generated ? [] : entriesIds,
+    {
+      pauseScrollMarkRead,
+    },
+  )
 
   const flushScrollMarkRead = useCallback(
     (currentStartIndex: number) => {
-      if (!routeFeedId) return
+      if (generated || !routeFeedId) return
 
       const { nextAnchorIndex, range } = getScrollMarkReadRangeState({
         anchorIndex: scrollMarkReadAnchorIndexRef.current,
@@ -180,7 +214,7 @@ function EntryColumnContent() {
         handleScrollMarkRead?.(range as Range, isInteracted.current)
       }
     },
-    [handleScrollMarkRead, routeFeedId],
+    [generated, handleScrollMarkRead, routeFeedId],
   )
 
   const handleScroll = useCallback(() => {
@@ -201,15 +235,17 @@ function EntryColumnContent() {
   const handleCombinedScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
       handleScrollBeyond(e)
-      handleScroll()
+      if (generated) reader.saveScroll()
+      else handleScroll()
     },
-    [handleScrollBeyond, handleScroll],
+    [generated, reader, handleScrollBeyond, handleScroll],
   )
 
   const navigate = useNavigateEntry()
 
   const aiTimelineEnabled = useAtomValue(aiTimelineEnabledAtom)
-  const showAiTimelineLoading = aiTimelineEnabled && state.isLoading && !state.isFetchingNextPage
+  const showAiTimelineLoading =
+    !generated && aiTimelineEnabled && state.isLoading && !state.isFetchingNextPage
   const renderAsRead = useGeneralSettingKey("renderMarkUnread")
   const handleRangeChange = useCallback(
     (e: Range) => {
@@ -239,46 +275,50 @@ function EntryColumnContent() {
   )
 
   const fetchNextPage = useCallback(() => {
+    if (generated) {
+      void reader.loadMore()
+      return
+    }
     if (state.hasNextPage && !state.isFetchingNextPage) {
       actions.fetchNextPage()
     }
-  }, [actions, state.hasNextPage, state.isFetchingNextPage])
+  }, [generated, reader, actions, state.hasNextPage, state.isFetchingNextPage])
 
   const ListComponent = getView(view)?.gridMode ? EntryColumnGrid : EntryList
 
-  useNavigateFirstEntry(entriesIds, activeEntryId, view, navigate)
+  useNavigateFirstEntry(generated ? [] : entriesIds, activeEntryId, view, navigate)
 
   return (
     <Focusable
       scope={HotkeyScope.Timeline}
       data-hide-in-print
       className="relative flex h-full flex-1 flex-col @container"
-      onClick={() =>
-        navigate({
-          view,
-          entryId: null,
-        })
-      }
+      onClick={generated ? undefined : () => navigate({ view, entryId: null })}
     >
-      {entriesIds.length === 0 &&
+      {!generated &&
+        entriesIds.length === 0 &&
         !state.isLoading &&
         !state.error &&
         (!feed || feed?.type === "feed") && <AddFeedHelper />}
 
       <EntryListHeader
-        refetch={actions.refetch}
+        refetch={refetch}
         isRefreshing={isRefreshing}
         onBeforeRefresh={scrollTimelineToTop}
         fetchedTime={state.fetchedTime}
       />
 
+      <NativeReaderFilters />
       <EntryColumnWrapper
-        ref={scrollAreaRef}
+        ref={(element) => {
+          scrollAreaRef.current = element
+          if (reader) reader.scrollRef.current = element
+        }}
         onScroll={handleCombinedScroll}
-        key={`${routeFeedId}-${view}`}
+        key={timelineIdentity}
       >
         {entriesIds.length === 0 ? (
-          state.isLoading ? (
+          isLoading ? (
             <EntryItemSkeleton view={view} />
           ) : (
             <EntryEmptyList />
@@ -288,12 +328,21 @@ function EntryColumnContent() {
             gap={view === FeedViewType.SocialMedia ? 10 : undefined}
             listRef={listRef}
             onRangeChange={handleRangeChange}
-            hasNextPage={state.hasNextPage}
+            hasNextPage={generated ? reader.hasNextPage : state.hasNextPage}
             view={view}
             feedId={routeFeedId || ""}
             entriesIds={entriesIds}
+            listIdentity={timelineIdentity}
+            renderItem={
+              generated
+                ? (index) => {
+                    const item = reader.items[index]
+                    return item ? <NativeReaderRow item={item} view={view} /> : null
+                  }
+                : undefined
+            }
             fetchNextPage={fetchNextPage}
-            refetch={actions.refetch}
+            refetch={refetch}
             groupCounts={groupedCounts}
             appliedResetScrollSignal={appliedResetScrollSignal}
             onResetScrollSignalConsumed={handleResetScrollSignalConsumed}
@@ -301,7 +350,11 @@ function EntryColumnContent() {
             suspendMarkRead={isScrollResetPending}
             syncType={state.type}
             Footer={
-              isCollection ? void 0 : <FooterMarkItem view={view} fetchedTime={state.fetchedTime} />
+              isCollection || generated ? (
+                void 0
+              ) : (
+                <FooterMarkItem view={view} fetchedTime={state.fetchedTime} />
+              )
             }
           />
         )}

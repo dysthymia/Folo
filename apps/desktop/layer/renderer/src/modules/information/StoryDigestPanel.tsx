@@ -85,9 +85,14 @@ export function StoryDigestPanel({
   const updatedAt = new Date(digest.updatedAt)
 
   return (
-    <div className="space-y-4 text-sm" data-story-digest={digest.storyId}>
+    <div
+      className={embedded ? "space-y-4" : "space-y-4 text-sm"}
+      data-story-digest={digest.storyId}
+    >
       <header className="space-y-1">
-        <h3 className="text-base font-semibold">{digest.title || storyTitle}</h3>
+        <h3 className={embedded ? "text-2xl font-bold leading-tight" : "text-base font-semibold"}>
+          {digest.title || storyTitle}
+        </h3>
         <p className="flex flex-wrap items-center gap-2 text-xs text-text-secondary">
           {/* 材料数不等于独立发布者数量，避免把同账号多篇误作交叉证据。 */}
           <span data-story-source-count={digest.sourceCount}>
@@ -102,7 +107,9 @@ export function StoryDigestPanel({
         </p>
       </header>
 
-      <p className="whitespace-pre-wrap leading-6">{digest.body}</p>
+      <p className={embedded ? "whitespace-pre-wrap" : "whitespace-pre-wrap leading-6"}>
+        {digest.body}
+      </p>
       <StoryReadingActions storyId={storyId} />
 
       <section className="space-y-2">

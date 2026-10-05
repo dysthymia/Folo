@@ -20,6 +20,7 @@ import {
 import { useUISettingKey } from "~/atoms/settings/ui"
 import { MediaContainerWidthProvider } from "~/components/ui/media/MediaContainerWidthProvider"
 
+import { EntryColumnShortcutHandler } from "./EntryColumnShortcutHandler"
 import { EntryItemSkeleton } from "./EntryItemSkeleton"
 import { useScrollMarkReadEndPadding } from "./hooks/useScrollMarkReadEndPadding"
 import { EntryItem } from "./item"
@@ -33,7 +34,7 @@ export const EntryColumnGrid: FC<EntryListProps> = (props) => {
   const isMobile = useMobile()
   const masonry = useUISettingKey("pictureViewMasonry") || isMobile
 
-  if (masonry && view === FeedViewType.Pictures) {
+  if (masonry && view === FeedViewType.Pictures && !props.renderItem) {
     return (
       <PictureMasonry
         key={feedId}
@@ -142,8 +143,8 @@ const VirtualGridImpl: FC<
     )
   }, [entriesIds, columns.length])
 
-  const rowCacheKey = `${feedId}-row`
-  const columnCacheKey = `${feedId}-column`
+  const rowCacheKey = `${props.listIdentity ?? feedId}-row`
+  const columnCacheKey = `${props.listIdentity ?? feedId}-column`
   const isResetScrollPending = shouldApplyScrollResetSignal({
     resetSignal: resetScrollSignal,
     appliedResetSignal: appliedResetScrollSignal,
@@ -277,6 +278,11 @@ const VirtualGridImpl: FC<
         height: `${rowVirtualizer.getTotalSize() + endSpacerHeight}px`,
       }}
     >
+      <EntryColumnShortcutHandler
+        data={entriesIds}
+        refetch={props.refetch}
+        handleScrollTo={(index) => rowVirtualizer.scrollToIndex(Math.floor(index / columns.length))}
+      />
       {rowVirtualizer.getVirtualItems().map((virtualRow) => {
         const isFooterRow = Footer && virtualRow.index === footerRowIndex
 
@@ -306,7 +312,13 @@ const VirtualGridImpl: FC<
 
               let content: React.ReactNode = null
               if (isDataRow && hasEntry) {
-                content = ready && <EntryItem entryId={currentRow[columnIndex]!} view={view} />
+                content =
+                  ready &&
+                  (props.renderItem ? (
+                    props.renderItem(virtualRow.index * columns.length + columnIndex)
+                  ) : (
+                    <EntryItem entryId={currentRow[columnIndex]!} view={view} />
+                  ))
               } else if (
                 (isDataRow && !hasEntry && hasNextPage) ||
                 (isSkeletonRow && hasNextPage && ready)

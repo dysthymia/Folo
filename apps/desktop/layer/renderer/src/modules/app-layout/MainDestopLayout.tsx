@@ -20,6 +20,7 @@ import { EnvironmentIndicator } from "~/modules/app/EnvironmentIndicator"
 import { LoginModalContent } from "~/modules/auth/LoginModalContent"
 import { DebugRegistry } from "~/modules/debug/registry"
 import { EntriesProvider } from "~/modules/entry-column/context/EntriesContext"
+import { NativeTimelineReaderProvider } from "~/modules/information/ProcessedTimelineRoute"
 import { CmdF } from "~/modules/panel/cmdf"
 import { SearchCmdK } from "~/modules/panel/cmdk"
 import { CmdNTrigger } from "~/modules/panel/cmdn"
@@ -176,20 +177,22 @@ export function MainDestopLayout() {
         <AppNotificationContainer />
       </Suspense>
 
-      <EntriesProvider>
-        <SubscriptionColumnContainer />
+      <NativeTimelineReaderProvider>
+        <EntriesProvider>
+          <SubscriptionColumnContainer />
 
-        <main
-          ref={setMainContainerElement}
-          className="flex min-w-0 flex-1 bg-theme-background pt-[calc(var(--fo-window-padding-top)_-10px)] !outline-none"
-          // NOTE: tabIndex for main element can get by `document.activeElement`
-          tabIndex={-1}
-        >
-          <AppErrorBoundary errorType={errorTypes}>
-            <Outlet />
-          </AppErrorBoundary>
-        </main>
-      </EntriesProvider>
+          <main
+            ref={setMainContainerElement}
+            className="flex min-w-0 flex-1 bg-theme-background pt-[calc(var(--fo-window-padding-top)_-10px)] !outline-none"
+            // NOTE: tabIndex for main element can get by `document.activeElement`
+            tabIndex={-1}
+          >
+            <AppErrorBoundary errorType={errorTypes}>
+              <Outlet />
+            </AppErrorBoundary>
+          </main>
+        </EntriesProvider>
+      </NativeTimelineReaderProvider>
 
       {isAuthFail && !user && (
         <RootPortal>

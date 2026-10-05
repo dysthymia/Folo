@@ -7,7 +7,7 @@ import { FeedViewType } from "@follow/constants"
 import { getListById } from "@follow/store/list/getters"
 import { useMemo } from "react"
 import type { Params } from "react-router"
-import { useParams } from "react-router"
+import { useParams, useSearchParams } from "react-router"
 
 import {
   FEED_COLLECTION_LIST,
@@ -129,6 +129,13 @@ export const useRouteParams = () => {
     () => parseRouteParams(route.params, route.searchParams),
     [route.params, route.searchParams],
   )
+}
+
+/** 持续挂载的阅读模型与 pathname 同步取值，不能等待提交后才更新的只读路由原子。 */
+export const useRouterRouteParams = () => {
+  const params = useParams()
+  const [searchParams] = useSearchParams()
+  return useMemo(() => parseRouteParams(params, searchParams), [params, searchParams])
 }
 
 const noop = [] as any[]

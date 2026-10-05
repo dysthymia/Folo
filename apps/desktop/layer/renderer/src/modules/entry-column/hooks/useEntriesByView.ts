@@ -34,14 +34,25 @@ import { useGeneralSettingKey } from "~/atoms/settings/general"
 import { ROUTE_FEED_PENDING } from "~/constants/app"
 import { useFeature } from "~/hooks/biz/useFeature"
 import { useRouteParams } from "~/hooks/biz/useRouteParams"
+import { useNativeReader } from "~/modules/information/native-reader-context"
 import { useServiceProcessingRoles } from "~/modules/information/processing-role-client"
+import type { LoadedEntryRef } from "~/modules/information/use-list-load-processing"
+import { useListLoadProcessing } from "~/modules/information/use-list-load-processing"
 
 import { aiTimelineEnabledAtom } from "../atoms/ai-timeline"
 import { timelineContentModeAtom } from "../atoms/processing-timeline"
 import { getVisibleLocalEntryIds } from "./filter-local-entry-ids"
 import { useIsPreviewFeed } from "./useIsPreviewFeed"
 
-const useRemoteEntries = (): UseEntriesReturn => {
+const emptyLoadedEntryRefs: LoadedEntryRef[] = []
+
+const useRemoteEntries = (
+  enabled = true,
+  chronological = false,
+): UseEntriesReturn & {
+  paginationBoundary?: string
+  loadedEntryRefs?: LoadedEntryRef[]
+} => {
   const { feedId, view, inboxId, listId } = useRouteParams()
   const isPreview = useIsPreviewFeed()
 
@@ -68,7 +79,8 @@ const useRemoteEntries = (): UseEntriesReturn => {
         hidePrivateSubscriptionsInTimeline: true,
       }),
       ...(view === FeedViewType.All && { limit: 40 }),
-      ...(aiTimelineEnabled && aiEnabled && { aiSort: true }),
+      // 双流时间合并依赖官方时间游标；AI 排序没有后续页，不能用于普通全部列表。
+      ...(!chronological && aiTimelineEnabled && aiEnabled && { aiSort: true }),
     }
 
     if (feedId && listId && isBizId(feedId)) {
@@ -87,8 +99,23 @@ const useRemoteEntries = (): UseEntriesReturn => {
     hidePrivateSubscriptionsInTimeline,
     aiTimelineEnabled,
     aiEnabled,
+    chronological,
   ])
-  const query = useEntriesQuery(entriesOptions)
+  const query = useEntriesQuery(enabled ? entriesOptions : undefined)
+  // 触发范围取本次实际加载的原始页，不能用隐藏/去重后的显示列表遗漏待处理条目。
+  const loadedEntryRefs = useMemo(
+    () =>
+      query.data?.pages.flatMap(
+        (page) =>
+          page.data?.map((row) => ({
+            entryId: row.entries.id,
+            sourceKey: entriesOptions.listId
+              ? `list/${entriesOptions.listId}`
+              : `${row.feeds.type === "inbox" ? "inbox" : "feed"}/${row.feeds.id}`,
+          })) ?? [],
+      ) ?? [],
+    [query.data, entriesOptions.listId],
+  )
 
   const refetch = useCallback(async () => void query.refetch(), [query])
   const fetchNextPage = useCallback(async () => void query.fetchNextPage(), [query])
@@ -111,6 +138,9 @@ const useRemoteEntries = (): UseEntriesReturn => {
     error: query.isError ? query.error : null,
     fetchedTime: query.fetchedTime,
     queryKey: query.queryKey,
+    loadedEntryRefs,
+    // 使用未过滤的原始响应页尾，AI 隐藏条目不能缩短已覆盖的时间区间。
+    paginationBoundary: query.data.pages.at(-1)?.data?.at(-1)?.entries.publishedAt,
   }
 }
 
@@ -125,6 +155,10 @@ const useLocalEntries = (): UseEntriesReturn => {
     "hidePrivateSubscriptionsInTimeline",
   )
   const localActionRevision = useLocalActionRevision()
+  const reader = useNativeReader()
+  const contentMode = useAtomValue(timelineContentModeAtom)
+  // 后台模式的严格重复由规则决定，原始模式也不能先按标题丢掉正文不同的条目。
+  const titleDedupe = !reader?.active && contentMode !== "original" && !isCollection
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
@@ -183,12 +217,12 @@ const useLocalEntries = (): UseEntriesReturn => {
           unreadOnly,
         })
 
-        const titleDedupedEntryIds = dedupeEntryIdsByTitle({
-          entryIds: filterLocalActionEntryIds(visibleEntryIds),
+        const actionFilteredEntryIds = filterLocalActionEntryIds(visibleEntryIds)
+        if (!titleDedupe) return actionFilteredEntryIds
+        return dedupeEntryIdsByTitle({
+          entryIds: actionFilteredEntryIds,
           getTitle: (entryId) => state.data[entryId]?.title,
         })
-
-        return titleDedupedEntryIds
       },
       [
         entryIdsByCategory,
@@ -202,6 +236,7 @@ const useLocalEntries = (): UseEntriesReturn => {
         localActionRevision,
         showEntriesByView,
         unreadOnly,
+        titleDedupe,
       ],
     ),
   )
@@ -265,10 +300,13 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
   useLocalActionHydration(user?.id)
 
-  const remoteQuery = useRemoteEntries()
+  const reader = useNativeReader()
+  const generated = !!reader?.active && !reader.nativeTimeline
+  // 私人投影不再抓原文列表；普通时间线加载事件由后台队列统一执行。
+  const remoteQuery = useRemoteEntries(!generated, reader?.nativeTimeline)
   const localQuery = useLocalEntries()
 
-  useFetchEntryContentByStream(remoteQuery.entriesIds)
+  useFetchEntryContentByStream(generated ? undefined : remoteQuery.entriesIds)
 
   // If remote data is not available, we use the local data, get the local data length
   // FIXME: remote first, then local store data
@@ -279,8 +317,21 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
   const query = remoteQuery.isReady ? remoteQuery : localQuery
   const rawEntryIds: string[] = query.entriesIds
+  useListLoadProcessing({
+    refs: remoteQuery.loadedEntryRefs ?? emptyLoadedEntryRefs,
+    owner: user?.id,
+    enabled:
+      !!reader?.active &&
+      !!reader.nativeTimeline &&
+      remoteQuery.isReady &&
+      !remoteQuery.isFetching &&
+      !isCollection &&
+      !isPreview,
+    loadVersion: remoteQuery.fetchedTime,
+  })
   const semanticDedupeEnabled = useAISettingKey("semanticDedupeEnabled")
-  useSemanticDedupeProcessor(semanticDedupeEnabled ? rawEntryIds : [])
+  // 混合列表继续官方分页，但处理决定仍由后台发布，读列表不能重复触发前端模型去重。
+  useSemanticDedupeProcessor(!reader?.active && semanticDedupeEnabled ? rawEntryIds : [])
   // 处理服务的决策（隐藏、综述、同内容转载）先落到角色层，再和本地去重一起生效。
   useServiceProcessingRoles()
   // 时间线只读统一角色层：本地去重与处理服务决策都在这里生效，避免各接一套。
@@ -358,6 +409,7 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
       return promise
     }, [query]),
     entriesIds: entryIds,
+    paginationBoundary: remoteQuery.isReady ? remoteQuery.paginationBoundary : undefined,
     groupedCounts,
     isFetching: remoteQuery.isFetching,
     isFetchingNextPage: remoteQuery.isFetchingNextPage,

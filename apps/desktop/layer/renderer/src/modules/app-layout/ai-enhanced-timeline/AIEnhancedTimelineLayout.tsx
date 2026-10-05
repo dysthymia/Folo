@@ -22,14 +22,16 @@ import { AIChatFixedPanel } from "~/modules/app-layout/ai/AIChatFixedPanel"
 import { AIIndicator } from "~/modules/app-layout/ai/AISplineButton"
 import { EntryContentPlaceholder } from "~/modules/app-layout/entry-content/EntryContentPlaceholder"
 import { EntryColumn } from "~/modules/entry-column"
-import { EntryContent } from "~/modules/entry-content/components/entry-content"
 import { AIEntryHeader } from "~/modules/entry-content/components/entry-header"
+import { useNativeReader } from "~/modules/information/native-reader-context"
+import { NativeReaderContent } from "~/modules/information/NativeReaderContent"
 import { AppLayoutGridContainerProvider } from "~/providers/app-grid-layout-container-provider"
 import { MainViewHotkeysProvider } from "~/providers/main-view-hotkeys-provider"
 
 import { MobileTimelineLayout } from "./MobileTimelineLayout"
 
 const MIN_ENTRY_WIDTH = isSafari() ? 356 : 300
+const MIN_READER_WIDTH = 360
 
 const AIEnhancedTimelineLayoutImpl = () => {
   const { view, entryId } = useRouteParamsSelector((state) => ({
@@ -37,11 +39,17 @@ const AIEnhancedTimelineLayoutImpl = () => {
     entryId: state.entryId,
   }))
 
-  const realEntryId = entryId === ROUTE_ENTRY_PENDING ? "" : entryId
+  const reader = useNativeReader()
+  const realEntryId =
+    reader?.active && reader.target?.kind === "entry"
+      ? reader.target.entryId
+      : entryId === ROUTE_ENTRY_PENDING
+        ? ""
+        : (entryId ?? "")
   const showEntryDetailsColumn = useShowEntryDetailsColumn()
   const aiPanelStyle = useAIChatPanelStyle()
   const isAIPanelVisible = useAIPanelVisibility()
-  const hasSelectedEntry = Boolean(realEntryId)
+  const hasSelectedEntry = Boolean(realEntryId) || !!(reader?.target?.kind === "story")
   const isMobile = useMobile()
 
   // Compute derived values first
@@ -67,8 +75,13 @@ const AIEnhancedTimelineLayoutImpl = () => {
   }, [feedColumnWidth, layoutContainerWidth])
 
   const timelineMaxWidth = useMemo(
-    () => Math.max(availableLayoutWidth, MIN_ENTRY_WIDTH),
-    [availableLayoutWidth],
+    // 保留正文的最小宽度；旧的超宽偏好和窗口缩小都不能把正文挤出视口。
+    () =>
+      Math.max(
+        availableLayoutWidth - (showEntryDetailsColumn ? MIN_READER_WIDTH + 1 : 0),
+        MIN_ENTRY_WIDTH,
+      ),
+    [availableLayoutWidth, showEntryDetailsColumn],
   )
   const aiPanelMaxWidth = useMemo(
     () => Math.max(availableLayoutWidth / 2, 600),
@@ -155,7 +168,7 @@ const AIEnhancedTimelineLayoutImpl = () => {
       }
     : showEntryDetailsColumn
       ? {
-          flexBasis: timelineColumnWidth,
+          flexBasis: Math.min(timelineColumnWidth, timelineMaxWidth),
           minWidth: MIN_ENTRY_WIDTH,
         }
       : {
@@ -246,7 +259,7 @@ const AIEnhancedTimelineLayoutImpl = () => {
               {showEntryContentOnLeft && (
                 <>
                   <AnimatePresence>
-                    {realEntryId && (
+                    {hasSelectedEntry && (
                       <m.div
                         key="entry-header"
                         className="absolute inset-x-0 top-0 z-10"
@@ -261,7 +274,7 @@ const AIEnhancedTimelineLayoutImpl = () => {
                   </AnimatePresence>
 
                   <AnimatePresence>
-                    {realEntryId && (
+                    {hasSelectedEntry && (
                       <div className="pointer-events-none absolute inset-0 z-[9] flex flex-col overflow-hidden">
                         <m.div
                           key="entry-content"
@@ -272,7 +285,7 @@ const AIEnhancedTimelineLayoutImpl = () => {
                           transition={Spring.smooth(0.3)}
                           className="pointer-events-auto relative flex h-0 flex-1 flex-col bg-theme-background"
                         >
-                          <EntryContent entryId={realEntryId} className="h-full" />
+                          <NativeReaderContent entryId={realEntryId} className="h-full" />
                         </m.div>
                       </div>
                     )}
@@ -295,13 +308,13 @@ const AIEnhancedTimelineLayoutImpl = () => {
                   )}
                   style={rightColumnStyle}
                 >
-                  {showEntryContentOnRight && realEntryId ? (
+                  {showEntryContentOnRight && hasSelectedEntry ? (
                     <div className="flex h-full flex-col overflow-hidden">
                       <div className="absolute inset-x-0 top-0 z-10">
                         <AIEntryHeader entryId={realEntryId} />
                       </div>
                       <div className="flex h-0 flex-1 flex-col overflow-hidden">
-                        <EntryContent entryId={realEntryId} className="h-full" />
+                        <NativeReaderContent entryId={realEntryId} className="h-full" />
                       </div>
                     </div>
                   ) : shouldShowFixedAI ? (

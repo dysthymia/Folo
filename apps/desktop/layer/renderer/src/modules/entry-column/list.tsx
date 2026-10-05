@@ -8,7 +8,7 @@ import type { Range, VirtualItem, Virtualizer } from "@tanstack/react-virtual"
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual"
 import type { HTMLMotionProps } from "motion/react"
 import type { FC, MutableRefObject, ReactNode } from "react"
-import { memo, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useEventCallback } from "usehooks-ts"
 
@@ -53,6 +53,9 @@ export type EntryListProps = {
   syncType: "remote" | "local"
   feedId: string
   entriesIds: string[]
+  /** 投影仅提供行适配器，继续使用原生虚拟化、测量和快捷键。 */
+  renderItem?: (index: number) => ReactNode
+  listIdentity?: string
   view: FeedViewType
 
   hasNextPage: boolean
@@ -85,6 +88,8 @@ const handleKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (e) => {
 export const EntryList: FC<EntryListProps> = memo(
   ({
     feedId,
+    renderItem,
+    listIdentity,
     view,
     entriesIds,
     fetchNextPage,
@@ -121,7 +126,7 @@ export const EntryList: FC<EntryListProps> = memo(
       [groupCounts],
     )
 
-    const cacheKey = `${view}-${feedId}`
+    const cacheKey = listIdentity ?? `${view}-${feedId}`
     const isResetScrollPending = shouldApplyScrollResetSignal({
       resetSignal: resetScrollSignal,
       appliedResetSignal: appliedResetScrollSignal,
@@ -224,27 +229,20 @@ export const EntryList: FC<EntryListProps> = memo(
       }
     }, [scrollRef])
 
-    const [ready, setReady] = useState(false)
-
-    useEffect(() => {
-      startTransition(() => {
-        setReady(true)
-      })
-    }, [])
-
     const currentFeedTitle = useFeedHeaderTitle()!
 
     return (
       <>
         <div
           onKeyDown={handleKeyDown}
+          data-virtual-count={virtualItems.length}
           className={"relative w-full select-none"}
           style={{
             height: `${rowVirtualizer.getTotalSize() + endSpacerHeight}px`,
           }}
         >
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            if (!ready) return null
+            // 虚拟器已在视口可测量时提供范围，不再另设 transition 门禁阻止整页提交。
             // Last placeholder row
             const isLoaderRow = virtualRow.index === entriesIds.length
 
@@ -276,6 +274,18 @@ export const EntryList: FC<EntryListProps> = memo(
             }
             const isStickyItem = checkIsStickyItem(virtualRow.index)
             const isActiveStickyItem = !isScrollTop && checkIsActiveSticky(virtualRow.index)
+            if (renderItem)
+              return (
+                <div
+                  key={entriesIds[virtualRow.index]}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full will-change-transform"
+                  style={{ transform }}
+                >
+                  {renderItem(virtualRow.index)}
+                </div>
+              )
             return (
               <VirtualRowItem
                 key={virtualRow.key}

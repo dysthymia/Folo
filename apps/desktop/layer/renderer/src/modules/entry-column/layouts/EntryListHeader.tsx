@@ -31,10 +31,11 @@ import { useRunCommandFn } from "~/modules/command/hooks/use-command"
 import { useCommandShortcut } from "~/modules/command/hooks/use-command-binding"
 import { EntryHeader } from "~/modules/entry-content/components/entry-header"
 import { FeedIcon } from "~/modules/feed/feed-icon"
-import { smartReadingPath } from "~/modules/information/reading-mode-link"
 import { useRefreshFeedMutation } from "~/queries/feed"
 import { useFeedHeaderIcon, useFeedHeaderTitle } from "~/store/feed/hooks"
 
+import { useNativeReader } from "../../information/native-reader-context"
+import { NativeReaderFilterButton } from "../../information/NativeReaderFilters"
 import { aiTimelineEnabledAtom } from "../atoms/ai-timeline"
 import { MarkAllReadButton } from "../components/mark-all-button"
 import { useIsPreviewFeed } from "../hooks/useIsPreviewFeed"
@@ -49,6 +50,7 @@ export const EntryListHeader: FC<{
   onBeforeRefresh?: () => void
   fetchedTime?: number
 }> = ({ refetch, isRefreshing, onBeforeRefresh, fetchedTime }) => {
+  const reader = useNativeReader()
   const routerParams = useRouteParams()
   const { t } = useTranslation()
 
@@ -60,7 +62,11 @@ export const EntryListHeader: FC<{
   const isPreview = useIsPreviewFeed()
   const isWideMode = !!getView(view)?.wideMode
 
-  const headerTitle = useFeedHeaderTitle()
+  const originalHeaderTitle = useFeedHeaderTitle()
+  const headerTitle =
+    reader?.active && !reader.nativeTimeline && reader.scope.mode === "stories"
+      ? t("processing.generated.title")
+      : originalHeaderTitle
   const feedIcon = useFeedHeaderIcon()
 
   const titleInfo = !!headerTitle && (
@@ -108,7 +114,8 @@ export const EntryListHeader: FC<{
   }, [sendAIShortcut])
   const showEntryHeader = isWideMode && !!entryId && entryId !== ROUTE_ENTRY_PENDING
   const showTimelineSummaryButton = isWideMode && aiEnabled
-  const showAiTimelineToggle = aiEnabled
+  // 原生双流列表按时间排序，隐藏会与实际顺序冲突的 AI 排序开关。
+  const showAiTimelineToggle = aiEnabled && !reader?.nativeTimeline
 
   const handleAiTimelineButtonClick = useCallback(() => {
     setAiTimelineEnabled((prev) => !prev)
@@ -166,17 +173,12 @@ export const EntryListHeader: FC<{
             )}
             onClick={stopPropagation}
           >
-            {isLocalFoloHost() && (
-              <div className="flex shrink-0 items-center gap-2">
+            {isLocalFoloHost() &&
+              !isPreview &&
+              !isCollection &&
+              (reader?.nativeTimeline || reader?.scope.mode !== "stories") && (
                 <ProcessingTimelineModeSwitch />
-                <a
-                  className="whitespace-nowrap text-xs text-text-secondary hover:text-text"
-                  href={smartReadingPath(window.location.pathname + window.location.search)}
-                >
-                  {t("processing.reader.mode_smart")}
-                </a>
-              </div>
-            )}
+              )}
             {isWideMode &&
               (showEntryHeader || showTimelineSummaryButton || showAiTimelineToggle) && (
                 <>
@@ -190,6 +192,8 @@ export const EntryListHeader: FC<{
                   <DividerVertical className="mx-2 w-px" />
                 </>
               )}
+
+            <NativeReaderFilterButton />
 
             {!isWideMode && aiTimelineEnabled && renderAiTimelineButton()}
 

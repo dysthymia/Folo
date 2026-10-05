@@ -17,12 +17,17 @@ import { getRouteParams, useRouteEntryId } from "~/hooks/biz/useRouteParams"
 import { COMMAND_ID } from "../command/commands/id"
 import { useCommandBinding } from "../command/hooks/use-command-binding"
 import { useCommandHotkey } from "../command/hooks/use-register-hotkey"
+import { generatedItemKey } from "../information/generated-feed-identity"
+import { useNativeReader } from "../information/native-reader-context"
+import { readerItemMatchesTarget } from "../information/reader-target"
 
 export const EntryColumnShortcutHandler: FC<{
   refetch: () => void
   data: readonly string[]
   handleScrollTo: (index: number) => void
 }> = memo(({ data, refetch, handleScrollTo }) => {
+  const reader = useNativeReader()
+  const readerRef = useRefValue(reader)
   const dataRef = useRefValue(data!)
 
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isTimeline)
@@ -60,8 +65,17 @@ export const EntryColumnShortcutHandler: FC<{
   useEffect(() => {
     return EventBus.subscribe(COMMAND_ID.timeline.switchToNext, () => {
       const data = dataRef.current
-      const currentActiveEntryIndex = data.indexOf(currentEntryIdRef.current || "")
+      const activeReader = readerRef.current
+      if (activeReader?.active && activeReader.locating) return
+      const selectedItem = activeReader?.active
+        ? activeReader.items.find((item) => readerItemMatchesTarget(item, activeReader.target))
+        : undefined
+      const currentActiveEntryIndex = data.indexOf(
+        selectedItem ? generatedItemKey(selectedItem) : currentEntryIdRef.current || "",
+      )
 
+      if (activeReader?.active && activeReader.target && !selectedItem) return
+      if (!data.length) return
       const nextIndex = Math.min(currentActiveEntryIndex + 1, data.length - 1)
 
       if (currentActiveEntryIndex === nextIndex) {
@@ -73,18 +87,27 @@ export const EntryColumnShortcutHandler: FC<{
       const nextId = data![nextIndex]
       const { view } = getRouteParams()
 
-      navigate({
-        entryId: nextId,
-        view,
-      })
+      if (activeReader?.active) {
+        const item = activeReader.items[nextIndex]
+        if (item) activeReader.selectItem(item)
+      } else navigate({ entryId: nextId, view })
     })
-  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, when])
+  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef, when])
 
   useEffect(() => {
     return EventBus.subscribe(COMMAND_ID.timeline.switchToPrevious, () => {
       const data = dataRef.current
-      const currentActiveEntryIndex = data.indexOf(currentEntryIdRef.current || "")
+      const activeReader = readerRef.current
+      if (activeReader?.active && activeReader.locating) return
+      const selectedItem = activeReader?.active
+        ? activeReader.items.find((item) => readerItemMatchesTarget(item, activeReader.target))
+        : undefined
+      const currentActiveEntryIndex = data.indexOf(
+        selectedItem ? generatedItemKey(selectedItem) : currentEntryIdRef.current || "",
+      )
 
+      if (activeReader?.active && activeReader.target && !selectedItem) return
+      if (!data.length) return
       const nextIndex =
         currentActiveEntryIndex === -1 ? data.length - 1 : Math.max(0, currentActiveEntryIndex - 1)
 
@@ -98,12 +121,12 @@ export const EntryColumnShortcutHandler: FC<{
 
       const { view } = getRouteParams()
 
-      navigate({
-        entryId: nextId,
-        view,
-      })
+      if (activeReader?.active) {
+        const item = activeReader.items[nextIndex]
+        if (item) activeReader.selectItem(item)
+      } else navigate({ entryId: nextId, view })
     })
-  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate])
+  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef])
 
   useEffect(() => {
     return EventBus.subscribe(COMMAND_ID.timeline.refetch, () => {

@@ -1,5 +1,8 @@
 import { memo, useLayoutEffect, useRef, useState } from "react"
 
+import { useNativeReader } from "~/modules/information/native-reader-context"
+import { NativeStoryHeader } from "~/modules/information/NativeStoryHeader"
+
 import { useEntryContentScrollToTop } from "../../atoms"
 import { EntryHeaderRoot } from "./internal/context"
 import { EntryHeaderActionsContainer } from "./internal/EntryHeaderActionsContainer"
@@ -7,6 +10,7 @@ import { EntryHeaderBreadcrumb } from "./internal/EntryHeaderBreadcrumb"
 import type { EntryHeaderProps } from "./types"
 
 function EntryHeaderImpl({ entryId, className, compact }: EntryHeaderProps) {
+  const reader = useNativeReader()
   const isAtTop = useEntryContentScrollToTop()
   const headerRef = useRef<HTMLDivElement>(null)
   const [isSmallWidth, setIsSmallWidth] = useState(false)
@@ -23,6 +27,7 @@ function EntryHeaderImpl({ entryId, className, compact }: EntryHeaderProps) {
       observer.disconnect()
     }
   }, [headerRef])
+  if (reader?.target?.kind === "story") return <NativeStoryHeader />
   return (
     <EntryHeaderRoot entryId={entryId} className={className} compact={compact}>
       <nav

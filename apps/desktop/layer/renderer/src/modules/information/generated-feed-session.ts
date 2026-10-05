@@ -44,3 +44,23 @@ export function updateReaderSessions(
     session.readChanges = [...changes]
   }
 }
+
+/** 原生正文按真实 entryId 同步，条目经 List 和 Feed 出现时仍共享官方读态与收藏。 */
+export function updateOriginalReaderSessions(
+  owner: string,
+  entryId: string,
+  state: { read?: boolean; collected?: boolean },
+) {
+  if (owner !== activeOwner) return
+  for (const session of sessions.values()) {
+    const changes = new Map(session.readChanges ?? [])
+    session.items = session.items.map((item) => {
+      if (item.kind !== "entry" || item.id !== entryId) return item
+      const key = generatedItemKey(item)
+      changes.set(key, { ...changes.get(key), ...state })
+      return { ...item, ...state }
+    })
+    changes.set(`original:${entryId}`, { ...changes.get(`original:${entryId}`), ...state })
+    session.readChanges = [...changes]
+  }
+}

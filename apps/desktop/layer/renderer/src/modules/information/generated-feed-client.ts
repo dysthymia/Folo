@@ -19,6 +19,7 @@ const commonItem = {
   publishedAt: z.string(),
   read: z.boolean().nullable(),
   collected: z.boolean().nullable(),
+  collectedAt: z.string().nullable().optional(),
   materialCount: z.number().int().nonnegative(),
   topics: z.array(z.string()),
 }
@@ -40,9 +41,11 @@ export const generatedReaderItemSchema = z.discriminatedUnion("kind", [
     kind: z.literal("entry"),
     origin: z.literal("original"),
     sourceKey: z.string(),
-    inputSeq: z.number().int().positive(),
-    decisionId: z.string(),
+    inputSeq: z.number().int().positive().nullable(),
+    decisionId: z.string().nullable(),
     storyIds: z.array(z.string()),
+    view: z.number().int().optional(),
+    updatedAt: z.string().optional(),
   }),
 ])
 export const generatedFeedPageSchema = z.object({
@@ -53,16 +56,31 @@ export const generatedFeedPageSchema = z.object({
   nextCursor: z.string().nullable(),
   items: z.array(generatedReaderItemSchema),
   counts: z
-    .object({ pending: z.number(), failed: z.number(), needsContext: z.number() })
+    .object({
+      pending: z.number(),
+      failed: z.number(),
+      needsContext: z.number(),
+      inputs: z.number().int().nonnegative().optional(),
+      uncovered: z.number().int().nonnegative().optional(),
+      hidden: z.number().int().nonnegative().optional(),
+      folded: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+  collectionSync: z
+    .object({
+      status: z.enum(["complete", "stale"]),
+      syncedAt: z.string().nullable(),
+      failure: z.string().nullable(),
+    })
     .optional(),
 })
 export type GeneratedReaderItem = z.infer<typeof generatedReaderItemSchema>
 export type GeneratedFeedPage = z.infer<typeof generatedFeedPageSchema>
 export type GeneratedFeedQuery = {
-  mode: "smart" | "stories"
+  mode: "smart" | "stories" | "collections"
   view?: number | "all"
   sourceKeys?: string[]
-  category?: { view: number; name: string }
+  category?: { view: number | "all"; name: string }
   search?: string
   topic?: string
   unreadOnly?: boolean
@@ -78,6 +96,58 @@ export type GeneratedFeedQuery = {
 export const loadGeneratedFeedPage = (query: GeneratedFeedQuery, signal: AbortSignal) =>
   readingRequest("processing/generated-feed/items", generatedFeedPageSchema, signal, query)
 
+export const loadGeneratedFeedStats = (signal: AbortSignal) =>
+  readingRequest(
+    "processing/generated-feed/stats",
+    z.object({
+      feedId: z.literal("generated:events"),
+      total: z.number().int().nonnegative(),
+      unread: z.number().int().nonnegative(),
+      collected: z.number().int().nonnegative(),
+    }),
+    signal,
+  )
+
+const generatedTargetSchema = z.object({
+  snapshotId: z.uuid(),
+  cursor: z.string().nullable(),
+  previousCursor: z.string().nullable(),
+})
+export const generatedEntryStateSchema = z.object({
+  entryId: z.string(),
+  status: z.enum([
+    "ready",
+    "hidden",
+    "needs_context",
+    "pending",
+    "failed",
+    "unprocessed",
+    "unavailable",
+  ]),
+  reason: z.string().nullable(),
+  item: generatedReaderItemSchema.options[1].nullable(),
+  target: generatedTargetSchema.nullable(),
+})
+export type GeneratedEntryState = z.infer<typeof generatedEntryStateSchema>
+// 原文深链单独读取处理状态，不依赖第一批 30 行或偷偷触发模型调用。
+export const loadGeneratedEntryState = (entryId: string, signal: AbortSignal) =>
+  readingRequest(
+    `processing/generated-feed/entries/${encodeURIComponent(entryId)}`,
+    generatedEntryStateSchema,
+    signal,
+  )
+export const locateGeneratedReaderTarget = (
+  target: { entryId?: string; storyId?: string },
+  query: GeneratedFeedQuery,
+  signal: AbortSignal,
+) =>
+  readingRequest(
+    "processing/generated-feed/locate",
+    z.object({ target: generatedTargetSchema.nullable() }),
+    signal,
+    { ...target, query },
+  )
+
 const readerStateSchema = z.object({
   storyId: z.string(),
   read: z.boolean(),
@@ -92,17 +162,21 @@ export const loadGeneratedStoryState = (storyId: string, signal: AbortSignal) =>
     readerStateSchema,
     signal,
   )
-export const setGeneratedStoryState = (
+export const setGeneratedStoryState = async (
   storyId: string,
   state: { read?: boolean; collected?: boolean; revision?: number },
   signal: AbortSignal,
-) =>
-  readingRequest(
+) => {
+  const result = await readingRequest(
     `processing/stories/${encodeURIComponent(storyId)}/reader-state`,
     readerStateSchema,
     signal,
     state,
   )
+  // 读态和收藏保存成功后立即刷新私人来源计数，不刷新正在阅读的冻结成员。
+  window.dispatchEvent(new Event("processing-story-state-changed"))
+  return result
+}
 
 export function appendGeneratedPage(
   current: GeneratedReaderItem[],

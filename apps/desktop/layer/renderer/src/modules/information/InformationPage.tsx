@@ -29,6 +29,7 @@ export function InformationPage() {
   const [savingSettings, setSavingSettings] = useState(false)
   const [provider, setProvider] = useState<InformationAISettings["provider"]>("qianwen")
   const [model, setModel] = useState("qwen3.8-flash")
+  const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
   const requestRef = useRef<AbortController | null>(null)
   // 跟踪当前快照的所有者，用于回前台时核验账号是否变化（避免闭包拿到旧值）。
@@ -59,6 +60,7 @@ export function InformationPage() {
           setSettings(nextSettings)
           setProvider(nextSettings.provider)
           setModel(nextSettings.model)
+          setBaseUrl(nextSettings.baseUrl ?? "")
         }
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -108,6 +110,7 @@ export function InformationPage() {
               setSettings(nextSettings)
               setProvider(nextSettings.provider)
               setModel(nextSettings.model)
+              setBaseUrl(nextSettings.baseUrl ?? "")
             }
           } catch (error) {
             if (!controller.signal.aborted)
@@ -140,7 +143,19 @@ export function InformationPage() {
     setSettingsError(null)
     try {
       const nextSettings = await saveInformationAISettings(
-        { provider, model, ...(apiKey.trim() && { apiKey: apiKey.trim() }) },
+        {
+          provider,
+          model,
+          ...(provider === "openai-compatible" && { baseUrl: baseUrl.trim() }),
+          // 兼容入口保存同一 Codex 模型时保留主设置页选定的强度，换模型后重新验证。
+          ...(provider === "codex" &&
+          settings?.provider === "codex" &&
+          settings.model === model &&
+          settings.reasoningEffort
+            ? { reasoningEffort: settings.reasoningEffort }
+            : {}),
+          ...(apiKey.trim() && { apiKey: apiKey.trim() }),
+        },
         () => oneTimeToken.generate(),
       )
       setSettings(nextSettings)
@@ -258,6 +273,7 @@ export function InformationPage() {
                       {t("information.model_settings.provider_qianwen")}
                     </option>
                     <option value="codex">{t("information.model_settings.provider_codex")}</option>
+                    <option value="openai-compatible">{t("automation.model.custom")}</option>
                   </select>
                 </label>
                 <label className="space-y-1.5 text-sm font-medium">
@@ -269,17 +285,35 @@ export function InformationPage() {
                     className="w-full rounded-lg border border-fill bg-fill-secondary px-3 py-2 text-text"
                   />
                 </label>
-                <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
-                  <span>{t("information.model_settings.api_key")}</span>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={t("information.model_settings.api_key_placeholder")}
-                    autoComplete="new-password"
-                    className="w-full rounded-lg border border-fill bg-fill-secondary px-3 py-2 text-text"
-                  />
-                </label>
+                {provider === "openai-compatible" && (
+                  <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
+                    <span>{t("automation.model.base_url")}</span>
+                    <input
+                      type="url"
+                      required
+                      value={baseUrl}
+                      onChange={(event) => {
+                        // 切换地址后清空未保存密钥，后端会核验旧密钥是否仍可复用。
+                        setBaseUrl(event.target.value)
+                        setApiKey("")
+                      }}
+                      className="w-full rounded-lg border border-fill bg-fill-secondary px-3 py-2 text-text"
+                    />
+                  </label>
+                )}
+                {provider !== "codex" && (
+                  <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
+                    <span>{t("information.model_settings.api_key")}</span>
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={(event) => setApiKey(event.target.value)}
+                      placeholder={t("information.model_settings.api_key_placeholder")}
+                      autoComplete="new-password"
+                      className="w-full rounded-lg border border-fill bg-fill-secondary px-3 py-2 text-text"
+                    />
+                  </label>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-3 sm:col-span-2">
                   <p className="text-xs leading-5 text-text-secondary">
                     {t("information.model_settings.framework_notice")}

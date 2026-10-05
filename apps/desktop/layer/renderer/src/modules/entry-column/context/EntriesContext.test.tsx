@@ -58,6 +58,7 @@ describe("EntriesProvider", () => {
       type: "remote",
       entriesIds: [],
       groupedCounts: undefined,
+      paginationBoundary: undefined,
       hasNextPage: false,
       isFetchingNextPage: false,
       isFetching: false,
