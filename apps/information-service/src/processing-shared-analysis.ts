@@ -19,6 +19,7 @@ import {
   createSemanticDuplicatePrompt,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeSemanticDuplicateOutput,
+  semanticDuplicateEvaluationStatus,
   semanticDuplicateEvaluationStatuses,
   semanticDuplicateOutputSchema,
 } from "./semantic-dedupe"
@@ -394,7 +395,14 @@ sentences 必须拼成 body，facts.sentenceIndexes 从0开始，inference 必�
               )
             )
               continue
-            this.dedupeEvaluations.push(parsed.data)
+            // 旧缓存的低把握否定也遵守当前结论资格，不把历史 decided 当成确定答案。
+            this.dedupeEvaluations.push({
+              ...parsed.data,
+              evaluation: {
+                ...parsed.data.evaluation,
+                status: semanticDuplicateEvaluationStatus(parsed.data.evaluation),
+              },
+            })
           }
         }
         if (Array.isArray(cached.stories)) {

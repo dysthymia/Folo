@@ -38,6 +38,30 @@ function entry(
 const base = Date.parse("2026-01-10T00:00:00.000Z")
 const at = (hours: number) => new Date(base + hours * 60 * 60 * 1000).toISOString()
 
+it.each([0.1, 0.84, 0.85, 0.99])("否定结论也需要明确把握，置信度 %s", (confidence) => {
+  // 低把握不冒充确定不同；阈值不代表测得的准确率，不触发无限补判。
+  const candidates = getSemanticDuplicateCandidates([
+    entry("A", "同一事件正式发布", at(0)),
+    entry("B", "同一事件正式发布", at(1)),
+  ])
+  const candidate = candidates[0]!
+  expect(
+    normalizeSemanticDuplicateOutput(candidates, {
+      results: [
+        {
+          pairKey: candidate.pairKey,
+          duplicate: false,
+          confidence,
+          keepEntryId: null,
+          hideEntryId: null,
+          reason: "可能不同",
+          factComparison: { verdict: "different", onlyInFirst: [], onlyInSecond: [] },
+        },
+      ],
+    })[0],
+  ).toMatchObject({ duplicate: false, status: confidence >= 0.85 ? "decided" : "uncertain" })
+})
+
 it("推理强度语义去重沿用私有配置，外部模型仍维持low", async () => {
   const candidates = getSemanticDuplicateCandidates([
     entry("older", "同一事件正式发布", at(0)),

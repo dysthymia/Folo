@@ -160,7 +160,7 @@ function fakeExecute(
 
 // 所有新回归均使用假模型，验证持久化、预算和原文保留而不调用外部服务。
 const negativeExecute = () =>
-  fakeExecute(() => ({ duplicate: false, confidence: 0.4, keep: "", hide: "" }))
+  fakeExecute(() => ({ duplicate: false, confidence: 0.99, keep: "", hide: "" }))
 function runFixture(store: Store, aiConfig: AIConfigStore, execute = negativeExecute()) {
   return runSemanticDedupe({
     store,
@@ -382,7 +382,7 @@ describe("语义去重的服务端执行与角色落地", () => {
         itemId: "newer",
         inputSeq: 2,
         kind: "merged",
-        reason: "同一核心事件",
+        reason: "《OpenAI 发布 GPT-6 模型（更新）》 → 《OpenAI 发布 GPT-6 模型》\n同一核心事件",
         relatedEntryIds: ["older"],
         storyId: null,
         storyTitle: null,
@@ -493,7 +493,7 @@ describe("语义去重的服务端执行与角色落地", () => {
       entry("newer", "OpenAI 发布 GPT-6 模型（更新）", "2026-01-10T06:00:00.000Z"),
     )
     const execute = fakeExecute(() => ({
-      confidence: 0.4,
+      confidence: 0.99,
       duplicate: false,
       hide: "newer",
       keep: "older",
@@ -529,7 +529,7 @@ describe("语义去重的服务端执行与角色落地", () => {
       publishDecision(store, entry(`item-${index}`, "OpenAI 发布 GPT-6 模型", at))
     }
     const execute = fakeExecute(() => ({
-      confidence: 0.4,
+      confidence: 0.99,
       duplicate: false,
       hide: "",
       keep: "",
@@ -1080,7 +1080,7 @@ describe("去重根因回归", () => {
     const fingerprints = fingerprintsOf(store)
     expect(rolesOf(store)).toHaveLength(2)
     store.processingState.setOverride(2, "restore", 0)
-    expect(rolesOf(store)).toEqual([])
+    expect(rolesOf(store)).toEqual([expect.objectContaining({ itemId: "newer", kind: "restored" })])
     store.processingState.setOverride(2, "automatic", 1)
     expect(rolesOf(store)).toHaveLength(2)
     publishRules(store, [
@@ -1261,8 +1261,90 @@ describe("去重根因回归", () => {
     ])
     expect(rolesOf(store).find((role) => role.itemId === "newer")?.kind).toBe("merged")
     store.processingState.setOverride(2, "restore", 0)
-    expect(rolesOf(store)).toEqual([])
+    expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "newer", kind: "restored", inputSeq: 2 }),
+    ])
     expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(2)
+    // 人工保留可从原位撤销；不改原文读态，也不重新请求模型。
+    store.processingState.setOverride(2, "automatic", 1)
+    expect(rolesOf(store).find((role) => role.itemId === "newer")?.kind).toBe("merged")
+    expect(store.entry(otherSource.key, "newer")?.read).toBe(false)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it("旧同文不阻断新时间组，长文在本地折叠且不跨窗口串联", async () => {
+    // 覆盖过旧代表与连续窗口两种边界，不能靠语义模型弥补精确层遗漏。
+    for (const hours of [
+      [0, 240, 242],
+      [0, 47, 94],
+    ]) {
+      const { store, aiConfig } = fixture()
+      publishRules(store, [dedupeRule({ all: true })])
+      const content = "活动完整规则包含资格条件和截止时点。".repeat(400)
+      const base = Date.parse("2026-01-01T00:00:00.000Z")
+      for (const [index, hour] of hours.entries())
+        publishDecision(
+          store,
+          entry(
+            String(index),
+            "同文公告",
+            new Date(base + hour * 3_600_000).toISOString(),
+            content,
+          ),
+        )
+      const execute = negativeExecute()
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        exactDuplicates: 1,
+        batches: 0,
+      })
+      const expectedHide = hours[1] === 240 ? "2" : "1"
+      expect(
+        rolesOf(store)
+          .filter((role) => role.kind === "merged")
+          .map((role) => role.itemId),
+      ).toEqual([expectedHide])
+      expect(execute).not.toHaveBeenCalled()
+    }
+  })
+
+  it("低把握否定保持待确认，旧判定与内容缓存也不能伪装确定结论", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishPair(store)
+    const candidate = prepareSemanticDedupe({ store })[0]!.candidates[0]!
+    const execute = fakeExecute(() => ({ duplicate: false, confidence: 0.1, keep: "", hide: "" }))
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ unresolved: 1, batches: 1 })
+    const fingerprints = fingerprintsOf(store)
+    expect(store.dedupe.decidedPairKeys(fingerprints).size).toBe(0)
+    expect(store.dedupe.unresolvedDecisions(fingerprints)[0]?.status).toBe("uncertain")
+    // 重现旧版写入的低置信 decided，读时升级语义，不清空全部缓存或重扫历史。
+    const db = new DatabaseSync(":memory:")
+    try {
+      const legacy = new ProcessingDedupeStore(db, () => store.automation.inputs())
+      const relation = store.dedupe.relation(candidate)!
+      const inputs = store.automation.inputs()
+      legacy.saveRelation(candidate, relation)
+      legacy.saveBatch({
+        configFingerprint: [...fingerprints][0]!,
+        ruleId: "dedupe-rule",
+        provider: "qianwen",
+        model: "test-model",
+        decisions: [
+          { candidate, evaluation: relation.evaluation, keep: inputs[0]!, hide: inputs[1]! },
+        ],
+      })
+      db.prepare("UPDATE processing_dedupe_decisions SET evaluation_status='decided'").run()
+      db.prepare(
+        "UPDATE processing_dedupe_relations SET evaluation_json=json_set(evaluation_json,'$.status','decided')",
+      ).run()
+      expect(legacy.decidedPairKeys(fingerprints).size).toBe(0)
+      expect(legacy.unresolvedDecisions(fingerprints)[0]?.status).toBe("uncertain")
+      expect(legacy.relation(candidate)?.evaluation.status).toBe("uncertain")
+    } finally {
+      db.close()
+    }
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0, unresolved: 1 })
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 
   it("精确判定保存被拒绝时不能提前排除该对的语义候选", async () => {

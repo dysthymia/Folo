@@ -10,7 +10,7 @@ import {
 } from "@follow/store/entry/processing-role"
 import { useWhoami } from "@follow/store/user/hooks"
 import { cn } from "@follow/utils/utils"
-import type { MouseEvent, PointerEvent } from "react"
+import type { KeyboardEvent, MouseEvent, PointerEvent } from "react"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -27,7 +27,7 @@ import { DuplicateEntriesPanel } from "./DuplicateEntriesPanel"
 import { cachedDuplicateGroup, duplicateGroupCacheKey } from "./processing-duplicates-cache"
 import { useProcessingEntryOverride } from "./processing-entry-override"
 
-const stopEntryNavigation = (event: MouseEvent | PointerEvent) => {
+const stopEntryNavigation = (event: KeyboardEvent | MouseEvent | PointerEvent) => {
   event.stopPropagation()
 }
 
@@ -70,11 +70,20 @@ export const MergedEntriesBadge = ({
   const owner = useWhoami()?.id
   const [duplicateOpen, setDuplicateOpen] = useState(false)
   const [duplicateHover, setDuplicateHover] = useState(false)
+  const [overrideOpen, setOverrideOpen] = useState(false)
+  const [overrideHover, setOverrideHover] = useState(false)
   const [openingInputSeq, setOpeningInputSeq] = useState<number | undefined>()
   useEffect(() => {
     setDuplicateOpen(false)
     setDuplicateHover(false)
+    setOverrideOpen(false)
+    setOverrideHover(false)
   }, [entryId, owner])
+  useEffect(() => {
+    // 角色切换后关闭旧操作面板，避免继续展示已经失效的恢复入口。
+    setOverrideOpen(false)
+    setOverrideHover(false)
+  }, [role?.kind])
   const { setMode, busy, failed } = useProcessingEntryOverride()
   const isStory = role?.kind === "story" && Boolean(role.storyId)
   const isHidden = role?.kind === "hidden"
@@ -132,60 +141,91 @@ export const MergedEntriesBadge = ({
     ) : null
 
   if (isHidden || isRestored) {
-    return (
-      <HoverCard openDelay={120} closeDelay={120}>
-        <HoverCardTrigger asChild>
-          <span
-            aria-label={isRestored ? t("processing.badge.restored") : t("processing.badge.hidden")}
-            className={chipClass(className)}
-            onClick={preventEntryNavigation}
-            onPointerDown={preventEntryNavigation}
-            role="button"
-            tabIndex={0}
+    const content = (
+      <div className="space-y-2">
+        <p className="text-text-secondary">
+          {isRestored
+            ? t("processing.badge.restored_hint")
+            : (role?.reason ?? t("processing.badge.hidden_hint"))}
+        </p>
+        {inputSeq !== undefined && <ProcessingEntryExplanation inputSeq={inputSeq} />}
+        {processingResult && (
+          <button type="button" className={processingButtonClass} onClick={openResult}>
+            {t("processing.result.view")}
+          </button>
+        )}
+        {inputSeq !== undefined && (
+          <button
+            type="button"
+            className={processingButtonClass}
+            disabled={busy}
+            onClick={() => void setMode(inputSeq, isRestored ? "automatic" : "restore")}
           >
-            {isRestored ? t("processing.badge.restored") : t("processing.badge.hidden")}
-          </span>
-        </HoverCardTrigger>
-        <HoverCardContent
-          align="end"
-          className="w-80 p-3 text-xs"
-          onClick={stopEntryNavigation}
-          onPointerDown={stopEntryNavigation}
-          side="top"
-        >
-          <div className="space-y-2">
-            <p className="text-text-secondary">
-              {isRestored
-                ? t("processing.badge.restored_hint")
-                : (role?.reason ?? t("processing.badge.hidden_hint"))}
-            </p>
-            {inputSeq !== undefined && <ProcessingEntryExplanation inputSeq={inputSeq} />}
-            {processingResult && (
-              <button type="button" className={processingButtonClass} onClick={openResult}>
-                {t("processing.result.view")}
-              </button>
+            {t(
+              isRestored
+                ? "processing.badge.back_to_automatic"
+                : "processing.reader.override.restore",
             )}
-            {inputSeq !== undefined && (
+          </button>
+        )}
+        {failed && (
+          <p role="alert" className="text-red">
+            {t("processing.badge.override_failed")}
+          </p>
+        )}
+      </div>
+    )
+    return (
+      <HoverCard
+        open={overrideHover && !overrideOpen}
+        onOpenChange={setOverrideHover}
+        openDelay={120}
+        closeDelay={120}
+      >
+        <Popover open={overrideOpen} onOpenChange={setOverrideOpen}>
+          <HoverCardTrigger asChild>
+            <PopoverTrigger asChild>
               <button
                 type="button"
-                className={processingButtonClass}
-                disabled={busy}
-                onClick={() => void setMode(inputSeq, isRestored ? "automatic" : "restore")}
+                aria-label={
+                  isRestored ? t("processing.badge.restored") : t("processing.badge.hidden")
+                }
+                className={chipClass(cn("cursor-button", className))}
+                // 点击和键盘激活均可打开固定面板，触屏也能撤销手动保留。
+                onClick={(event) => {
+                  preventEntryNavigation(event)
+                  setOverrideHover(false)
+                  setOverrideOpen(!overrideOpen)
+                }}
+                onPointerDown={stopEntryNavigation}
+                // 保留按钮默认键盘激活，阻止时间线 Enter 快捷键抢走事件。
+                onKeyDown={stopEntryNavigation}
               >
-                {t(
-                  isRestored
-                    ? "processing.badge.back_to_automatic"
-                    : "processing.reader.override.restore",
-                )}
+                {isRestored ? t("processing.badge.restored") : t("processing.badge.hidden")}
               </button>
-            )}
-            {failed && (
-              <p role="alert" className="text-red">
-                {t("processing.badge.override_failed")}
-              </p>
-            )}
-          </div>
-        </HoverCardContent>
+            </PopoverTrigger>
+          </HoverCardTrigger>
+          <HoverCardContent
+            align="end"
+            className="w-80 p-3 text-xs"
+            onClick={stopEntryNavigation}
+            onPointerDown={stopEntryNavigation}
+            onKeyDown={stopEntryNavigation}
+            side="top"
+          >
+            {content}
+          </HoverCardContent>
+          <PopoverContent
+            align="end"
+            side="bottom"
+            className="w-80 p-3 text-xs"
+            onClick={stopEntryNavigation}
+            onPointerDown={stopEntryNavigation}
+            onKeyDown={stopEntryNavigation}
+          >
+            {content}
+          </PopoverContent>
+        </Popover>
       </HoverCard>
     )
   }
@@ -206,6 +246,7 @@ export const MergedEntriesBadge = ({
                 aria-label={t("processing.badge.merged_entries", { count: duplicateCount })}
                 className={chipClass(cn("cursor-button", className))}
                 onPointerDown={stopEntryNavigation}
+                onKeyDown={stopEntryNavigation}
                 onClick={(event) => {
                   preventEntryNavigation(event)
                   setDuplicateHover(false)
@@ -226,6 +267,7 @@ export const MergedEntriesBadge = ({
             className="w-80 p-3 text-xs"
             onClick={stopEntryNavigation}
             onPointerDown={stopEntryNavigation}
+            onKeyDown={stopEntryNavigation}
           >
             <p className="font-semibold">{t("processing.duplicates.title")}</p>
             <p className="mt-1 text-text-tertiary">
@@ -258,6 +300,7 @@ export const MergedEntriesBadge = ({
             aria-label={t("processing.duplicates.title")}
             onClick={stopEntryNavigation}
             onPointerDown={stopEntryNavigation}
+            onKeyDown={stopEntryNavigation}
           >
             <DuplicateEntriesPanel
               entryId={entryId}

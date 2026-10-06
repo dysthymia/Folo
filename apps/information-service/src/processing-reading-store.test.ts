@@ -338,11 +338,13 @@ describe("语义去重包含链角色", () => {
       expect.objectContaining({
         itemId: "C",
         inputSeq: c.seq,
-        reason: "保留方包含隐藏方全部事实",
+        reason: expect.stringContaining("《来源 C》 → 《来源 B》"),
         canRestore: true,
         overrideRevision: 0,
       }),
     ])
+    // 包含链展开到最终代表，不能把 C/B 的比较理由错误标成 C/A 的直接证据。
+    expect(first.members[0]!.reason).toContain("《来源 B》 → 《来源 A》")
     const second = processingApi(store, "POST", `/processing/entries/${a.seq}/duplicates`, {
       offset: 1,
       limit: 1,
@@ -371,6 +373,7 @@ describe("语义去重包含链角色", () => {
     expect(store.automation.inputs().map((input) => input.body)).toEqual(before)
     expect(store.entry(source.key, "C")?.read).toBe(true)
     expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(2)
+    expect(rolesOf(store).find((role) => role.inputSeq === c.seq)?.kind).toBe("restored")
   })
 
   it.each(["merged", "withdrawn", "source", "version"] as const)(

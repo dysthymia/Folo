@@ -30,6 +30,11 @@ vi.mock("@follow/store/entry/processing-role", () => ({
   useEntryProcessingRoleRelatedEntries: () => mocks.cachedEntries,
   useEntryProcessingRolesRevision: () => mocks.revision,
 }))
+vi.mock("@follow/store/entry/hooks", () => ({
+  // 列表已加载保留篇，首屏不应为它再发网络请求。
+  useEntry: (_id: string, selector: (entry: { title: string; url: string }) => unknown) =>
+    selector({ title: "本地保留报道", url: "https://example.test/a" }),
+}))
 vi.mock("@follow/store/user/hooks", () => ({ useWhoami: () => ({ id: mocks.owner }) }))
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock("./processing-duplicates-client", () => ({ loadDuplicateGroup: mocks.load }))
@@ -171,11 +176,16 @@ describe("重复角标与组明细", () => {
     )
     await open()
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("本地报道")
+    // 保留篇和原文地址先使用本地数据，详情回包后再更新标题。
+    const retained = document.querySelector('a[href="https://example.test/a"]')!
+    expect(retained.textContent).toBe("本地保留报道")
+    expect(retained.getAttribute("target")).toBe("_blank")
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       "processing.duplicates.loading",
     )
-    expect(button("processing.reader.override.restore")).toBeUndefined()
+    expect(button("processing.duplicates.keep_separate")).toBeUndefined()
     await act(async () => resolve(group()))
+    expect(document.querySelector('a[href="https://example.test/a"]')?.textContent).toBe("代表")
     await click(container.querySelector("button")!)
     await click(container.querySelector("button")!)
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("原文 b")
@@ -203,12 +213,12 @@ describe("重复角标与组明细", () => {
     const explanation = document.querySelector("details")!
     expect(explanation.textContent).toContain("已同步的完整覆盖理由")
     explanation.open = true
-    expect(button("processing.reader.override.restore")).toBeUndefined()
+    expect(button("processing.duplicates.keep_separate")).toBeUndefined()
     await act(async () => resolve(group()))
     expect(document.querySelector("details")).toBe(explanation)
     expect(explanation.open).toBe(true)
     expect(explanation.textContent).toContain("全部事实已被代表覆盖")
-    expect(button("processing.reader.override.restore")).toBeDefined()
+    expect(button("processing.duplicates.keep_separate")).toBeDefined()
   })
 
   it("关系版本变化或账号切换后重新读取，不复用旧详情", async () => {
@@ -279,14 +289,47 @@ describe("重复角标与组明细", () => {
   it("逐条恢复携带已读取覆盖版本，失败保留列表并允许重试，成功重读组", async () => {
     mocks.restore.mockResolvedValueOnce(false)
     await open()
-    await click(button("processing.reader.override.restore"))
+    await click(button("processing.duplicates.keep_separate"))
     expect(mocks.restore).toHaveBeenCalledWith(2, "restore", 7)
     expect(mocks.load).toHaveBeenCalledTimes(1)
     expect(document.body.textContent).toContain("原文 b")
     mocks.load.mockResolvedValueOnce(group(["c"]))
-    await click(button("processing.reader.override.restore"))
+    await click(button("processing.duplicates.keep_separate"))
     expect(document.body.textContent).not.toContain("原文 b")
     expect(document.body.textContent).toContain("原文 c")
+  })
+
+  it("手动保留标识可点击打开并就地恢复自动处理，不跳转文章", async () => {
+    mocks.role = {
+      kind: "restored",
+      source: "service",
+      inputSeq: 2,
+      reason: null,
+      relatedEntryIds: [],
+    }
+    await open()
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      "processing.badge.restored_hint",
+    )
+    // 模拟真实时间线在 html 上注册的 Enter 快捷键，不能拦截按钮的原生激活。
+    const shortcut = vi.fn((event: Event) => event.preventDefault())
+    document.documentElement.addEventListener("keydown", shortcut)
+    try {
+      const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
+      await act(async () => container.querySelector("button")!.dispatchEvent(event))
+      expect(shortcut).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    } finally {
+      document.documentElement.removeEventListener("keydown", shortcut)
+    }
+    await click(button("processing.badge.back_to_automatic"))
+    expect(mocks.restore).toHaveBeenCalledWith(2, "automatic")
+    expect(mocks.load).not.toHaveBeenCalled()
+    expect(mocks.navigate).not.toHaveBeenCalled()
+    // 恢复自动后角色变更，旧弹层不能继续留下撤销入口。
+    mocks.role = null
+    await render()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it("分页失败可重试；组版本冲突会刷新首屏而不是追加旧成员", async () => {
@@ -345,7 +388,7 @@ describe("重复角标与组明细", () => {
       await render()
       return true
     })
-    await click(button("processing.reader.override.restore"))
+    await click(button("processing.duplicates.keep_separate"))
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       "processing.duplicates.complete",
     )

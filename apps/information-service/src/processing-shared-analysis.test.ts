@@ -263,6 +263,7 @@ async function process(options: ReturnType<typeof fixture>, execute: ReturnType<
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   for (const store of stores.splice(0)) store.close()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
@@ -306,6 +307,35 @@ describe("共享材料与规则分析", () => {
       const restored = new SharedAnalysisSession(options)
       await restored.restore(options.store.automation.inputs())
       expect(restored.dedupeEvaluations).toEqual([])
+      // 重建共享会话后只补缺失关系；推进时钟验证真实新执行对应第二次尝试。
+      const fingerprints = new Set(
+        options.sharedAnalysis.dedupeEvaluations.map((item) => item.configFingerprint),
+      )
+      const firstAttempt = options.store.dedupe.unresolvedDecisions(fingerprints)[0]!
+      const supplement = vi.fn(async <T>(request: CodexJsonOptions<T>) => ({
+        result: { results: [] } as T,
+        model: request.model,
+        durationMs: 1,
+        usage: null,
+        toolCalls: 0,
+      }))
+      const retry = () =>
+        runSemanticDedupe({
+          ...options,
+          signal: new AbortController().signal,
+          preparedEvaluations: restored.dedupeEvaluations,
+          execute: supplement as typeof runCodexJson,
+        })
+      await retry()
+      expect(supplement).not.toHaveBeenCalled()
+      vi.useFakeTimers({ toFake: ["Date"] })
+      vi.setSystemTime(Date.parse(firstAttempt.createdAt) + 61_000)
+      await retry()
+      expect(supplement).toHaveBeenCalledTimes(1)
+      expect(options.store.dedupe.unresolvedDecisions(fingerprints)[0]?.attempts).toBe(2)
+      vi.setSystemTime(Date.parse(firstAttempt.createdAt) + 122_000)
+      await retry()
+      expect(supplement).toHaveBeenCalledTimes(1)
     },
   )
   it("共享请求失败仍报告真实用量，未知用量单独计数", async () => {
@@ -437,6 +467,18 @@ describe("共享材料与规则分析", () => {
       file,
       body: readFileSync(join(cacheDir, file), "utf8"),
     }))
+    // 模拟旧版联合缓存把低把握否定写成 decided，重启后仍须归为不确定。
+    for (const original of originals) {
+      const cached = JSON.parse(original.body) as {
+        dedupe: Array<{ evaluation: { status: string; confidence: number; duplicate: boolean } }>
+      }
+      for (const item of cached.dedupe)
+        Object.assign(item.evaluation, { status: "decided", confidence: 0.1, duplicate: false })
+      writeFileSync(join(cacheDir, original.file), JSON.stringify(cached))
+    }
+    const lowConfidence = new SharedAnalysisSession(options)
+    await lowConfidence.restore(options.store.automation.inputs())
+    expect(lowConfidence.dedupeEvaluations[0]?.evaluation.status).toBe("uncertain")
     for (const file of readdirSync(cacheDir))
       writeFileSync(
         join(cacheDir, file),

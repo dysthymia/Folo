@@ -1,3 +1,4 @@
+import { useEntry } from "@follow/store/entry/hooks"
 import type { EntryProcessingRelatedEntry } from "@follow/store/entry/processing-role"
 import { useEntryProcessingRole } from "@follow/store/entry/processing-role"
 import { useWhoami } from "@follow/store/user/hooks"
@@ -36,6 +37,9 @@ export function DuplicateEntriesPanel({
   const ownerRef = useRef(owner)
   ownerRef.current = owner
   const role = useEntryProcessingRole(entryId)
+  // 保留篇已在当前列表里，标题与原文入口同样无需等待详情网络请求。
+  const localTitle = useEntry(entryId, (entry) => entry.title)
+  const localUrl = useEntry(entryId, (entry) => entry.url)
   // 本组投影才决定详情身份，避免全局轮询或其他条目发布结果触发重复读取。
   const revision = JSON.stringify([role, cachedEntries])
   const active = role?.kind === "keeper" && role.inputSeq === inputSeq
@@ -49,6 +53,8 @@ export function DuplicateEntriesPanel({
     group: cachedDuplicateGroup(owner, cacheKey),
   }))
   const group = result.key === cacheKey ? result.group : null
+  const representativeTitle = group?.representative.title ?? localTitle
+  const representativeUrl = group?.representative.url ?? localUrl
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState(false)
   const [restored, setRestored] = useState(false)
@@ -151,6 +157,25 @@ export function DuplicateEntriesPanel({
       <div>
         <h3 className="text-sm font-semibold">{t("processing.duplicates.title")}</h3>
         <p className="mt-1 text-xs text-text-secondary">{t("processing.duplicates.hint")}</p>
+        <div className="mt-2 rounded bg-fill-secondary p-2">
+          <p className="text-[11px] text-text-secondary">
+            {t("processing.duplicates.representative")}
+          </p>
+          <p className="mt-1 break-words text-xs font-medium">
+            {representativeUrl ? (
+              <a
+                href={representativeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-accent hover:underline focus-visible:underline"
+              >
+                {representativeTitle ?? t("processing.duplicates.representative_loading")}
+              </a>
+            ) : (
+              (representativeTitle ?? t("processing.duplicates.representative_loading"))
+            )}
+          </p>
+        </div>
         <p className="mt-1 text-xs text-text-tertiary">
           {t("processing.duplicates.total", { count: group?.total ?? memberIds.length })}
         </p>
@@ -185,7 +210,7 @@ export function DuplicateEntriesPanel({
             {member.reason && (
               <details className="mt-2 text-xs text-text-secondary">
                 <summary className="cursor-button">{t("processing.duplicates.reason")}</summary>
-                <p className="mt-1 break-words">{member.reason}</p>
+                <p className="mt-1 whitespace-pre-line break-words">{member.reason}</p>
               </details>
             )}
             <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -226,7 +251,7 @@ export function DuplicateEntriesPanel({
                       }
                     }}
                   >
-                    {t("processing.reader.override.restore")}
+                    {t("processing.duplicates.keep_separate")}
                   </button>
                 )}
             </div>

@@ -353,6 +353,18 @@ ${JSON.stringify({ candidates: pairs, documents })}
 `
 }
 
+/** 新旧缓存共用确定结论资格；低把握结果保留双方，不触发周期性付费重试。 */
+export function semanticDuplicateEvaluationStatus(
+  evaluation: Pick<SemanticDuplicateEvaluation, "status" | "verdict" | "confidence">,
+): SemanticDuplicateEvaluationStatus {
+  const status = evaluation.status ?? (evaluation.verdict === "uncertain" ? "uncertain" : "decided")
+  return status === "decided" &&
+    (!Number.isFinite(evaluation.confidence) ||
+      evaluation.confidence < SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD)
+    ? "uncertain"
+    : status
+}
+
 function normalizeEvaluation(
   candidateByPairKey: Map<string, SemanticDuplicateCandidate>,
   evaluation: SemanticDuplicateModelOutput["results"][number],
@@ -416,15 +428,16 @@ function normalizeEvaluation(
     !consistent || (!covered && !["different", "uncertain"].includes(comparison.verdict))
       ? "invalid_result"
       : comparison.verdict === "uncertain" ||
-          (covered &&
-            (!evaluation.duplicate || confidence < SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD))
+          confidence < SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD ||
+          (covered && !evaluation.duplicate)
         ? "uncertain"
         : "decided"
   const duplicate =
     status === "decided" && evaluation.duplicate && covered && completeContent(candidate)
   const differences = [
-    ...comparison.onlyInFirst.map((quote) => `第一条独有：${quote}`),
-    ...comparison.onlyInSecond.map((quote) => `第二条独有：${quote}`),
+    // 用实际材料标题解释差异，不把模型内部顺序交给读者猜测。
+    ...comparison.onlyInFirst.map((quote) => `《${candidate.entries[0].title}》独有：${quote}`),
+    ...comparison.onlyInSecond.map((quote) => `《${candidate.entries[1].title}》独有：${quote}`),
   ]
   // 把新增信息证据留在现有报告中，便于核查，不需要改动原文或新增数据库表。
   const reason =

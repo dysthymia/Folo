@@ -1378,10 +1378,13 @@ export class ProcessingReadingStore {
     const keeperMergedIds = new Map<number, string[]>()
     for (const [hideSeq, merge] of directMerges) {
       let keepSeq = merge.keep.seq
+      const path = [merge]
       const visited = new Set([hideSeq])
       while (directMerges.has(keepSeq) && !visited.has(keepSeq)) {
         visited.add(keepSeq)
-        keepSeq = directMerges.get(keepSeq)!.keep.seq
+        const next = directMerges.get(keepSeq)!
+        path.push(next)
+        keepSeq = next.keep.seq
       }
       // 矛盾判定形成环时没有可见代表，不能把环中所有原文隐藏。
       if (visited.has(keepSeq)) continue
@@ -1391,7 +1394,14 @@ export class ProcessingReadingStore {
         itemId: hideInput.itemId,
         inputSeq: hideSeq,
         kind: "merged",
-        reason: merge.reason,
+        // 逐段展示实际比较对象；包含链的单条边不能冒充与最终代表的直接比较。
+        reason: path
+          .map((edge) =>
+            [`《${edge.hide.body.title}》 → 《${edge.keep.body.title}》`, edge.reason]
+              .filter(Boolean)
+              .join("\n"),
+          )
+          .join("\n\n"),
         relatedEntryIds: [keepInput.itemId],
         storyId: null,
         storyTitle: null,
@@ -1419,12 +1429,9 @@ export class ProcessingReadingStore {
       const override = overrides.get(input.seq)
       if (override?.mode !== "restore") continue
       if (!publishedBySeq.has(input.seq)) continue
-      const current = roles.get(input.seq)
-      // 恢复本身已经让它不再被隐藏，所以「由决定隐藏」的条目在这里不会留下 hidden 角色。
-      // 要按「若没有这次恢复会被隐藏」来判定，否则恢复只让条目悄悄回到列表、看不出效果。
-      const wouldBeHidden = this.entryHidden(undefined, publishedBySeq.get(input.seq)?.decision)
-      if (!current && !wouldBeHidden) continue
-      if (current && current.kind !== "hidden" && current.kind !== "merged") continue
+      // 可见综述代表保留阅读入口；恢复标识只替换独立报道的隐藏或空角色。
+      if (roles.get(input.seq)?.kind === "story") continue
+      // 有效人工覆盖本身就是标识依据；去重已排除恢复项，不能再依赖残留的 merged 角色。
       roles.set(input.seq, {
         itemId: input.itemId,
         inputSeq: input.seq,

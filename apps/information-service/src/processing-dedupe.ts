@@ -30,6 +30,7 @@ import {
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
   SEMANTIC_DUPLICATE_PROMPT_VERSION,
+  semanticDuplicateEvaluationStatus,
   semanticDuplicateEvaluationStatuses,
   semanticDuplicatePairKey,
   truncateDedupeDescription,
@@ -245,7 +246,11 @@ export class ProcessingDedupeStore {
     try {
       const parsed = relationEvaluationSchema.safeParse(JSON.parse(String(row.evaluation_json)))
       if (!parsed.success || parsed.data.pairKey !== candidate.pairKey) return null
-      return { evaluation: parsed.data, model: String(row.model), provider: String(row.provider) }
+      return {
+        evaluation: { ...parsed.data, status: semanticDuplicateEvaluationStatus(parsed.data) },
+        model: String(row.model),
+        provider: String(row.provider),
+      }
     } catch {
       return null
     }
@@ -263,7 +268,7 @@ export class ProcessingDedupeStore {
       )
       .run(
         semanticDedupeEvidenceKey(candidate),
-        JSON.stringify(parsed.data),
+        JSON.stringify({ ...parsed.data, status: semanticDuplicateEvaluationStatus(parsed.data) }),
         relation.model,
         relation.provider,
       )
@@ -341,9 +346,13 @@ export class ProcessingDedupeStore {
         hide: hide ?? null,
         keep: keep ?? null,
         keepReference: Boolean(row.keep_reference),
-        status:
-          semanticDuplicateEvaluationStatuses.find((status) => status === row.evaluation_status) ??
-          "uncertain",
+        status: semanticDuplicateEvaluationStatus({
+          confidence: Number(row.confidence),
+          status:
+            semanticDuplicateEvaluationStatuses.find(
+              (status) => status === row.evaluation_status,
+            ) ?? "uncertain",
+        }),
         attempts: Number(row.attempts),
         createdAt: String(row.created_at),
         pairKey: String(row.pair_key),
@@ -528,8 +537,7 @@ export class ProcessingDedupeStore {
           hide.seq,
           hide.generation,
           Number(item.keepReference ?? false),
-          item.evaluation.status ??
-            (item.evaluation.verdict === "uncertain" ? "uncertain" : "decided"),
+          semanticDuplicateEvaluationStatus(item.evaluation),
           (previous.get(item.candidate.pairKey)?.attempts ?? 0) + 1,
         )
         saved.add(item.candidate.pairKey)
@@ -1125,26 +1133,59 @@ export function exactDuplicateDecisions(participants: DedupeParticipant[]) {
     else groups.set(key, [participant])
   }
   return [...groups.values()].flatMap((group) => {
+    const at = (participant: DedupeParticipant) => {
+      const time = Date.parse(participant.input.body.publishedAt)
+      return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY
+    }
     const ordered = group.sort(
       (left, right) =>
-        Number(right.readReference) - Number(left.readReference) ||
-        Date.parse(left.input.body.publishedAt) - Date.parse(right.input.body.publishedAt),
+        Number(right.readReference) - Number(left.readReference) || at(left) - at(right),
     )
-    const keep = ordered[0]!
-    return ordered
-      .slice(1)
-      .filter(
-        (hide) =>
-          !hide.readReference &&
-          hide.input.itemId !== keep.input.itemId &&
-          // 同一原文可以延迟进入不同订阅；跨原文的旧模板重发不能直接折叠。
-          (contentIdentity(keep.input.body) === contentIdentity(hide.input.body) ||
-            isWithinDedupeWindow(
-              Date.parse(keep.input.body.publishedAt),
-              Date.parse(hide.input.body.publishedAt),
-            )),
-      )
-      .map((hide) => ({
+    const references = ordered.filter((item) => item.readReference && Number.isFinite(at(item)))
+    const representatives: DedupeParticipant[] = []
+    const byIdentity = new Map<string, DedupeParticipant>()
+    for (const reference of ordered.filter((item) => item.readReference)) {
+      const identity = contentIdentity(reference.input.body)
+      if (!byIdentity.has(identity)) byIdentity.set(identity, reference)
+    }
+    // 二分查找当前时间窗最早的可见代表，旧时间簇不能阻挡后来的同文组。
+    const withinWindow = (items: DedupeParticipant[], hide: DedupeParticipant) => {
+      const time = at(hide)
+      if (!Number.isFinite(time)) return undefined
+      let left = 0
+      let right = items.length
+      while (left < right) {
+        const middle = Math.floor((left + right) / 2)
+        const candidateAt = at(items[middle]!)
+        if (candidateAt < time && !isWithinDedupeWindow(candidateAt, time)) left = middle + 1
+        else right = middle
+      }
+      // 同一条目不与自己建立关系；已读参考始终保留，不作为隐藏目标。
+      if (items[left]?.input.itemId === hide.input.itemId) left++
+      const keep = items[left]
+      return keep && isWithinDedupeWindow(at(keep), time) ? keep : undefined
+    }
+    const decisions: Array<{
+      candidate: SemanticDuplicateCandidate
+      evaluation: SemanticDuplicateEvaluation
+      keep: ProcessingInput
+      keepReference?: boolean
+      hide: ProcessingInput
+    }> = []
+    for (const hide of ordered.filter((item) => !item.readReference)) {
+      const identity = contentIdentity(hide.input.body)
+      const same = byIdentity.get(identity)
+      const original = same?.input.itemId !== hide.input.itemId ? same : undefined
+      // 同一原文的延迟转载沿用身份例外；跨原文优先采用窗内已读参考。
+      const keep = original?.readReference
+        ? original
+        : (withinWindow(references, hide) ?? original ?? withinWindow(representatives, hide))
+      if (!keep) {
+        if (!byIdentity.has(identity)) byIdentity.set(identity, hide)
+        if (Number.isFinite(at(hide))) representatives.push(hide)
+        continue
+      }
+      decisions.push({
         candidate: {
           entries: [keep.entry, hide.entry] as [SemanticDuplicateEntry, SemanticDuplicateEntry],
           keepEntryId: keep.entry.itemId,
@@ -1164,6 +1205,8 @@ export function exactDuplicateDecisions(participants: DedupeParticipant[]) {
         keep: keep.input,
         keepReference: keep.readReference,
         hide: hide.input,
-      }))
+      })
+    }
+    return decisions
   })
 }
