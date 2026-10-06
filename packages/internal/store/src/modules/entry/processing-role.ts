@@ -45,6 +45,8 @@ export interface EntryProcessingRole {
    * 不用再为时间线单独查一次映射表。
    */
   inputSeq?: number
+  /** 服务端完整材料数，不受当前浏览器已加载条目数影响。 */
+  materialCount?: number
   /**
    * Title of the service story this entry belongs to. Only the service side
    * produces stories, so it is absent for local dedupe roles.
@@ -64,6 +66,16 @@ export interface EntryProcessingServiceRole {
   storyId?: string
   storyTitle?: string
   inputSeq?: number
+  /** 服务端完整材料数，不受当前浏览器已加载条目数影响。 */
+  materialCount?: number
+  /** 服务端列表携带的轻量预览，弥补本地尚未加载的折叠报道。 */
+  relatedEntryPreviews?: Array<{
+    itemId: string
+    title: string | null
+    sourceTitle: string | null
+    publishedAt: string | null
+    url: string | null
+  }>
 }
 
 export interface EntryProcessingRelatedEntry {
@@ -72,6 +84,8 @@ export interface EntryProcessingRelatedEntry {
   publishedAt: Date | null
   title: string
   url: string | null
+  /** 当前服务角色已核验的折叠理由；展示不再等待详情接口。 */
+  reason?: string | null
 }
 
 export interface ResolveEntryProcessingRoleOptions {
@@ -111,7 +125,10 @@ export const entryProcessingRoleActions = {
   },
   replaceServiceRoles: (roles: EntryProcessingServiceRole[]) => {
     set((state) => {
-      state.serviceRoles = Object.fromEntries(roles.map((role) => [role.entryId, role]))
+      const serviceRoles = Object.fromEntries(roles.map((role) => [role.entryId, role]))
+      // 轮询返回相同角色时不制造新版本，避免重复明细缓存无故失效和弹窗重读。
+      if (JSON.stringify(state.serviceRoles) === JSON.stringify(serviceRoles)) return
+      state.serviceRoles = serviceRoles
       state.revision += 1
     })
   },
@@ -164,6 +181,9 @@ export const resolveEntryProcessingRole = (
       ...(serviceRole.storyId ? { storyId: serviceRole.storyId } : {}),
       ...(serviceRole.storyTitle ? { storyTitle: serviceRole.storyTitle } : {}),
       ...(serviceRole.inputSeq ? { inputSeq: serviceRole.inputSeq } : {}),
+      ...(serviceRole.materialCount !== undefined
+        ? { materialCount: serviceRole.materialCount }
+        : {}),
     }
   }
 
@@ -195,8 +215,39 @@ export const getEntryProcessingRoleRelatedEntries = (
   for (const relatedEntryId of role.relatedEntryIds) {
     if (seenEntryIds.has(relatedEntryId)) continue
 
+    // 两侧必须属于同一服务关系，不能把其他代表或综述的理由套到本组。
+    const memberRole = useEntryProcessingRoleStore.getState().serviceRoles[relatedEntryId]
+    const explanation =
+      role.source === "service" &&
+      role.kind === "keeper" &&
+      memberRole?.kind === "merged" &&
+      !memberRole.storyId &&
+      memberRole.relatedEntryIds?.includes(entryId)
+        ? { reason: memberRole.reason ?? null }
+        : {}
     const entry = getEntry(relatedEntryId)
-    if (!entry) continue
+    if (!entry) {
+      const preview =
+        role.source === "service"
+          ? useEntryProcessingRoleStore
+              .getState()
+              .serviceRoles[entryId]?.relatedEntryPreviews?.find(
+                (entry) => entry.itemId === relatedEntryId,
+              )
+          : undefined
+      if (preview || explanation.reason) {
+        seenEntryIds.add(relatedEntryId)
+        relatedEntries.push({
+          id: relatedEntryId,
+          title: preview?.title ?? relatedEntryId,
+          feedTitle: preview?.sourceTitle ?? "",
+          publishedAt: preview?.publishedAt ? new Date(preview.publishedAt) : null,
+          url: preview?.url ?? null,
+          ...explanation,
+        })
+      }
+      continue
+    }
 
     seenEntryIds.add(relatedEntryId)
 
@@ -204,6 +255,7 @@ export const getEntryProcessingRoleRelatedEntries = (
     const subscription = getSubscriptionByEntryId(entry.id)
 
     relatedEntries.push({
+      ...explanation,
       feedTitle: subscription?.title || feed?.title || "",
       id: entry.id,
       publishedAt: entry.publishedAt ?? null,

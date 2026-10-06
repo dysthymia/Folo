@@ -33,7 +33,11 @@ export function useProcessingEntryOverride() {
   }, [owner])
 
   const setMode = useCallback(
-    async (inputSeq: number, mode: ProcessingEntryOverrideMode): Promise<boolean> => {
+    async (
+      inputSeq: number,
+      mode: ProcessingEntryOverrideMode,
+      expectedRevision?: number,
+    ): Promise<boolean> => {
       if (!owner) return false
       requestRef.current?.abort()
       setBusy(true)
@@ -42,15 +46,17 @@ export function useProcessingEntryOverride() {
       requestRef.current = controller
       const current = () => !controller.signal.aborted && ownerRef.current === owner
       try {
-        const overrides = await loadEntryOverrides(controller.signal)
+        // 组内已读取版本时不再加载全库覆盖；旧调用方仍走原有版本查询。
+        const overrides =
+          expectedRevision === undefined ? await loadEntryOverrides(controller.signal) : null
         // 账号切换后不能用旧条目版本继续提交下一步人工覆盖。
         if (!current()) return false
-        const expectedRevision = overrides.get(inputSeq)?.override?.revision ?? 0
+        const revision = expectedRevision ?? overrides?.get(inputSeq)?.override?.revision ?? 0
         await readingRequest(
           `processing/entries/${inputSeq}/override`,
           mutationSchemas.override,
           controller.signal,
-          { mode, expectedRevision },
+          { mode, expectedRevision: revision },
         )
         if (!current()) return false
         await refreshServiceProcessingRoles(controller.signal)

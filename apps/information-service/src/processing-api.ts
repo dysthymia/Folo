@@ -6,6 +6,7 @@ import type { SourceEntry } from "./folo"
 import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
+import { processingDuplicateGroup } from "./processing-duplicates"
 import { processingFeedbackApi } from "./processing-feedback-api"
 import { processListLoaded } from "./processing-list-load"
 import type {
@@ -413,6 +414,27 @@ export function processingApi(
   }
   if (path === "/processing/entries" && method === "GET")
     return { entries: entryView(store) } satisfies ProcessingEntryListResponse
+
+  const duplicateGroupPath = /^\/processing\/entries\/(\d+)\/duplicates$/.exec(path)
+  if (duplicateGroupPath && (method === "GET" || method === "POST")) {
+    owner(store)
+    const page = z
+      .object({
+        offset: revision.default(0),
+        limit: positiveInteger.max(50).default(20),
+        expectedFingerprint: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/u)
+          .optional(),
+      })
+      .strict()
+      .parse(method === "POST" ? body : {})
+    return processingDuplicateGroup(
+      store,
+      positiveInteger.parse(Number(duplicateGroupPath[1])),
+      page,
+    )
+  }
 
   const entryDetailPath = /^\/processing\/entries\/(\d+)$/.exec(path)
   if (entryDetailPath && method === "GET") {

@@ -22,6 +22,21 @@ const entryRoleSchema = z
     storyTitle: z.string().nullable(),
     // 新服务提供材料计数；旧服务仍可不返回，避免升级期间丢弃整个角色投影。
     materialCount: z.number().int().nonnegative().optional(),
+    // 预览仅含前几篇的元信息，旧服务缺省时仍可使用浏览器已有条目。
+    relatedEntryPreviews: z
+      .array(
+        z
+          .object({
+            itemId: z.string().min(1),
+            title: z.string().nullable(),
+            sourceTitle: z.string().nullable(),
+            publishedAt: z.string().nullable(),
+            url: z.string().nullable(),
+          })
+          .strict(),
+      )
+      .max(5)
+      .optional(),
   })
   .strict()
 export const processingEntryRolesResponseSchema = z
@@ -46,6 +61,8 @@ export function toServiceProcessingRoles(
     reason: role.reason,
     relatedEntryIds: role.relatedEntryIds,
     inputSeq: role.inputSeq,
+    ...(role.materialCount !== undefined ? { materialCount: role.materialCount } : {}),
+    ...(role.relatedEntryPreviews ? { relatedEntryPreviews: role.relatedEntryPreviews } : {}),
     ...(role.storyId ? { storyId: role.storyId } : {}),
     ...(role.storyTitle ? { storyTitle: role.storyTitle } : {}),
   }))

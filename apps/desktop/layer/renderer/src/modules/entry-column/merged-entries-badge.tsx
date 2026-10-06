@@ -3,12 +3,15 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@follow/components/ui/hover-card/index.js"
+import { Popover, PopoverContent, PopoverTrigger } from "@follow/components/ui/popover/index.js"
 import {
   useEntryProcessingRole,
   useEntryProcessingRoleRelatedEntries,
 } from "@follow/store/entry/processing-role"
+import { useWhoami } from "@follow/store/user/hooks"
 import { cn } from "@follow/utils/utils"
 import type { MouseEvent, PointerEvent } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { RelativeTime } from "~/components/ui/datetime"
@@ -20,6 +23,8 @@ import { smartReadingPath } from "~/modules/information/reading-mode-link"
 import { StoryDigestPanel } from "~/modules/information/StoryDigestPanel"
 
 import { processingButtonClass } from "../action/processing-condition-editor"
+import { DuplicateEntriesPanel } from "./DuplicateEntriesPanel"
+import { cachedDuplicateGroup, duplicateGroupCacheKey } from "./processing-duplicates-cache"
 import { useProcessingEntryOverride } from "./processing-entry-override"
 
 const stopEntryNavigation = (event: MouseEvent | PointerEvent) => {
@@ -45,7 +50,8 @@ const chipClass = (className?: string) =>
  * - `story`：综述代表条目，就地打开综述摘要（来源数、句段引用、更新时间），不跳页。
  * - `hidden`：显式隐藏，悬停给出命中规则并可就地恢复。
  * - `restored`：被用户手动恢复，标注出来，否则「恢复」在界面上看不出效果。
- * - `keeper`/`merged`：沿用原有的「+N」合并角标。
+ * - `keeper`：完整关系计数的「+N」角标，点击展开组员并逐条恢复。
+ * - `merged`：在代表条目中查看，不误把代表身份计作折叠数量。
  */
 export const MergedEntriesBadge = ({
   className,
@@ -59,11 +65,28 @@ export const MergedEntriesBadge = ({
   const role = useEntryProcessingRole(entryId)
   const processingResult = useProcessingEntryResult(entryId)
   const mergedEntries = useEntryProcessingRoleRelatedEntries(entryId)
+  // 只跟随本组身份和元信息；其他文章的后台处理不能让当前组缓存失效。
+  const revision = JSON.stringify([role, mergedEntries])
+  const owner = useWhoami()?.id
+  const [duplicateOpen, setDuplicateOpen] = useState(false)
+  const [duplicateHover, setDuplicateHover] = useState(false)
+  const [openingInputSeq, setOpeningInputSeq] = useState<number | undefined>()
+  useEffect(() => {
+    setDuplicateOpen(false)
+    setDuplicateHover(false)
+  }, [entryId, owner])
   const { setMode, busy, failed } = useProcessingEntryOverride()
   const isStory = role?.kind === "story" && Boolean(role.storyId)
   const isHidden = role?.kind === "hidden"
   const isRestored = role?.kind === "restored"
   const inputSeq = role?.inputSeq
+  // 计数来自完整关系身份，浏览器尚未缓存的条目也应计入 +N。
+  const memberIds = [...new Set(role?.relatedEntryIds ?? [])].filter((id) => id !== entryId)
+  const duplicateCount = role?.kind === "keeper" ? memberIds.length : 0
+  const cachedGroup = cachedDuplicateGroup(
+    owner,
+    duplicateGroupCacheKey(inputSeq, entryId, memberIds, revision),
+  )
 
   const openDigest = () => {
     if (!role?.storyId) return
@@ -93,7 +116,7 @@ export const MergedEntriesBadge = ({
     })
   }
 
-  if (!isStory && !isHidden && !isRestored && mergedEntries.length === 0)
+  if (!isStory && !isHidden && !isRestored && duplicateCount === 0 && !duplicateOpen)
     return processingResult ? (
       <button
         type="button"
@@ -167,10 +190,90 @@ export const MergedEntriesBadge = ({
     )
   }
 
-  const sourceCount = mergedEntries.length + 1
+  if (!isStory)
+    return (
+      <HoverCard
+        open={duplicateHover && !duplicateOpen}
+        onOpenChange={setDuplicateHover}
+        openDelay={120}
+        closeDelay={120}
+      >
+        <Popover open={duplicateOpen} onOpenChange={setDuplicateOpen}>
+          <HoverCardTrigger asChild>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("processing.badge.merged_entries", { count: duplicateCount })}
+                className={chipClass(cn("cursor-button", className))}
+                onPointerDown={stopEntryNavigation}
+                onClick={(event) => {
+                  preventEntryNavigation(event)
+                  setDuplicateHover(false)
+                  if (!duplicateOpen) setOpeningInputSeq(inputSeq)
+                  setDuplicateOpen(!duplicateOpen)
+                }}
+              >
+                <span className="tabular-nums">
+                  {duplicateCount ? `+${duplicateCount}` : t("processing.duplicates.title")}
+                </span>
+              </button>
+            </PopoverTrigger>
+          </HoverCardTrigger>
+          {/* 悬停只读已有元信息，不触发请求；点击才展开可操作的完整详情。 */}
+          <HoverCardContent
+            align="end"
+            side="top"
+            className="w-80 p-3 text-xs"
+            onClick={stopEntryNavigation}
+            onPointerDown={stopEntryNavigation}
+          >
+            <p className="font-semibold">{t("processing.duplicates.title")}</p>
+            <p className="mt-1 text-text-tertiary">
+              {t("processing.duplicates.total", { count: duplicateCount })}
+            </p>
+            <div className="mt-2 max-h-60 space-y-2 overflow-y-auto">
+              {memberIds.slice(0, 5).map((id) => {
+                const detail = cachedGroup?.members.find((member) => member.itemId === id)
+                const entry = mergedEntries.find((entry) => entry.id === id)
+                return (
+                  <div key={id}>
+                    <p className="line-clamp-2 font-medium">
+                      {detail?.title ?? entry?.title ?? t("processing.duplicates.unavailable")}
+                    </p>
+                    <p className="mt-1 truncate text-[11px] text-text-tertiary">
+                      {detail?.sourceTitle ?? entry?.feedTitle}
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="mt-2 text-text-secondary">{t("processing.duplicates.preview_hint")}</p>
+          </HoverCardContent>
+          <PopoverContent
+            align="end"
+            side="bottom"
+            // 长折叠理由按当前侧实际可用高度滚动，避免弹窗标题被顶出视口。
+            className="max-h-[min(32rem,var(--radix-popover-content-available-height))] w-96 max-w-[calc(100vw-2rem)] overflow-y-auto p-0"
+            collisionPadding={8}
+            aria-label={t("processing.duplicates.title")}
+            onClick={stopEntryNavigation}
+            onPointerDown={stopEntryNavigation}
+          >
+            <DuplicateEntriesPanel
+              entryId={entryId}
+              inputSeq={openingInputSeq}
+              memberIds={memberIds}
+              cachedEntries={mergedEntries}
+            />
+          </PopoverContent>
+        </Popover>
+      </HoverCard>
+    )
+
+  const sourceCount = role?.materialCount ?? memberIds.length + 1
   const label = isStory
-    ? t("processing.badge.story_related", { count: mergedEntries.length })
-    : t("processing.badge.merged_entries", { count: mergedEntries.length })
+    ? t("processing.badge.story_related", { count: Math.max(0, sourceCount - 1) })
+    : t("processing.badge.merged_entries", { count: duplicateCount })
 
   return (
     <HoverCard openDelay={120} closeDelay={120}>
@@ -186,7 +289,7 @@ export const MergedEntriesBadge = ({
           type="button"
         >
           {isStory ? t("processing.badge.story") : null}
-          <span className="tabular-nums">{isStory ? sourceCount : `+${mergedEntries.length}`}</span>
+          <span className="tabular-nums">{sourceCount}</span>
         </button>
       </HoverCardTrigger>
       <HoverCardContent

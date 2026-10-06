@@ -283,6 +283,67 @@ describe("entry processing role", () => {
     ])
   })
 
+  it("相同轮询结果保留角色版本，关系变化才递增版本", () => {
+    const roles = [{ entryId: "entry-a", kind: "keeper" as const, relatedEntryIds: ["entry-b"] }]
+    entryProcessingRoleActions.replaceServiceRoles(roles)
+    const revision = useEntryProcessingRoleStore.getState().revision
+    entryProcessingRoleActions.replaceServiceRoles(structuredClone(roles))
+    expect(useEntryProcessingRoleStore.getState().revision).toBe(revision)
+    entryProcessingRoleActions.replaceServiceRoles([{ ...roles[0]!, relatedEntryIds: ["entry-c"] }])
+    expect(useEntryProcessingRoleStore.getState().revision).toBe(revision + 1)
+  })
+
+  it("浏览器未加载的折叠报道可直接使用列表携带的轻量预览", () => {
+    entryProcessingRoleActions.replaceServiceRoles([
+      {
+        entryId: "entry-a",
+        kind: "keeper",
+        relatedEntryIds: ["entry-b"],
+        relatedEntryPreviews: [
+          {
+            itemId: "entry-b",
+            title: "未加载的报道",
+            sourceTitle: "后台来源",
+            publishedAt: "2026-01-01T00:00:00.000Z",
+            url: "https://example.test/b",
+          },
+        ],
+      },
+    ])
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([
+      {
+        id: "entry-b",
+        title: "未加载的报道",
+        feedTitle: "后台来源",
+        publishedAt: new Date("2026-01-01T00:00:00.000Z"),
+        url: "https://example.test/b",
+      },
+    ])
+  })
+
+  it("未加载原文也即时提供本组折叠理由，其他组、综述或清空角色后不复用", () => {
+    const keeper = { entryId: "entry-a", kind: "keeper" as const, relatedEntryIds: ["entry-b"] }
+    const member = {
+      entryId: "entry-b",
+      kind: "merged" as const,
+      relatedEntryIds: ["entry-a"],
+      reason: "全部事实已被当前代表覆盖",
+    }
+    entryProcessingRoleActions.replaceServiceRoles([keeper, member])
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([
+      expect.objectContaining({ id: "entry-b", reason: member.reason }),
+    ])
+    entryProcessingRoleActions.replaceServiceRoles([
+      keeper,
+      { ...member, relatedEntryIds: ["other"] },
+    ])
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([])
+    entryProcessingRoleActions.replaceServiceRoles([keeper, { ...member, storyId: "story" }])
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([])
+    entryProcessingRoleActions.clearServiceRoles()
+    expect(getEntryProcessingRoleRelatedEntries("entry-a")).toEqual([])
+  })
+
   it("drops service roles again when they are cleared", () => {
     seedEntries([createEntry({ id: "entry-a", title: "Alpha" })])
 

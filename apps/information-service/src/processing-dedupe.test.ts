@@ -363,6 +363,16 @@ describe("语义去重的服务端执行与角色落地", () => {
         kind: "keeper",
         reason: null,
         relatedEntryIds: ["newer"],
+        // 列表预览沿用保存的来源与标题，冷态详情也能立即展示报道。
+        relatedEntryPreviews: [
+          {
+            itemId: "newer",
+            title: "OpenAI 发布 GPT-6 模型（更新）",
+            sourceTitle: "科技媒体",
+            publishedAt: "2026-01-10T06:00:00.000Z",
+            url: "https://example.test/newer",
+          },
+        ],
         storyId: null,
         storyTitle: null,
         // 服务端材料计数包含保留条目本身，不依赖客户端已加载数量。

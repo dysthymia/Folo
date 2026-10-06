@@ -62,6 +62,25 @@ afterEach(() => {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe("processing role client", () => {
+  it("完整角色响应中的轻量预览可验证并传递给列表缓存", () => {
+    const preview = {
+      itemId: "entry-b",
+      title: "折叠报道",
+      sourceTitle: "来源",
+      publishedAt: null,
+      url: "https://example.test/b",
+    }
+    const response = processingEntryRolesResponseSchema.parse({
+      roles: [{ ...roles[0]!, relatedEntryPreviews: [preview] }],
+    })
+    expect(toServiceProcessingRoles(response.roles)[0]?.relatedEntryPreviews).toEqual([preview])
+  })
+  it("尚未缓存条目时仍把服务端完整材料数搬运到统一角色层", () => {
+    entryProcessingRoleActions.replaceServiceRoles(
+      toServiceProcessingRoles([{ ...roles[0]!, kind: "story", materialCount: 26 }]),
+    )
+    expect(resolveEntryProcessingRole("entry-a")).toMatchObject({ materialCount: 26 })
+  })
   it("账号切换会中止旧角色读取，等待旧轮询的人工刷新不继续发请求", async () => {
     vi.mocked(oneTimeToken.generate).mockResolvedValue({ data: { token: "once" } } as Awaited<
       ReturnType<typeof oneTimeToken.generate>

@@ -546,10 +546,15 @@ export class AutomationStore {
     })
   }
 
-  inputs(): ProcessingInput[] {
+  inputs(inputSeqs?: readonly number[]): ProcessingInput[] {
+    // 详情只读取当前组的输入，避免解析全库正文；未传范围时保持原有队列口径。
     return this.db
-      .prepare("SELECT * FROM processing_inputs WHERE current=1 ORDER BY seq")
-      .all()
+      .prepare(
+        inputSeqs
+          ? "SELECT * FROM processing_inputs WHERE current=1 AND seq IN (SELECT value FROM json_each(?)) ORDER BY seq"
+          : "SELECT * FROM processing_inputs WHERE current=1 ORDER BY seq",
+      )
+      .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
       .map((row) => this.inputFromRow(row))
   }
 

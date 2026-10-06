@@ -206,9 +206,10 @@ export class ProcessingStateStore {
       .run(decision.fingerprint, JSON.stringify(decision), decision.generatedAt)
   }
 
-  published(): PublishedDecision[] {
+  published(inputSeqs?: readonly number[]): PublishedDecision[] {
     const result: PublishedDecision[] = []
-    for (const input of this.automation.inputs()) {
+    // 详情只核验本组发布指针，避免每次展开理由都解析全部当前原文。
+    for (const input of this.automation.inputs(inputSeqs)) {
       const row = this.db
         .prepare(
           "SELECT decisions.id,decisions.body FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.decision_id=decisions.id WHERE inputs.seq=? AND inputs.status='succeeded' AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version",
@@ -258,9 +259,9 @@ export class ProcessingStateStore {
       .run(input.sourceKey, input.itemId, input.contentVersion, status)
   }
 
-  overrides() {
+  overrides(inputSeqs?: readonly number[]) {
     // 用户纠偏绑定来源与原文身份，正文版本变化后仍有效。
-    return this.automation.inputs().map((input) => {
+    return this.automation.inputs(inputSeqs).map((input) => {
       const row = this.db
         .prepare(
           "SELECT mode,revision FROM processing_source_item_overrides WHERE source_key=? AND item_id=?",

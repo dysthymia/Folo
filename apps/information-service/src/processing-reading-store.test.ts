@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { RuleSet } from "@follow/information-core"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ProcessingInput } from "./automation-store"
 import type { SourceEntry } from "./folo"
@@ -9,6 +9,7 @@ import type { GeneratedFeedPage } from "./generated-feeds"
 import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingApi } from "./processing-api"
 import { activeDedupeActions } from "./processing-dedupe"
+import type { ProcessingDuplicateGroup } from "./processing-duplicates"
 import type { ProcessingEntryRole } from "./processing-reading-store"
 import { semanticDuplicatePairKey } from "./semantic-dedupe"
 import { Store } from "./store"
@@ -107,19 +108,19 @@ function createAggregateStory(
   members: Array<{ seq: number; itemId: string; contentVersion: string }>,
   title: string,
 ) {
-  const spans = members.map((target) => ({
-    id: `span-${target.seq}`,
-    inputSeq: target.seq,
-    sourceItemId: target.itemId,
-    contentVersion: target.contentVersion,
-    fragmentId: sourceSpanFragmentId(
-      target.itemId,
-      target.contentVersion,
-      `来源 ${target.itemId} 的可核查事实。`,
-    ),
-    quote: `来源 ${target.itemId} 的可核查事实。`,
-    sourceRole: "reporting",
-  }))
+  // 引用使用真实保存的正文，使同内容转载夹具也能通过来源核验。
+  const spans = members.map((target) => {
+    const quote = store.automation.inputs([target.seq])[0]!.body.content!
+    return {
+      id: `span-${target.seq}`,
+      inputSeq: target.seq,
+      sourceItemId: target.itemId,
+      contentVersion: target.contentVersion,
+      fragmentId: sourceSpanFragmentId(target.itemId, target.contentVersion, quote),
+      quote,
+      sourceRole: "reporting",
+    }
+  })
   const storyId = randomUUID()
   store.stories.create(
     {
@@ -259,6 +260,137 @@ function containmentFixture(reverse: boolean, standalone: "auto" | "always" = "a
 }
 
 describe("语义去重包含链角色", () => {
+  it("首次详情只读取本组材料，无关后台写入后仍不扫描全库；恢复立即生效", () => {
+    const { store, a, b, c } = containmentFixture(false)
+    // 加入无关原文并保持角色缓存冷态，覆盖用户首次展开时的真实路径。
+    for (let index = 0; index < 25; index++)
+      store.saveEntry(entry(`unrelated-${index}`, "2026-01-04T00:00:00.000Z"))
+    expect(store.reading.duplicateRoles(a.seq)[0]?.relatedEntryPreviews).toEqual([
+      expect.objectContaining({ itemId: "C", title: "来源 C", sourceTitle: "来源" }),
+      expect.objectContaining({ itemId: "B", title: "来源 B", sourceTitle: "来源" }),
+    ])
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const merges = vi.spyOn(store.dedupe, "merges")
+    const read = () =>
+      processingApi(
+        store,
+        "GET",
+        `/processing/entries/${a.seq}/duplicates`,
+        {},
+      ) as ProcessingDuplicateGroup
+    expect(read().total).toBe(2)
+    store.processingState.report("unrelated-task", { status: "running" })
+    expect(read().total).toBe(2)
+    expect(merges.mock.calls.every(([, scoped]) => scoped?.length === 3)).toBe(true)
+    expect(
+      inputs.mock.calls.every(
+        ([seqs]) =>
+          seqs?.length === 3 &&
+          seqs.includes(a.seq) &&
+          seqs.includes(b.seq) &&
+          seqs.includes(c.seq),
+      ),
+    ).toBe(true)
+    store.processingState.setOverride(c.seq, "restore", 0)
+    expect(read().members.map((member) => member.itemId)).toEqual(["B"])
+    expect(merges).toHaveBeenCalled()
+    inputs.mockRestore()
+    merges.mockRestore()
+  })
+
+  it("组查询保留综述与同正文转载优先级，不把已参与综述的材料再次折叠", () => {
+    const { store, a, b } = containmentFixture(false)
+    const original = publishDecision(store, { ...b.body, id: "story-original" })
+    const other = publishDecision(store, entry("story-other", "2026-01-04T00:00:00.000Z"))
+    createAggregateStory(store, [original, other], "独立综述")
+    expect(rolesOf(store).find((role) => role.inputSeq === a.seq)?.kind).not.toBe("keeper")
+    expect(store.reading.duplicateRoles(a.seq)).toEqual([])
+  })
+
+  it("组索引覆盖竞争代表，仍按置信度与原有顺序选择唯一最终代表", () => {
+    const { store, a, b } = containmentFixture(false)
+    const other = publishDecision(store, entry("D", "2026-01-04T00:00:00.000Z"))
+    saveContainmentMerge(store, other, b)
+    expect(store.reading.duplicateRoles(a.seq).map((role) => role.itemId)).toEqual(["A", "C", "B"])
+    expect(store.reading.duplicateRoles(other.seq)).toEqual([])
+  })
+
+  it("包含关系成环时组查询能够结束，保留所有原文而不制造代表", () => {
+    const { store, a, b, c } = containmentFixture(false)
+    // 同一对反向判定会覆盖旧行，使用三个不同配对构成真实包含环。
+    saveContainmentMerge(store, c, a)
+    expect(store.reading.duplicateRoles(a.seq)).toEqual([])
+    expect(store.reading.duplicateRoles(b.seq)).toEqual([])
+  })
+  it("重复组按完整关系分页，提供折叠理由和覆盖版本，恢复后保留原文与读态", () => {
+    const { store, a, c } = containmentFixture(false)
+    const before = store.automation.inputs().map((input) => input.body)
+    const first = processingApi(store, "POST", `/processing/entries/${a.seq}/duplicates`, {
+      limit: 1,
+    }) as ProcessingDuplicateGroup
+    expect(first).toMatchObject({
+      total: 2,
+      offset: 0,
+      nextOffset: 1,
+      representative: { itemId: "A", title: "来源 A", sourceTitle: "来源" },
+    })
+    expect(first.members).toEqual([
+      expect.objectContaining({
+        itemId: "C",
+        inputSeq: c.seq,
+        reason: "保留方包含隐藏方全部事实",
+        canRestore: true,
+        overrideRevision: 0,
+      }),
+    ])
+    const second = processingApi(store, "POST", `/processing/entries/${a.seq}/duplicates`, {
+      offset: 1,
+      limit: 1,
+      expectedFingerprint: first.fingerprint,
+    }) as ProcessingDuplicateGroup
+    expect(second.members.map((member) => member.itemId)).toEqual(["B"])
+    expect(second.nextOffset).toBeNull()
+    processingApi(store, "POST", `/processing/entries/${c.seq}/override`, {
+      mode: "restore",
+      expectedRevision: first.members[0]!.overrideRevision,
+    })
+    const after = processingApi(
+      store,
+      "GET",
+      `/processing/entries/${a.seq}/duplicates`,
+      {},
+    ) as ProcessingDuplicateGroup
+    expect(after.total).toBe(1)
+    expect(after.members.map((member) => member.itemId)).toEqual(["B"])
+    expect(() =>
+      processingApi(store, "POST", `/processing/entries/${a.seq}/duplicates`, {
+        offset: 1,
+        expectedFingerprint: first.fingerprint,
+      }),
+    ).toThrow("revision_conflict")
+    expect(store.automation.inputs().map((input) => input.body)).toEqual(before)
+    expect(store.entry(source.key, "C")?.read).toBe(true)
+    expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(2)
+  })
+
+  it.each(["merged", "withdrawn", "source", "version"] as const)(
+    "拒绝失效代表或非代表身份：%s",
+    (change) => {
+      const { store, a, b } = containmentFixture(false)
+      if (change === "withdrawn") store.stories.withdrawMaterial(a.seq, "撤回")
+      if (change === "source") store.replaceSources([])
+      if (change === "version") store.saveEntry({ ...a.body, content: "新的原文事实" })
+      expect(() =>
+        processingApi(
+          store,
+          "GET",
+          `/processing/entries/${change === "merged" ? b.seq : a.seq}/duplicates`,
+          {},
+        ),
+      ).toThrow("invalid_target")
+    },
+  )
+
   it.each([false, true])("两种判定顺序都将链成员指向最终代表并保留读态：%s", (reverse) => {
     const { store } = containmentFixture(reverse)
     expect(rolesOf(store)).toEqual([

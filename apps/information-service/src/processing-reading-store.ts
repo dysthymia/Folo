@@ -25,7 +25,7 @@ import type { ProcessingDedupeStore } from "./processing-dedupe"
 import { activeDedupeActions } from "./processing-dedupe"
 import type { ProcessingScheduleConfig } from "./processing-schedule"
 import type { ProcessingStateStore } from "./processing-state"
-import { dedupeContentEvidence } from "./semantic-dedupe"
+import { dedupeContentEvidence, SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD } from "./semantic-dedupe"
 import { sourceText } from "./service"
 import type { Store } from "./store"
 import type { Story, StoryRevision, StoryStore } from "./story-store"
@@ -136,6 +136,14 @@ export type ProcessingEntryRole = {
   storyId: string | null
   storyTitle: string | null
   materialCount?: number
+  /** 列表携带少量元信息，悬停预览无需再请求正文或组明细。 */
+  relatedEntryPreviews?: Array<{
+    itemId: string
+    title: string | null
+    sourceTitle: string | null
+    publishedAt: string | null
+    url: string | null
+  }>
 }
 export type ResearchPackReference = {
   inputSeq: number
@@ -248,6 +256,11 @@ function isUuid(value: string): boolean {
 // 阅读快照只保存不可变指针和展示顺序，正文与决定仍从已验证的当前版本读取。
 export class ProcessingReadingStore {
   private readonly generated: GeneratedFeedStore
+  // 时间线保留完整角色缓存；详情走独立的组关系查询，不触发全库重建。
+  private roleProjection?: {
+    version: string
+    roles: ProcessingEntryRole[]
+  }
   constructor(
     private readonly db: DatabaseSync,
     private readonly ownerId: () => string | null,
@@ -262,6 +275,10 @@ export class ProcessingReadingStore {
     private readonly contextStore?: Pick<Store, "sourceSync" | "sources" | "subscriptionTags">,
   ) {
     db.exec(`
+      CREATE INDEX IF NOT EXISTS processing_dedupe_decisions_keep_seq
+        ON processing_dedupe_decisions(keep_input_seq,config_fingerprint);
+      CREATE INDEX IF NOT EXISTS processing_dedupe_decisions_hide_seq
+        ON processing_dedupe_decisions(hide_input_seq,config_fingerprint);
       CREATE TABLE IF NOT EXISTS processing_reading_snapshots (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
@@ -1142,15 +1159,107 @@ export class ProcessingReadingStore {
    * 未拿到发布的 input 不产生角色，时间线在服务端给出结论前保持原样。
    */
   roles(): ProcessingEntryRole[] {
+    return this.currentRoleProjection().roles.map((role) => ({
+      ...role,
+      relatedEntryIds: [...role.relatedEntryIds],
+      ...(role.relatedEntryPreviews
+        ? { relatedEntryPreviews: role.relatedEntryPreviews.map((entry) => ({ ...entry })) }
+        : {}),
+    }))
+  }
+
+  /** 详情按包含关系索引核验本组，不受全库角色缓存或无关后台写入影响。 */
+  duplicateRoles(inputSeq: number): ProcessingEntryRole[] {
+    if (!this.ownerId()) return []
+    const latest = this.automation.releases()[0]
+    if (!latest) return []
+    const fingerprints = activeDedupeActions(this.automation.release(latest.version)).map(
+      (action) => action.fingerprint,
+    )
+    if (fingerprints.length === 0) return []
+    // 双向遍历覆盖包含链、竞争代表和环；UNION 去重保证环不会无限递归。
+    const component = this.db
+      .prepare(
+        `
+        WITH RECURSIVE related(seq) AS (
+          SELECT ?
+          UNION
+          SELECT relation.hide_input_seq FROM processing_dedupe_decisions relation
+          JOIN related ON relation.keep_input_seq=related.seq
+          WHERE relation.config_fingerprint IN (SELECT value FROM json_each(?))
+            AND relation.duplicate=1
+            AND relation.confidence>=? AND relation.hide_input_seq IS NOT NULL
+          UNION
+          SELECT relation.keep_input_seq FROM processing_dedupe_decisions relation
+          JOIN related ON relation.hide_input_seq=related.seq
+          WHERE relation.config_fingerprint IN (SELECT value FROM json_each(?))
+            AND relation.duplicate=1
+            AND relation.confidence>=? AND relation.keep_input_seq IS NOT NULL
+        ) SELECT seq FROM related
+      `,
+      )
+      .all(
+        inputSeq,
+        JSON.stringify(fingerprints),
+        SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
+        JSON.stringify(fingerprints),
+        SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
+      )
+      .map((row) => Number(row.seq))
+    // 综述及同正文转载优先于语义折叠；补齐综述材料指针，复用同一套角色判定。
+    // 这里只取成员索引中的原文，不扫描时间线中全部尚未处理的材料。
+    const storySeqs = this.db
+      .prepare("SELECT DISTINCT input_seq FROM story_current_member_index")
+      .all()
+      .map((row) => Number(row.input_seq))
+    const roles = this.buildRoles(
+      this.automation.inputs([...new Set([...component, ...storySeqs])]),
+    )
+    const keeper = roles.find((role) => role.inputSeq === inputSeq && role.kind === "keeper")
+    return keeper
+      ? [
+          keeper,
+          ...roles.filter(
+            (role) =>
+              role.kind === "merged" &&
+              !role.storyId &&
+              keeper.relatedEntryIds.includes(role.itemId) &&
+              role.relatedEntryIds.includes(keeper.itemId),
+          ),
+        ]
+      : []
+  }
+
+  private currentRoleProjection() {
+    // total_changes 捕获本连接写入，data_version 捕获其他连接写入，账号也纳入身份。
+    const version = JSON.stringify([
+      this.ownerId(),
+      this.db.prepare("SELECT total_changes() AS count").get()?.count,
+      this.db.prepare("PRAGMA data_version").get()?.data_version,
+    ])
+    if (!this.db.isTransaction && this.roleProjection?.version === version)
+      return this.roleProjection
+    const roles = this.buildRoles()
+    const projection = { version, roles }
+    if (!this.db.isTransaction) this.roleProjection = projection
+    return projection
+  }
+
+  private buildRoles(scopedInputs?: ProcessingInput[]): ProcessingEntryRole[] {
     if (!this.ownerId()) return []
 
-    const inputs = this.automation.inputs()
+    const inputs = scopedInputs ?? this.automation.inputs()
+    const inputSeqs = scopedInputs?.map((input) => input.seq)
     const inputBySeq = new Map(inputs.map((input) => [input.seq, input]))
+    const inputByItem = new Map(inputs.map((input) => [input.itemId, input]))
+    const sourceTitles = new Map(
+      (this.contextStore?.sources() ?? []).map((source) => [source.key, source.title]),
+    )
     const publishedBySeq = new Map(
-      this.processingState.published().map((value) => [value.input.seq, value]),
+      this.processingState.published(inputSeqs).map((value) => [value.input.seq, value]),
     )
     const overrides = new Map(
-      this.processingState.overrides().map((override) => [override.inputSeq, override]),
+      this.processingState.overrides(inputSeqs).map((override) => [override.inputSeq, override]),
     )
     const hiddenBySeq = new Map(
       inputs.map((input) => [
@@ -1248,7 +1357,7 @@ export class ProcessingReadingStore {
     // 只有两侧都还没有角色、也没有被隐藏的判定才会落地。
     // 先建立隐藏条目到保留条目的有向关系，再解析最终代表；逐条写角色会让包含链依赖判定顺序。
     const directMerges = new Map<number, ReturnType<typeof this.currentDedupeMerges>[number]>()
-    const orderedMerges = this.currentDedupeMerges().sort(
+    const orderedMerges = this.currentDedupeMerges(inputs, publishedBySeq).sort(
       (left, right) =>
         right.confidence - left.confidence ||
         left.keep.seq - right.keep.seq ||
@@ -1346,6 +1455,24 @@ export class ProcessingReadingStore {
     return [...roles.values()]
       .map((role) => ({
         ...role,
+        ...(role.kind === "keeper"
+          ? {
+              relatedEntryPreviews: role.relatedEntryIds.slice(0, 5).flatMap((itemId) => {
+                const input = inputByItem.get(itemId)
+                return input
+                  ? [
+                      {
+                        itemId,
+                        title: input.body.title || null,
+                        sourceTitle: sourceTitles.get(input.sourceKey) ?? null,
+                        publishedAt: input.body.publishedAt ?? null,
+                        url: input.body.url ?? null,
+                      },
+                    ]
+                  : []
+              }),
+            }
+          : {}),
         materialCount: role.storyId
           ? new Set(
               (this.stories.currentSnapshot(role.storyId)?.members ?? []).flatMap((member) => {
@@ -1372,15 +1499,19 @@ export class ProcessingReadingStore {
   }
 
   // 读时核对最新规则的动态适用性和人工恢复；仅静态指纹不足以证明当前上下文仍命中。
-  private currentDedupeMerges() {
+  private currentDedupeMerges(
+    inputs?: readonly ProcessingInput[],
+    decisions?: Map<number, PublishedDecision>,
+  ) {
     const latest = this.automation.releases()[0]
     if (!latest) return []
     const actions = activeDedupeActions(this.automation.release(latest.version))
-    const published = new Map(
-      this.processingState.published().map((item) => [item.input.seq, item]),
-    )
+    const inputSeqs = inputs?.map((input) => input.seq)
+    const published =
+      decisions ??
+      new Map(this.processingState.published(inputSeqs).map((item) => [item.input.seq, item]))
     const overrides = new Map(
-      this.processingState.overrides().map((item) => [item.inputSeq, item.mode]),
+      this.processingState.overrides(inputSeqs).map((item) => [item.inputSeq, item.mode]),
     )
     const applicable = (seq: number, action: (typeof actions)[number]) => {
       const item = published.get(seq)
@@ -1427,7 +1558,7 @@ export class ProcessingReadingStore {
     }
     return actions.flatMap((action) =>
       this.dedupe
-        .merges(new Set([action.fingerprint]))
+        .merges(new Set([action.fingerprint]), inputs)
         .filter(
           (merge) =>
             (merge.keepReference
