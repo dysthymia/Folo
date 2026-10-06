@@ -205,6 +205,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     if (!batches.length) batches.push([])
     const sharedAnalysis = new SharedAnalysisSession({
       store,
+      triggerId: trigger.id,
       aiConfig: options.aiConfig,
       runtimeDir: options.runtimeDir,
       sourceKeys: trigger.sourceKeys,
@@ -318,6 +319,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       sourceKeys: trigger.sourceKeys,
       cutoffAt: trigger.cutoffAt,
       preparedEvaluations: sharedAnalysis.dedupeEvaluations,
+      triggerId: trigger.id,
     })
     const dedupeFingerprints = new Set(
       activeDedupeActions(store.automation.effective().config).map((action) => action.fingerprint),
@@ -416,7 +418,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       entries,
       stories,
       repair,
-      dedupe,
+      dedupe: { ...dedupe, sharedAnalysis: sharedAnalysis.dedupeCosts },
       finishedAt: new Date().toISOString(),
     })
     if (trigger.targets)

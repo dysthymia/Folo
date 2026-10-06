@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { DatabaseSync } from "node:sqlite"
@@ -237,6 +237,7 @@ function createStory(store: Store, inputs: ProcessingInput[]) {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   stores.splice(0).forEach((store) => store.close())
   tempDirs.splice(0).forEach((dir) => rmSync(dir, { force: true, recursive: true }))
 })
@@ -574,6 +575,350 @@ describe("语义去重的服务端执行与角色落地", () => {
 })
 
 describe("去重根因回归", () => {
+  it.each([
+    { title: "银杉第三轮登记明日开始" },
+    { description: "新增资格只适用于第三轮" },
+    { author: "另一位独立作者" },
+    { imageCount: 1, mediaLength: 1, context: { images: "complete" } },
+    { attachmentsDuration: 60 },
+    {
+      linkedMaterials: [
+        {
+          url: "https://example.test/round3",
+          resolvedUrl: null,
+          title: "第三轮规则",
+          content: "新增资格",
+          status: "complete",
+          failure: null,
+        },
+      ],
+    },
+  ] satisfies Partial<SourceEntry>[])(
+    "正文相同但标题、附件或补充信息不同不能精确隐藏：%j",
+    async (difference) => {
+      // 关键事实可能只出现在标题、摘要、配图或外链，正文哈希不能代表整个条目。
+      const { store, aiConfig } = fixture()
+      publishRules(store, [dedupeRule({ all: true })])
+      const content = "活动安排请查看当期标题与附件，不同轮次的资格、时间和步骤应分别核验。".repeat(
+        4,
+      )
+      publishDecision(
+        store,
+        entry("older", "银杉第二轮领取今晚结束", "2026-01-10T00:00:00Z", content),
+      )
+      publishDecision(store, {
+        ...entry("newer", "银杉第二轮领取今晚结束", "2026-01-10T01:00:00Z", content),
+        ...difference,
+      })
+      const execute = negativeExecute()
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        duplicates: 0,
+        exactDuplicates: 0,
+      })
+      expect(rolesOf(store)).toEqual([])
+      expect(store.automation.inputs()).toHaveLength(2)
+    },
+  )
+
+  it("相隔14天的同标题同正文模板重发不能跨事件精确隐藏", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    const content = "当期活动已经开始，资格和领取期限必须以当期公告为准。".repeat(5)
+    publishDecision(store, entry("older", "本周活动公告", "2026-01-10T00:00:00Z", content))
+    publishDecision(store, entry("newer", "本周活动公告", "2026-01-24T00:00:00Z", content))
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      candidates: 0,
+      duplicates: 0,
+      exactDuplicates: 0,
+    })
+    expect(execute).not.toHaveBeenCalled()
+    expect(rolesOf(store)).toEqual([])
+  })
+
+  it("Feed与List重复上下文保留原输入但只使用一份当前原文参与比较", async () => {
+    const { store, aiConfig } = fixture()
+    const otherSource = {
+      ...source,
+      key: "list/l1",
+      kind: "list" as const,
+      id: "l1",
+      title: "科技列表",
+    }
+    store.replaceSources([source, otherSource])
+    publishRules(store, [dedupeRule({ all: true })])
+    const original = entry("same", "项目公告正式发布", "2026-01-10T00:00:00Z")
+    publishDecision(store, original)
+    publishDecision(store, { ...original, sourceKey: otherSource.key })
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      candidates: 0,
+      duplicates: 0,
+    })
+    expect(execute).not.toHaveBeenCalled()
+    publishDecision(
+      store,
+      entry("other", "项目公告正式发布", "2026-01-10T01:00:00Z", "另一条尚未核验的事实"),
+    )
+    const plan = prepareSemanticDedupe({ store })[0]!
+    expect(plan.participants).toHaveLength(2)
+    expect(
+      plan.participants.find((participant) => participant.input.itemId === "same")?.input.sourceKey,
+    ).toBe(otherSource.key)
+    expect(
+      await runSemanticDedupe({
+        store,
+        aiConfig,
+        execute: execute as never,
+        runtimeDir: "/unused",
+        signal: new AbortController().signal,
+        targets: [{ sourceKey: source.key, itemId: "same" }],
+      }),
+    ).toMatchObject({
+      candidates: 1,
+      duplicates: 0,
+    })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(store.automation.inputs()).toHaveLength(3)
+    expect(rolesOf(store)).toEqual([])
+  })
+
+  it("同一原帖跨来源读态不一致时，已读参考不能替代明确未读的目标", async () => {
+    // 多订阅的读态分别同步，不能只凭共享 itemId 把两篇已读参考交给模型比较。
+    const { store, aiConfig } = fixture()
+    const otherSource = {
+      ...source,
+      key: "list/l1",
+      kind: "list" as const,
+      id: "l1",
+      title: "科技列表",
+    }
+    store.replaceSources([source, otherSource])
+    publishRules(store, [dedupeRule({ all: true })])
+    const original = entry("same", "项目公告正式发布", "2026-01-10T00:00:00Z")
+    publishDecision(store, original)
+    store.saveEntry({ ...original, read: true })
+    store.processingState.setMaterial(store.automation.current(source.key, "same")!, "complete")
+    publishDecision(store, {
+      ...original,
+      sourceKey: otherSource.key,
+      content: "未读版本补充了新的资格条件。",
+    })
+    const reference = entry(
+      "reference",
+      "项目公告正式发布",
+      "2026-01-10T01:00:00Z",
+      "已读来源保留旧活动事实。",
+    )
+    publishDecision(store, reference)
+    store.saveEntry({ ...reference, read: true })
+    store.processingState.setMaterial(
+      store.automation.current(source.key, "reference")!,
+      "complete",
+    )
+    const cutoffAt = "2026-01-11T00:00:00Z"
+    const targets = [{ sourceKey: otherSource.key, itemId: "same" }]
+    const plan = prepareSemanticDedupe({ store, cutoffAt, targets })[0]!
+    expect(
+      plan.participants.find((participant) => participant.input.itemId === "same"),
+    ).toMatchObject({ readReference: false, input: { sourceKey: otherSource.key } })
+    expect(plan.candidates).toHaveLength(1)
+    const execute = negativeExecute()
+    expect(
+      await runSemanticDedupe({
+        store,
+        aiConfig,
+        cutoffAt,
+        targets,
+        execute: execute as never,
+        runtimeDir: "/unused",
+        signal: new AbortController().signal,
+      }),
+    ).toMatchObject({ candidates: 1, duplicates: 0 })
+    expect(execute.mock.calls[0]![0].prompt).toContain("未读版本补充了新的资格条件。")
+    expect(store.entry(source.key, "same")?.read).toBe(true)
+    expect(store.entry(otherSource.key, "same")?.read).toBe(false)
+  })
+
+  it("旧版本判定失去投影资格，原文及旧关系保留且不重算全部历史", async () => {
+    const { store } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishPair(store)
+    const plan = prepareSemanticDedupe({ store })[0]!
+    const keep = plan.participants.find(
+      (participant) => participant.input.itemId === "older",
+    )!.input
+    const hide = plan.participants.find(
+      (participant) => participant.input.itemId === "newer",
+    )!.input
+    const candidate = plan.candidates[0]!
+    const legacyFingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 6,
+          ruleId: "dedupe-rule",
+          scope: { all: true },
+          when: { all: true },
+        }),
+      )
+      .digest("hex")
+    store.dedupe.saveBatch({
+      configFingerprint: legacyFingerprint,
+      ruleId: "dedupe-rule",
+      model: "exact-content-v1",
+      provider: "local",
+      decisions: [
+        {
+          candidate,
+          keep,
+          hide,
+          evaluation: {
+            pairKey: candidate.pairKey,
+            duplicate: true,
+            confidence: 1,
+            keepEntryId: keep.itemId,
+            hideEntryId: hide.itemId,
+            reason: "旧判定",
+          },
+        },
+      ],
+    })
+    expect(store.dedupe.merges(new Set([legacyFingerprint]))).toHaveLength(1)
+    expect(rolesOf(store)).toEqual([])
+    expect(store.dedupe.decidedPairKeys(fingerprintsOf(store)).size).toBe(0)
+    expect(prepareSemanticDedupe({ store })[0]!.candidates).toHaveLength(1)
+    expect(store.automation.inputs()).toHaveLength(2)
+  })
+
+  it.each(["missing_result", "invalid_result"] as const)(
+    "%s冷却后只补判一次，扫描缓存不阻断补判且正文更新重置次数",
+    async (status) => {
+      // 用假时钟验证真实数据库与调度入口，不等待实际冷却，也不连接模型。
+      vi.useFakeTimers({ toFake: ["Date"] })
+      vi.setSystemTime("2026-01-11T00:00:00Z")
+      const { store, aiConfig } = fixture()
+      publishRules(store, [dedupeRule({ all: true })])
+      publishPair(store)
+      const execute = negativeExecute()
+      const original = execute.getMockImplementation()!
+      execute.mockImplementation(async (options) => {
+        const response = await original(options)
+        return {
+          ...response,
+          result: {
+            results:
+              status === "missing_result"
+                ? []
+                : response.result.results.flatMap((result) => [result, result]),
+          },
+        }
+      })
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        batches: 1,
+        unresolved: 1,
+      })
+      const fingerprints = fingerprintsOf(store)
+      expect(store.dedupe.decidedPairKeys(fingerprints).size).toBe(0)
+      expect(store.dedupe.unresolvedDecisions(fingerprints)[0]).toMatchObject({
+        status,
+        attempts: 1,
+      })
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        candidates: 0,
+        unresolved: 1,
+      })
+      vi.setSystemTime("2026-01-11T00:01:01Z")
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        candidates: 1,
+        unresolved: 1,
+      })
+      expect(store.dedupe.unresolvedDecisions(fingerprints)[0]).toMatchObject({ attempts: 2 })
+      vi.setSystemTime("2026-01-11T00:02:02Z")
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        candidates: 0,
+        unresolved: 1,
+      })
+      expect(execute).toHaveBeenCalledTimes(2)
+      publishDecision(
+        store,
+        entry(
+          "newer",
+          "OpenAI 发布 GPT-6 模型",
+          "2026-01-10T06:00:00Z",
+          "新版补充了新的执行条件。",
+        ),
+      )
+      expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+        candidates: 1,
+        unresolved: 1,
+      })
+      expect(store.dedupe.unresolvedDecisions(fingerprints)[0]).toMatchObject({ attempts: 1 })
+      expect(execute).toHaveBeenCalledTimes(3)
+    },
+  )
+
+  it("uncertain与incomplete单独保留状态，补齐正文后才重新判定", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishPair(store)
+    const uncertain = fakeExecute(() => ({
+      duplicate: false,
+      confidence: 0.9,
+      keep: "",
+      hide: "",
+      factComparison: { verdict: "uncertain", onlyInFirst: [], onlyInSecond: [] },
+    }))
+    expect(await runFixture(store, aiConfig, uncertain)).toMatchObject({ unresolved: 1 })
+    expect(store.dedupe.decidedPairKeys(fingerprintsOf(store)).size).toBe(0)
+    expect(store.dedupe.unresolvedDecisions(fingerprintsOf(store))[0]?.status).toBe("uncertain")
+    expect(await runFixture(store, aiConfig, uncertain)).toMatchObject({
+      candidates: 0,
+      unresolved: 1,
+    })
+    expect(uncertain).toHaveBeenCalledTimes(1)
+    publishDecision(
+      store,
+      entry("newer", "OpenAI 发布 GPT-6 模型", "2026-01-10T06:00:00Z", "字".repeat(4001)),
+    )
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0, unresolved: 1 })
+    expect(store.dedupe.unresolvedDecisions(fingerprintsOf(store))[0]?.status).toBe("incomplete")
+    expect(execute).not.toHaveBeenCalled()
+    publishDecision(
+      store,
+      entry(
+        "newer",
+        "OpenAI 发布 GPT-6 模型",
+        "2026-01-10T06:00:00Z",
+        "完整的新事实，双方各有独有信息。",
+      ),
+    )
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 1, unresolved: 0 })
+    expect(store.dedupe.decidedPairKeys(fingerprintsOf(store)).size).toBe(1)
+    expect(rolesOf(store)).toEqual([])
+  })
+
+  it("附件或引用未补齐时不执行精确或语义隐藏", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    const content = "附件中包含各轮次的资格与截止条件，正文不能替代配图。".repeat(5)
+    publishDecision(store, entry("older", "活动公告", "2026-01-10T00:00:00Z", content))
+    publishDecision(store, {
+      ...entry("newer", "活动公告", "2026-01-10T01:00:00Z", content),
+      imageCount: 1,
+      mediaLength: 1,
+      context: { images: "missing" },
+    })
+    const execute = duplicateExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 0,
+      duplicates: 0,
+      unresolved: 1,
+    })
+    expect(execute).not.toHaveBeenCalled()
+    expect(rolesOf(store)).toEqual([])
+  })
+
   it.each([true, null] as const)("成功条目当前读态为 %s 时不进入去重候选", async (read) => {
     const { store, aiConfig } = fixture()
     publishRules(store, [dedupeRule({ all: true })])
@@ -604,7 +949,30 @@ describe("去重根因回归", () => {
     expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0 })
   })
 
-  it("不同动作的否定和扫描不互用，所有动作共享三个批次预算", async () => {
+  it("混合完整和超限正文的批次只统计实际发出的独立比较", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishDecision(
+      store,
+      entry("older", "同一核心事件", "2026-01-10T00:00:00Z", "字".repeat(4001)),
+    )
+    publishDecision(store, entry("newer", "同一核心事件", "2026-01-10T06:00:00Z", "完整版本A。"))
+    publishDecision(store, entry("newest", "同一核心事件", "2026-01-10T12:00:00Z", "完整版本B。"))
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 1,
+      dedicatedComparisons: 1,
+      unknownUsageRequests: 1,
+    })
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 0,
+      dedicatedComparisons: 0,
+      unknownUsageRequests: 0,
+    })
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it("重叠规则分别保存应用，但同一内容关系只比较一次", async () => {
     const { store, aiConfig } = fixture()
     publishRules(
       store,
@@ -616,15 +984,82 @@ describe("去重根因回归", () => {
     )
     publishPair(store)
     const execute = negativeExecute()
-    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 3, pending: 1 })
-    expect(execute).toHaveBeenCalledTimes(3)
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 1,
+      pending: 0,
+      relationCacheHits: 3,
+      dedicatedComparisons: 1,
+      unknownUsageRequests: 1,
+    })
+    expect(execute).toHaveBeenCalledTimes(1)
     const actions = activeDedupeActions(
       store.automation.release(store.automation.releases()[0]!.version),
     )
     expect(
       actions.map((action) => store.dedupe.decidedPairKeys(new Set([action.fingerprint])).size),
-    ).toEqual([1, 1, 1, 0])
-    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 1, pending: 0 })
+    ).toEqual([1, 1, 1, 1])
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0, pending: 0 })
+  })
+
+  it("跨任务改规则复用证据关系，正文变化会重新比较，人工恢复和范围仍优先", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishPair(store)
+    const execute = duplicateExecute()
+    await runFixture(store, aiConfig, execute)
+    publishRules(store, [{ ...dedupeRule({ all: true }), id: "new-rule" }])
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 0,
+      relationCacheHits: 1,
+    })
+    expect(rolesOf(store).some((role) => role.kind === "merged")).toBe(true)
+    store.processingState.setOverride(2, "restore", 0)
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ candidates: 0, batches: 0 })
+    expect(rolesOf(store).some((role) => role.kind === "merged")).toBe(false)
+    store.processingState.setOverride(2, "automatic", 1)
+    publishDecision(
+      store,
+      entry("newer", "OpenAI 发布 GPT-6 模型", "2026-01-10T06:00:00Z", "新版补充不同的申请期限。"),
+    )
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 1,
+      relationCacheHits: 0,
+    })
+    // 正文相同但引用上下文换代，也不能复用先前的材料关系。
+    publishDecision(store, {
+      ...entry(
+        "newer",
+        "OpenAI 发布 GPT-6 模型",
+        "2026-01-10T06:00:00Z",
+        "新版补充不同的申请期限。",
+      ),
+      context: { links: "complete" },
+    })
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      batches: 1,
+      relationCacheHits: 0,
+    })
+    publishRules(store, [
+      {
+        ...dedupeRule({ all: true }),
+        when: { anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: ["excluded"] }] }] },
+      },
+    ])
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ candidates: 0, batches: 0 })
+    expect(rolesOf(store)).toEqual([])
+    expect(execute).toHaveBeenCalledTimes(3)
+  })
+
+  it("本地严格同文在共享预筛前排除，不消耗语义额度", () => {
+    const { store } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    const content = "完整事实正文。".repeat(20)
+    for (let index = 0; index < 30; index++)
+      publishDecision(store, entry(`exact-${index}`, "相同标题", "2026-01-10T00:00:00Z", content))
+    const plan = prepareSemanticDedupe({ store })[0]!
+    expect(plan.exact).toHaveLength(29)
+    expect(plan.candidates).toEqual([])
+    expect(plan.participants).toHaveLength(30)
   })
 
   it("只修改when会立即撤销旧merged角色，恢复也优先于去重", async () => {
@@ -781,6 +1216,8 @@ describe("去重根因回归", () => {
       }
       inputs[1] = { ...originals[1]!, seq: 9, generation: 2 }
       expect(save(inputs[0]!, inputs[1]!, false).size).toBe(1)
+      // 持久化入口也拒绝同一输入自配对，防止绕过上游校验写入无效关系。
+      expect(save(inputs[0]!, inputs[0]!, true).size).toBe(0)
       expect(save(originals[0]!, originals[1]!, true).size).toBe(0)
       expect(store.merges(new Set(["test"]))).toEqual([])
       expect(store.decidedPairKeys(new Set(["test"])).size).toBe(1)
@@ -789,7 +1226,7 @@ describe("去重根因回归", () => {
     }
   })
 
-  it("充分长度完整正文相同先本地折叠，来源和原文全部保留，人工恢复保持可见", async () => {
+  it("完整展示内容相同先本地折叠，来源和原文全部保留，人工恢复保持可见", async () => {
     const { store, aiConfig } = fixture()
     const otherSource = { ...source, key: "feed/f2", id: "f2", title: "转载来源" }
     store.replaceSources([source, otherSource])
@@ -797,7 +1234,7 @@ describe("去重根因回归", () => {
     const content = "这是逐字相同的转载正文，只有同一组事实，没有独立观点或后续变化。".repeat(5)
     publishDecision(store, entry("older", "原始报道", "2026-01-10T00:00:00.000Z", content))
     publishDecision(store, {
-      ...entry("newer", "来源不同的转载标题", "2026-01-10T06:00:00.000Z", content),
+      ...entry("newer", "原始报道", "2026-01-10T06:00:00.000Z", content),
       sourceKey: otherSource.key,
     })
     const execute = negativeExecute()
@@ -837,7 +1274,7 @@ describe("去重根因回归", () => {
     expect(rolesOf(store)).toEqual([])
   })
 
-  it("canonical URL一致且短正文完全相同可免模型，正文不同或仅标题相同仍走保守语义", async () => {
+  it("canonical URL及展示内容一致可免模型，原帖不同版本保留且不自比较", async () => {
     const { store, aiConfig } = fixture()
     publishRules(store, [dedupeRule({ all: true })])
     publishDecision(store, {
@@ -845,7 +1282,7 @@ describe("去重根因回归", () => {
       url: "https://example.test/article?utm_source=a#one",
     })
     publishDecision(store, {
-      ...entry("newer", "另一个标题", "2026-01-10T06:00:00.000Z", "严格相同短原文"),
+      ...entry("newer", "同一标题", "2026-01-10T06:00:00.000Z", "严格相同短原文"),
       url: "https://example.test/article?utm_source=b#two",
     })
     expect(await runFixture(store, aiConfig)).toMatchObject({
@@ -858,8 +1295,8 @@ describe("去重根因回归", () => {
       url: "https://example.test/article",
     })
     const execute = negativeExecute()
-    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 1, duplicates: 0 })
-    expect(execute).toHaveBeenCalledTimes(1)
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0, duplicates: 0 })
+    expect(execute).not.toHaveBeenCalled()
     expect(rolesOf(store)).toEqual([])
   })
 

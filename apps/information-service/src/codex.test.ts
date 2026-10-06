@@ -421,3 +421,38 @@ result({summary:'custom'}); emit({type:'turn.completed'});`)
   assert.equal(raw.includes("gateway.test"), false)
   assert.equal(JSON.parse(raw.trim()).provider, "openai-compatible")
 })
+
+test("queued requests record one ledger row with wait, execution and safe task counts", async () => {
+  const f = await fixture(
+    `setTimeout(() => { result({summary:"测试"}); emit({type:"turn.completed"}); }, 120);`,
+  )
+  const first = f.run()
+  const second = f.run({
+    purpose: "entry",
+    telemetry: {
+      triggerId: "test-trigger",
+      tasks: ["entry", "dedupe"],
+      uniqueDocumentCount: 3,
+      pairCount: 2,
+    },
+  })
+  await first
+  const result = await second
+  assert.ok((result.queueDurationMs ?? 0) >= 100)
+  const raw = await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8")
+  const rows = raw
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  assert.equal(rows.length, 2)
+  assert.equal(new Set(rows.map((row) => row.requestId)).size, 2)
+  const row = rows.find((item) => item.triggerId === "test-trigger")
+  assert.deepEqual(row.tasks, ["entry", "dedupe"])
+  assert.equal(row.uniqueDocumentCount, 3)
+  assert.equal(row.pairCount, 2)
+  assert.equal(row.queueDurationMs, result.queueDurationMs)
+  assert.ok(row.executionDurationMs >= 100)
+  assert.equal(row.promptChars, "仅总结这段中文文章。".length)
+  assert.equal(row.usage, null)
+  assert.ok(!raw.includes("仅总结这段中文文章。"))
+})

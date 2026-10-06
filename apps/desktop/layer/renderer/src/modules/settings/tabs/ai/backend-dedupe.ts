@@ -10,6 +10,20 @@ const reportSchema = z.object({
     duplicates: count,
     pending: count,
     exactDuplicates: count.optional(),
+    unresolved: count.optional(),
+    sharedComparisons: count.optional(),
+    relationCacheHits: count.optional(),
+    dedicatedComparisons: count.optional(),
+    unknownUsageRequests: count.optional(),
+    // 共享请求已计入单篇，只展示总量供解释，不再次累加为独立去重费用。
+    sharedAnalysis: z
+      .object({
+        requests: count,
+        pairs: count,
+        unknownUsageRequests: count,
+        usage: z.object({ inputTokens: count, outputTokens: count, cachedInputTokens: count }),
+      })
+      .optional(),
     usage: z.object({ inputTokens: count, outputTokens: count, cachedInputTokens: count }),
   }),
 })

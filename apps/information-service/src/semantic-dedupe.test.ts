@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import type { CodexJsonOptions } from "./codex"
+import { CodexRunError } from "./codex"
 import type { SemanticDuplicateCandidate, SemanticDuplicateEntry } from "./semantic-dedupe"
 import {
   createSemanticDuplicatePrompt,
@@ -10,6 +11,7 @@ import {
   MAX_DEDUPE_CONTENT_LENGTH,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeDedupeText,
+  normalizeSemanticDuplicateOutput,
   semanticDuplicateOutputSchema,
   semanticDuplicatePairKey,
   truncateDedupeDescription,
@@ -73,6 +75,121 @@ it("推理强度语义去重沿用私有配置，外部模型仍维持low", asyn
 })
 
 describe("语义去重候选预筛", () => {
+  it("倒排与逐条最优选择保持穷举结果，包括同分、重复身份、目标和已判过滤", () => {
+    // 独立的穷举基准只用于小样本，防止优化通过漏召回改变结果。
+    const grams = (text: string) => {
+      const value = (normalizeDedupeText(text) ?? "").replaceAll(/\s+/g, "")
+      return new Set(
+        value.length <= 1
+          ? value
+            ? [value]
+            : []
+          : Array.from({ length: value.length - 1 }, (_, i) => value.slice(i, i + 2)),
+      )
+    }
+    const dice = (a: string, b: string) => {
+      const left = grams(a),
+        right = grams(b)
+      return left.size && right.size
+        ? (2 * [...left].filter((gram) => right.has(gram)).length) / (left.size + right.size)
+        : 0
+    }
+    const titles = [
+      "活动第1轮开放报名",
+      "活动第2轮开放报名",
+      "Annual launch 2026",
+      "Annual launch 2027",
+      "不同分析观点",
+      "",
+      "短",
+    ]
+    const samples = Array.from({ length: 65 }, (_, i) => ({
+      ...entry(
+        `id-${i % 63}`,
+        titles[i % titles.length]!,
+        i === 0 ? "bad-time" : at(i % 57),
+        i % 3 === 0 ? "活动截止条件及数字相同" : "",
+      ),
+      originalIdentity: `original-${i % 61}`,
+    }))
+    const decided = new Set([semanticDuplicatePairKey("id-13", "id-6")])
+    const settled = new Set(["id-2", "id-9"])
+    for (const targets of [undefined, new Set(["id-6", "id-9", "id-42"]), new Set<string>()]) {
+      const ordered = samples
+        .map((entry) => ({ entry, at: Date.parse(entry.publishedAt) }))
+        .filter((item) => Number.isFinite(item.at))
+        .sort((a, b) => b.at - a.at)
+      const all: Array<SemanticDuplicateCandidate & { index: number; right: number }> = []
+      for (let i = 0; i < ordered.length; i++)
+        for (let j = i + 1; j < ordered.length; j++) {
+          const left = ordered[i]!,
+            right = ordered[j]!
+          if (left.at - right.at > 48 * 60 * 60 * 1000) continue
+          if (
+            left.entry.itemId === right.entry.itemId ||
+            left.entry.originalIdentity === right.entry.originalIdentity
+          )
+            continue
+          if (targets && !targets.has(left.entry.itemId) && !targets.has(right.entry.itemId))
+            continue
+          const pairKey = semanticDuplicatePairKey(left.entry.itemId, right.entry.itemId)
+          if (
+            decided.has(pairKey) ||
+            (settled.has(left.entry.itemId) && settled.has(right.entry.itemId))
+          )
+            continue
+          const title = dice(left.entry.title, right.entry.title)
+          const context = dice(
+            `${left.entry.title} ${left.entry.description}`.trim(),
+            `${right.entry.title} ${right.entry.description}`.trim(),
+          )
+          if (title < 0.42 && context < 0.32) continue
+          all.push({
+            index: i,
+            right: j,
+            pairKey,
+            similarity: Math.max(title, context),
+            keepEntryId: right.entry.itemId,
+            testEntryId: left.entry.itemId,
+            entries: [left.entry, right.entry],
+          })
+        }
+      const seen = new Set<string>()
+      const expected = all
+        .sort((a, b) => a.index - b.index || b.similarity - a.similarity || a.right - b.right)
+        .filter((pair) => {
+          if (seen.has(pair.testEntryId)) return false
+          seen.add(pair.testEntryId)
+          return true
+        })
+        .map(({ index: _index, right: _right, ...pair }) => pair)
+      for (const maxCandidates of [0, 1, 5, 25, 100])
+        expect(
+          getSemanticDuplicateCandidates(samples, {
+            maxCandidates,
+            targetItemIds: targets,
+            decidedPairKeys: decided,
+            settledItemIds: settled,
+          }),
+        ).toEqual(expected.slice(0, maxCandidates))
+    }
+  })
+
+  it("同一条目和同一原帖跨订阅上下文都不生成自比较", () => {
+    // 原文身份与订阅上下文分开；不同内容版本也不能把同一原帖当成两篇新闻。
+    expect(
+      getSemanticDuplicateCandidates([
+        entry("same", "项目活动更新", at(0)),
+        entry("same", "项目活动更新", at(1)),
+      ]),
+    ).toEqual([])
+    expect(
+      getSemanticDuplicateCandidates([
+        { ...entry("feed-copy", "项目活动更新", at(0)), originalIdentity: "x:123" },
+        { ...entry("list-copy", "项目活动更新", at(1)), originalIdentity: "x:123" },
+      ]),
+    ).toEqual([])
+  })
   it("同一事件的两条互为候选，默认保留较旧的一条", () => {
     // 传入顺序颠倒也不会改变方向：函数内部按发布时间从新到旧排序。
     const candidates = getSemanticDuplicateCandidates([
@@ -191,7 +308,7 @@ describe("语义去重判定归一化", () => {
     expect(run.evaluations[0]).toMatchObject({ duplicate: false, hideEntryId: null })
   })
 
-  it("模型给出的条目不属于这一对时回落到候选默认方向", async () => {
+  it("模型给出的条目不属于这一对时拒绝隐藏并保留异常状态", async () => {
     const execute = vi.fn(async () => ({
       durationMs: 5,
       model: "test-model",
@@ -219,13 +336,14 @@ describe("语义去重判定归一化", () => {
       signal: new AbortController().signal,
     })
     expect(run.evaluations[0]).toMatchObject({
-      duplicate: true,
-      hideEntryId: "newer",
-      keepEntryId: "older",
+      duplicate: false,
+      hideEntryId: null,
+      keepEntryId: null,
+      status: "invalid_result",
     })
   })
 
-  it("模型漏答的候选写入否定判定，避免下一轮重复付费", async () => {
+  it("模型漏答明确标为缺失结果，不冒充已确认不同", async () => {
     const execute = vi.fn(async () => ({
       durationMs: 5,
       model: "test-model",
@@ -248,8 +366,137 @@ describe("语义去重判定归一化", () => {
         keepEntryId: null,
         pairKey: candidates[0]!.pairKey,
         reason: "模型未返回该候选的判定。",
+        status: "missing_result",
       },
     ])
+  })
+
+  it("共享与独立执行都拒绝重复回答，只影响异常候选并保留其他有效结论", async () => {
+    // 同批的重复、缺失和未知配对不能覆盖另一个已核验的有效答案。
+    const other: SemanticDuplicateCandidate = {
+      ...candidates[0]!,
+      pairKey: "other-new::other-old",
+      keepEntryId: "other-old",
+      testEntryId: "other-new",
+      entries: [entry("other-new", "另一事件", at(1)), entry("other-old", "另一事件", at(0))],
+    }
+    const missing = { ...other, pairKey: "missing-new::missing-old" }
+    const answer = (candidate: SemanticDuplicateCandidate, duplicate: boolean) => ({
+      pairKey: candidate.pairKey,
+      duplicate,
+      confidence: 0.95,
+      factComparison: {
+        verdict: duplicate ? ("equivalent" as const) : ("different" as const),
+        onlyInFirst: [],
+        onlyInSecond: [],
+      },
+      keepEntryId: candidate.keepEntryId,
+      hideEntryId: candidate.testEntryId,
+      reason: "合成判定",
+    })
+    const result = {
+      results: [
+        answer(candidates[0]!, false),
+        answer(candidates[0]!, true),
+        answer(other, true),
+        { ...answer(other, true), pairKey: "unknown-pair" },
+      ],
+    }
+    expect(semanticDuplicateOutputSchema.safeParse(result).success).toBe(true)
+    const batch = [...candidates, other, missing]
+    const execute = vi.fn(async () => ({
+      durationMs: 1,
+      model: "test-model",
+      result,
+      toolCalls: 0,
+      usage: null,
+    }))
+    const run = await evaluateSemanticDuplicateCandidates({
+      aiConfig,
+      candidates: batch,
+      execute: execute as never,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+    })
+    expect(run.evaluations).toEqual(normalizeSemanticDuplicateOutput(batch, result))
+    expect(run.evaluations).toMatchObject([
+      { duplicate: false, status: "invalid_result" },
+      { duplicate: true, status: "decided" },
+      { duplicate: false, status: "missing_result" },
+    ])
+  })
+
+  it("模型无法确认或置信不足时保留双方并标为待复核", () => {
+    const answer = {
+      pairKey: candidates[0]!.pairKey,
+      duplicate: false,
+      confidence: 0.9,
+      factComparison: { verdict: "uncertain" as const, onlyInFirst: [], onlyInSecond: [] },
+      keepEntryId: null,
+      hideEntryId: null,
+      reason: "无法证明覆盖",
+    }
+    expect(normalizeSemanticDuplicateOutput(candidates, { results: [answer] })[0]).toMatchObject({
+      status: "uncertain",
+      duplicate: false,
+    })
+    expect(
+      normalizeSemanticDuplicateOutput(candidates, {
+        results: [
+          {
+            ...answer,
+            duplicate: true,
+            confidence: 0.5,
+            factComparison: { ...answer.factComparison, verdict: "equivalent" },
+          },
+        ],
+      })[0],
+    ).toMatchObject({ status: "uncertain", duplicate: false })
+  })
+
+  it.each(["MISSING_OUTPUT", "INVALID_OUTPUT"] as const)(
+    "执行器%s也标为待补判并保留已测用量",
+    async (code) => {
+      // 格式校验失败不等于文章不同；错误里的原始内容不进入结果或缓存。
+      const usage = { inputTokens: 12, outputTokens: 7, cachedInputTokens: 0 }
+      const execute = vi.fn(async () => {
+        throw new CodexRunError(code, usage)
+      })
+      const run = await evaluateSemanticDuplicateCandidates({
+        aiConfig,
+        candidates,
+        execute,
+        runtimeDir: "/unused",
+        signal: new AbortController().signal,
+      })
+      expect(run).toMatchObject({
+        executed: true,
+        usage,
+        evaluations: [
+          {
+            duplicate: false,
+            status: code === "MISSING_OUTPUT" ? "missing_result" : "invalid_result",
+          },
+        ],
+      })
+      expect(execute).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it("执行器取消不能被吞成普通去重结果", async () => {
+    const error = new CodexRunError("ABORTED")
+    const execute = vi.fn(async () => {
+      throw error
+    })
+    await expect(
+      evaluateSemanticDuplicateCandidates({
+        aiConfig,
+        candidates,
+        execute,
+        runtimeDir: "/unused",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toBe(error)
   })
 
   // 比较结论独立于模型的布尔值：未证明单向覆盖或证据矛盾时均不能隐藏。
@@ -405,6 +652,35 @@ describe("语义去重判定归一化", () => {
     expect(prompt).toContain("最后补充：新进展、独立观点和不同结论。")
     expect(prompt).toContain("同一组事实的转载")
     expect(prompt).toContain("独立观点")
+  })
+
+  it("同批多对共享正文只出现一次，配对身份和内容完整性不变", () => {
+    const uniqueBody = "重复传输探针正文包含最后一个关键事实。"
+    const anchor = { ...entry("anchor", "共同事件", at(0)), content: uniqueBody }
+    const pairs = ["b", "c", "d"].map((id, i) => ({
+      pairKey: semanticDuplicatePairKey("anchor", id),
+      keepEntryId: "anchor",
+      testEntryId: id,
+      similarity: 1,
+      entries: [entry(id, "共同事件", at(i + 1)), anchor] as [
+        SemanticDuplicateEntry,
+        SemanticDuplicateEntry,
+      ],
+    }))
+    const prompt = createSemanticDuplicatePrompt(pairs)
+    const data = JSON.parse(prompt.slice(prompt.indexOf("候选：") + "候选：".length))
+    expect(data.documents).toHaveLength(4)
+    expect(data.candidates).toHaveLength(3)
+    expect(prompt.split(uniqueBody)).toHaveLength(2)
+    expect(
+      data.documents.find((document: SemanticDuplicateEntry) => document.itemId === "anchor")
+        .content,
+    ).toBe(uniqueBody)
+    expect(
+      data.candidates.every((pair: SemanticDuplicateCandidate) =>
+        pair.entries.every((item) => !item.content),
+      ),
+    ).toBe(true)
   })
 
   it("提示词包含候选并要求保守判定", () => {

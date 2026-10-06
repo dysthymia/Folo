@@ -3,12 +3,13 @@ import type { DatabaseSync } from "node:sqlite"
 
 import type { ConditionSet, RuleSet } from "@follow/information-core"
 import { compileInstructions, matchConditions } from "@follow/information-core"
+import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import type { CodexUsage, runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
-import type { Source } from "./folo"
+import type { Source, SourceEntry } from "./folo"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
@@ -18,20 +19,56 @@ import type {
   SemanticDuplicateCandidate,
   SemanticDuplicateEntry,
   SemanticDuplicateEvaluation,
+  SemanticDuplicateEvaluationStatus,
 } from "./semantic-dedupe"
 import {
   dedupeContentEvidence,
   dedupeUrlHost,
   evaluateSemanticDuplicateCandidates,
   getSemanticDuplicateCandidates,
+  isWithinDedupeWindow,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
   SEMANTIC_DUPLICATE_PROMPT_VERSION,
+  semanticDuplicateEvaluationStatuses,
   semanticDuplicatePairKey,
   truncateDedupeDescription,
 } from "./semantic-dedupe"
 import { sourceText } from "./service"
 import type { Store } from "./store"
+
+// 内容关系只按实际证据和判重版本缓存；规则范围与人工恢复仍在应用阶段核验。
+const relationEvaluationSchema = z
+  .object({
+    pairKey: z.string(),
+    duplicate: z.boolean(),
+    confidence: z.number().min(0).max(1),
+    keepEntryId: z.string().nullable(),
+    hideEntryId: z.string().nullable(),
+    reason: z.string().nullable(),
+    status: z.enum(["decided", "uncertain"]),
+    verdict: z
+      .enum([
+        "equivalent",
+        "first_contains_second",
+        "second_contains_first",
+        "different",
+        "uncertain",
+      ])
+      .optional(),
+  })
+  .strict()
+export type CachedDedupeRelation = {
+  evaluation: SemanticDuplicateEvaluation
+  model: string
+  provider: string
+}
+export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate) {
+  // 包括方向和全部模型可见字段，防止正文、标题、时间或来源变化后误用旧结论。
+  return createHash("sha256")
+    .update(JSON.stringify([SEMANTIC_DUPLICATE_PROMPT_VERSION, candidate.entries]))
+    .digest("hex")
+}
 
 /**
  * 语义去重的持久化与执行。
@@ -42,6 +79,9 @@ import type { Store } from "./store"
 const MAX_BATCHES_PER_RUN = 3
 // 单轮最多判定的对数。预筛时多取一个，用来区分"确实没有剩余候选"与"预算刚好用尽"。
 const MAX_CANDIDATES_PER_RUN = MAX_BATCHES_PER_RUN * MAX_SEMANTIC_DUPLICATE_CANDIDATES
+// 漏答和无效回答冷却后最多补判一次；未知与证据不足等待输入或判重版本变化。
+const MAX_DEDUPE_ATTEMPTS = 2
+const DEDUPE_RETRY_COOLDOWN_MS = 60_000
 
 export type DedupeAction = {
   ruleId: string
@@ -60,9 +100,23 @@ export type DedupeDecisionView = {
   keep: ProcessingInput | null
   hide: ProcessingInput | null
   keepReference: boolean
+  status: SemanticDuplicateEvaluationStatus
+  attempts: number
+  createdAt: string
 }
 
 const inputKey = (sourceKey: string, itemId: string) => `${sourceKey}\u0000${itemId}`
+
+// 仅有附件数量或获取失败不能证明信息完整；缺失的媒体和引用也属于未核验事实。
+function incompleteDedupeContext(entry: SourceEntry) {
+  return (
+    ((entry.imageCount ?? 0) > 0 && entry.context?.images !== "complete") ||
+    (entry.mediaLength ?? 0) > (entry.imageCount ?? 0) ||
+    (entry.attachmentsDuration ?? 0) > 0 ||
+    Object.values(entry.context ?? {}).some((state) => state !== "complete") ||
+    Boolean(entry.linkedMaterials?.some((material) => material.status !== "complete"))
+  )
+}
 
 /**
  * 规则指纹只包含规则身份、触发条件、参与范围与提示词版本：正文之外的模型设置变化不追溯推翻既有
@@ -131,6 +185,14 @@ export class ProcessingDedupeStore {
       );
       CREATE INDEX IF NOT EXISTS processing_dedupe_decisions_hide
         ON processing_dedupe_decisions(hide_source_key,hide_item_id);
+      CREATE INDEX IF NOT EXISTS processing_dedupe_decisions_fingerprint
+        ON processing_dedupe_decisions(config_fingerprint);
+      CREATE TABLE IF NOT EXISTS processing_dedupe_relations (
+        evidence_key TEXT PRIMARY KEY,
+        evaluation_json TEXT NOT NULL,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS processing_dedupe_scans (
         source_key TEXT NOT NULL,
         item_id TEXT NOT NULL,
@@ -139,6 +201,8 @@ export class ProcessingDedupeStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY(source_key,item_id,config_fingerprint)
       );
+      CREATE INDEX IF NOT EXISTS processing_dedupe_scans_fingerprint
+        ON processing_dedupe_scans(config_fingerprint);
     `)
     // 旧行没有模型输入序号/代次，无法证明仍对应当前正文，迁移后自然失效并重算。
     for (const [table, columns] of [
@@ -163,6 +227,46 @@ export class ProcessingDedupeStore {
       db.exec(
         "ALTER TABLE processing_dedupe_decisions ADD COLUMN keep_reference INTEGER NOT NULL DEFAULT 0",
       )
+    if (!columns.some((row) => row.name === "evaluation_status"))
+      db.exec(
+        "ALTER TABLE processing_dedupe_decisions ADD COLUMN evaluation_status TEXT NOT NULL DEFAULT 'uncertain'",
+      )
+    if (!columns.some((row) => row.name === "attempts"))
+      db.exec(
+        "ALTER TABLE processing_dedupe_decisions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
+      )
+  }
+
+  relation(candidate: SemanticDuplicateCandidate): CachedDedupeRelation | null {
+    const row = this.db
+      .prepare("SELECT * FROM processing_dedupe_relations WHERE evidence_key=?")
+      .get(semanticDedupeEvidenceKey(candidate))
+    if (!row) return null
+    try {
+      const parsed = relationEvaluationSchema.safeParse(JSON.parse(String(row.evaluation_json)))
+      if (!parsed.success || parsed.data.pairKey !== candidate.pairKey) return null
+      return { evaluation: parsed.data, model: String(row.model), provider: String(row.provider) }
+    } catch {
+      return null
+    }
+  }
+
+  saveRelation(candidate: SemanticDuplicateCandidate, relation: CachedDedupeRelation) {
+    // 异常不能绕过按规则保存的冷却/次数限制；材料不完整也不跨任务复用。
+    const parsed = relationEvaluationSchema.safeParse(relation.evaluation)
+    if (!parsed.success || parsed.data.pairKey !== candidate.pairKey) return
+    this.db
+      .prepare(
+        `INSERT INTO processing_dedupe_relations(evidence_key,evaluation_json,model,provider)
+      VALUES(?,?,?,?) ON CONFLICT(evidence_key) DO UPDATE SET
+      evaluation_json=excluded.evaluation_json,model=excluded.model,provider=excluded.provider`,
+      )
+      .run(
+        semanticDedupeEvidenceKey(candidate),
+        JSON.stringify(parsed.data),
+        relation.model,
+        relation.provider,
+      )
   }
 
   private currentInputs() {
@@ -186,11 +290,30 @@ export class ProcessingDedupeStore {
   }
 
   /** 仍然有效的判定：两侧正文版本未变，且规则指纹仍在当前生效集合内。 */
-  private validDecisions(fingerprints: ReadonlySet<string>): DedupeDecisionView[] {
+  private validDecisions(
+    fingerprints: ReadonlySet<string>,
+    inputs?: readonly ProcessingInput[],
+  ): DedupeDecisionView[] {
     if (fingerprints.size === 0) return []
-    const byKey = this.currentInputs()
+    // 重复组查询传入已按关系索引取出的材料；后台扫描仍使用完整当前集合。
+    const byKey = inputs
+      ? new Map(inputs.map((input) => [inputKey(input.sourceKey, input.itemId), input]))
+      : this.currentInputs()
     const views: DedupeDecisionView[] = []
-    for (const row of this.db.prepare("SELECT * FROM processing_dedupe_decisions").all()) {
+    // 先按当前规则指纹使用索引，只校验相关历史关系。
+    for (const row of this.db
+      .prepare(
+        `SELECT * FROM processing_dedupe_decisions WHERE config_fingerprint IN (${[...fingerprints].map(() => "?").join(",")})${inputs ? " AND keep_input_seq IN (SELECT value FROM json_each(?)) AND hide_input_seq IN (SELECT value FROM json_each(?))" : ""}`,
+      )
+      .all(
+        ...fingerprints,
+        ...(inputs
+          ? [
+              JSON.stringify(inputs.map((input) => input.seq)),
+              JSON.stringify(inputs.map((input) => input.seq)),
+            ]
+          : []),
+      )) {
       const fingerprint = String(row.config_fingerprint)
       if (!fingerprints.has(fingerprint)) continue
       const keep = byKey.get(inputKey(String(row.keep_source_key), String(row.keep_item_id)))
@@ -218,6 +341,11 @@ export class ProcessingDedupeStore {
         hide: hide ?? null,
         keep: keep ?? null,
         keepReference: Boolean(row.keep_reference),
+        status:
+          semanticDuplicateEvaluationStatuses.find((status) => status === row.evaluation_status) ??
+          "uncertain",
+        attempts: Number(row.attempts),
+        createdAt: String(row.created_at),
         pairKey: String(row.pair_key),
         reason: row.reason === null ? null : String(row.reason),
         ruleId: String(row.rule_id),
@@ -226,9 +354,32 @@ export class ProcessingDedupeStore {
     return views
   }
 
-  /** 已判定过的对（包含否定判定），用于避免下一轮重复请求模型。 */
+  /** 只有明确结论才算已判定；未隐藏不等于已经证明不同。 */
   decidedPairKeys(fingerprints: ReadonlySet<string>): Set<string> {
-    return new Set(this.validDecisions(fingerprints).map((decision) => decision.pairKey))
+    return new Set(
+      this.validDecisions(fingerprints)
+        .filter((decision) => decision.status === "decided")
+        .map((decision) => decision.pairKey),
+    )
+  }
+
+  /** 保留待复核状态，同时把冷却和补判次数限制在候选入口，避免反复付费。 */
+  candidateExcludedPairKeys(fingerprints: ReadonlySet<string>): Set<string> {
+    const now = Date.now()
+    return new Set(
+      this.validDecisions(fingerprints)
+        .filter(
+          (decision) =>
+            !["missing_result", "invalid_result"].includes(decision.status) ||
+            decision.attempts >= MAX_DEDUPE_ATTEMPTS ||
+            Date.parse(decision.createdAt) + DEDUPE_RETRY_COOLDOWN_MS > now,
+        )
+        .map((decision) => decision.pairKey),
+    )
+  }
+
+  unresolvedDecisions(fingerprints: ReadonlySet<string>) {
+    return this.validDecisions(fingerprints).filter((decision) => decision.status !== "decided")
   }
 
   /** 只有已保存且版本有效的精确肯定判定才能省略后续语义候选。 */
@@ -238,6 +389,7 @@ export class ProcessingDedupeStore {
         .filter(
           (item) =>
             item.exact &&
+            item.status === "decided" &&
             item.duplicate &&
             item.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
         )
@@ -246,11 +398,12 @@ export class ProcessingDedupeStore {
   }
 
   /** 角色投影消费的合并结论：只取达到置信阈值且两侧都还在的判定。 */
-  merges(fingerprints: ReadonlySet<string>) {
-    return this.validDecisions(fingerprints)
+  merges(fingerprints: ReadonlySet<string>, inputs?: readonly ProcessingInput[]) {
+    return this.validDecisions(fingerprints, inputs)
       .filter(
         (decision) =>
           decision.duplicate &&
+          decision.status === "decided" &&
           decision.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD &&
           decision.keep !== null &&
           decision.hide !== null &&
@@ -271,7 +424,11 @@ export class ProcessingDedupeStore {
     if (fingerprints.size === 0) return new Set()
     const byKey = this.currentInputs()
     const settled = new Set<string>()
-    for (const row of this.db.prepare("SELECT * FROM processing_dedupe_scans").all()) {
+    for (const row of this.db
+      .prepare(
+        `SELECT * FROM processing_dedupe_scans WHERE config_fingerprint IN (${[...fingerprints].map(() => "?").join(",")})`,
+      )
+      .all(...fingerprints)) {
       if (!fingerprints.has(String(row.config_fingerprint))) continue
       const input = byKey.get(inputKey(String(row.source_key), String(row.item_id)))
       if (
@@ -283,6 +440,11 @@ export class ProcessingDedupeStore {
       if (input.seq !== Number(row.input_seq) || input.generation !== Number(row.generation))
         continue
       settled.add(input.itemId)
+    }
+    // 扫描可以暂时结束，但不能让扫描缓存阻断冷却后的一次补判。
+    for (const decision of this.unresolvedDecisions(fingerprints)) {
+      if (decision.keep) settled.delete(decision.keep.itemId)
+      if (decision.hide) settled.delete(decision.hide.itemId)
     }
     return settled
   }
@@ -305,6 +467,12 @@ export class ProcessingDedupeStore {
     if (input.decisions.length === 0) return saved
     const now = new Date().toISOString()
     const byKey = this.currentInputs()
+    const previous = new Map(
+      this.validDecisions(new Set([input.configFingerprint])).map((decision) => [
+        decision.pairKey,
+        decision,
+      ]),
+    )
     this.db.exec("SAVEPOINT dedupe_batch")
     try {
       const insert = this.db.prepare(
@@ -312,8 +480,8 @@ export class ProcessingDedupeStore {
           pair_key,config_fingerprint,rule_id,provider,model,
           keep_source_key,keep_item_id,keep_content_version,
           hide_source_key,hide_item_id,hide_content_version,
-          duplicate,confidence,reason,created_at,keep_input_seq,keep_generation,hide_input_seq,hide_generation,keep_reference
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          duplicate,confidence,reason,created_at,keep_input_seq,keep_generation,hide_input_seq,hide_generation,keep_reference,evaluation_status,attempts
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(pair_key,config_fingerprint) DO UPDATE SET
           rule_id=excluded.rule_id,provider=excluded.provider,model=excluded.model,
           keep_source_key=excluded.keep_source_key,keep_item_id=excluded.keep_item_id,
@@ -323,10 +491,13 @@ export class ProcessingDedupeStore {
           duplicate=excluded.duplicate,confidence=excluded.confidence,reason=excluded.reason,
           created_at=excluded.created_at,keep_input_seq=excluded.keep_input_seq,
           keep_generation=excluded.keep_generation,hide_input_seq=excluded.hide_input_seq,
-          hide_generation=excluded.hide_generation,keep_reference=excluded.keep_reference`,
+          hide_generation=excluded.hide_generation,keep_reference=excluded.keep_reference,
+          evaluation_status=excluded.evaluation_status,attempts=excluded.attempts`,
       )
       for (const item of input.decisions) {
         if (
+          item.keep.itemId === item.hide.itemId ||
+          item.keep.seq === item.hide.seq ||
           !this.sameInput(
             byKey.get(inputKey(item.keep.sourceKey, item.keep.itemId)),
             item.keep,
@@ -357,6 +528,9 @@ export class ProcessingDedupeStore {
           hide.seq,
           hide.generation,
           Number(item.keepReference ?? false),
+          item.evaluation.status ??
+            (item.evaluation.verdict === "uncertain" ? "uncertain" : "decided"),
+          (previous.get(item.candidate.pairKey)?.attempts ?? 0) + 1,
         )
         saved.add(item.candidate.pairKey)
       }
@@ -410,6 +584,14 @@ export type SemanticDedupeRunResult = {
   exactDuplicates: number
   /** 本轮预算用尽后仍未判定的候选对数；预算用尽时只知"还剩至少一对"，因此是下限。 */
   pending: number
+  /** 没有明确结论的关系另行报告，不把暂时停止付费显示成判定完成。 */
+  unresolved: number
+  /** 应用关系的来源分开统计，共享请求用量仍归原单篇报告。 */
+  sharedComparisons: number
+  relationCacheHits: number
+  dedicatedComparisons: number
+  /** 缺少供应商用量时保留未知，已知用量合计不能冒充全部费用。 */
+  unknownUsageRequests: number
   usage: CodexUsage
 }
 
@@ -445,6 +627,7 @@ export type PreparedSemanticDedupe = {
   participants: DedupeParticipant[]
   targetItemIds: ReadonlySet<string>
   candidates: SemanticDuplicateCandidate[]
+  exact: ReturnType<typeof exactDuplicateDecisions>
 }
 
 export type PreparedDedupeEvaluation = {
@@ -537,12 +720,16 @@ export function prepareSemanticDedupe(
       )
         continue
       const evidence = dedupeContentEvidence(input.body.content)
+      // 正文完整不代表整个条目完整，附件/引用未核验时保持待补，不允许语义隐藏。
+      evidence.contentComplete &&= !incompleteDedupeContext(input.body)
       if (readReference && !evidence.contentComplete) continue
       participants.push({
         entry: {
           ...evidence,
           description: truncateDedupeDescription(input.body.description),
           itemId: input.itemId,
+          originalIdentity: contentIdentity(input.body),
+          contentVersion: input.contentVersion,
           publishedAt: input.body.publishedAt,
           sourceTitle: source.title,
           title: input.body.title,
@@ -552,6 +739,19 @@ export function prepareSemanticDedupe(
         readReference,
       })
     }
+    // 多个来源仍分别匹配规则；同一 itemId 优先使用未读材料，参考不能冒充处理目标。
+    const unique = new Map<string, DedupeParticipant>()
+    for (const participant of participants) {
+      const previous = unique.get(participant.input.itemId)
+      if (
+        !previous ||
+        Number(participant.readReference) < Number(previous.readReference) ||
+        (participant.readReference === previous.readReference &&
+          participant.input.seq > previous.input.seq)
+      )
+        unique.set(participant.input.itemId, participant)
+    }
+    const uniqueParticipants = [...unique.values()]
     const targetItemIds = new Set(
       participants
         .filter(
@@ -567,13 +767,16 @@ export function prepareSemanticDedupe(
         .map((participant) => participant.input.itemId),
     )
     const fingerprints = new Set([action.fingerprint])
+    // 共享分析前排除本地严格同文，避免语义预筛先枚举注定被折叠的材料。
+    const exact = exactDuplicateDecisions(uniqueParticipants)
+    const exactHidden = new Set(exact.map((item) => item.hide.itemId))
     const candidates = dedupeCandidates(
-      participants,
+      uniqueParticipants.filter((item) => !exactHidden.has(item.input.itemId)),
       targetItemIds,
-      options.store.dedupe.decidedPairKeys(fingerprints),
+      options.store.dedupe.candidateExcludedPairKeys(fingerprints),
       options.store.dedupe.settledItemIds(fingerprints),
     )
-    return { action, candidates, participants, targetItemIds }
+    return { action, candidates, exact, participants: uniqueParticipants, targetItemIds }
   })
 }
 
@@ -609,6 +812,7 @@ export async function runSemanticDedupe(
     preparedEvaluations?: readonly PreparedDedupeEvaluation[]
     /** 单篇批次内部可只发布已有结果，把其他候选留给任务尾部。 */
     preparedOnly?: boolean
+    triggerId?: string
   },
 ): Promise<SemanticDedupeRunResult> {
   const result: SemanticDedupeRunResult = {
@@ -617,13 +821,20 @@ export async function runSemanticDedupe(
     duplicates: 0,
     exactDuplicates: 0,
     pending: 0,
+    unresolved: 0,
+    sharedComparisons: 0,
+    relationCacheHits: 0,
+    dedicatedComparisons: 0,
+    unknownUsageRequests: 0,
     usage: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0 },
   }
-  for (const plan of prepareSemanticDedupe(options)) {
+  const plans = prepareSemanticDedupe(options)
+  const taskRelations = new Map<string, CachedDedupeRelation>()
+  for (const plan of plans) {
     const { action, participants, targetItemIds } = plan
     if (options.signal.aborted) break
     const fingerprints = new Set([action.fingerprint])
-    const decided = options.store.dedupe.decidedPairKeys(fingerprints)
+    const decided = options.store.dedupe.candidateExcludedPairKeys(fingerprints)
     const settled = options.store.dedupe.settledItemIds(fingerprints)
     if (targetItemIds?.size === 0 || participants.length < 2) continue
     const entries = [...participants].sort(
@@ -631,7 +842,7 @@ export async function runSemanticDedupe(
         Date.parse(right.input.body.publishedAt) - Date.parse(left.input.body.publishedAt),
     )
     // 严格同一原文先本地判定；仅记录关系，所有来源和正文仍保存在原表中。
-    const exact = exactDuplicateDecisions(entries)
+    const exact = plan.exact
     const exactSaved = options.store.dedupe.saveBatch({
       configFingerprint: action.fingerprint,
       ruleId: action.ruleId,
@@ -672,9 +883,7 @@ export async function runSemanticDedupe(
     )
     for (
       let offset = 0;
-      offset < candidates.length &&
-      offset < MAX_CANDIDATES_PER_RUN &&
-      result.batches < MAX_BATCHES_PER_RUN;
+      offset < candidates.length && offset < MAX_CANDIDATES_PER_RUN;
       offset += MAX_SEMANTIC_DUPLICATE_CANDIDATES
     ) {
       if (options.signal.aborted) break
@@ -705,14 +914,24 @@ export async function runSemanticDedupe(
               }),
           ),
       )
-      const cachedKeys = new Set(cached?.map((item) => item.pairKey))
+      const reused = slice.flatMap((candidate) => {
+        if (cached?.some((item) => item.pairKey === candidate.pairKey)) return []
+        const relation =
+          taskRelations.get(semanticDedupeEvidenceKey(candidate)) ??
+          options.store.dedupe.relation(candidate)
+        return relation ? [{ ...relation, pairKey: candidate.pairKey }] : []
+      })
+      const cachedKeys = new Set([...(cached ?? []), ...reused].map((item) => item.pairKey))
       const missing = slice.filter((item) => !cachedKeys.has(item.pairKey))
       const config =
-        missing.length > 0 && !options.preparedOnly ? await options.aiConfig.read() : null
+        missing.length > 0 && !options.preparedOnly && result.batches < MAX_BATCHES_PER_RUN
+          ? await options.aiConfig.read()
+          : null
       const run = config
         ? await evaluateSemanticDuplicateCandidates({
             aiConfig: config,
             candidates: missing,
+            triggerId: options.triggerId,
             execute: options.execute,
             qianwen: await options.aiConfig.execution(config),
             runtimeDir: options.runtimeDir,
@@ -726,6 +945,13 @@ export async function runSemanticDedupe(
             provider: cached?.[0]?.provider ?? "local",
           }
       result.batches += Number(run.executed)
+      result.unknownUsageRequests += Number(run.executed && !run.usage)
+      result.sharedComparisons += cached?.length ?? 0
+      result.relationCacheHits += reused.length
+      // 正文不完整的候选在本地返回，不能计作已经发给模型的比较。
+      result.dedicatedComparisons += run.executed
+        ? run.evaluations.filter((evaluation) => evaluation.status !== "incomplete").length
+        : 0
       if (run.usage) {
         result.usage.inputTokens += run.usage.inputTokens
         result.usage.outputTokens += run.usage.outputTokens
@@ -742,10 +968,22 @@ export async function runSemanticDedupe(
       }> = []
       for (const evaluation of [
         ...(cached ?? []).map((item) => item.evaluation),
+        ...reused.map((item) => item.evaluation),
         ...run.evaluations,
       ]) {
         const candidate = slice.find((item) => item.pairKey === evaluation.pairKey)
         if (!candidate) continue
+        const origin = [...(cached ?? []), ...reused].find(
+          (item) => item.pairKey === evaluation.pairKey,
+        )
+        const relation = {
+          evaluation,
+          model: origin?.model ?? run.model,
+          provider: origin?.provider ?? run.provider,
+        }
+        // 同一任务的重叠规则共用一次结果（包括异常），每条规则仍独立保存应用与重试状态。
+        taskRelations.set(semanticDedupeEvidenceKey(candidate), relation)
+        options.store.dedupe.saveRelation(candidate, relation)
         // 判定失效前先确认两侧仍在当前库中：正文换代期间到达的结果不再落库。
         let keep = entryByItemId.get(evaluation.keepEntryId ?? candidate.keepEntryId)
         let hide = entryByItemId.get(evaluation.hideEntryId ?? candidate.testEntryId)
@@ -799,9 +1037,8 @@ export async function runSemanticDedupe(
           hide: hide.input,
           keep: keep.input,
           keepReference: keep.readReference,
-          model: cached?.find((item) => item.pairKey === evaluation.pairKey)?.model ?? run.model,
-          provider:
-            cached?.find((item) => item.pairKey === evaluation.pairKey)?.provider ?? run.provider,
+          model: relation.model,
+          provider: relation.provider,
         })
       }
       // 统一批次和补充比较可能使用不同模型，来源按原结果逐组保存。
@@ -828,6 +1065,7 @@ export async function runSemanticDedupe(
         (item) =>
           saved.has(item.candidate.pairKey) &&
           item.evaluation.duplicate &&
+          (!item.evaluation.status || item.evaluation.status === "decided") &&
           item.evaluation.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
       ).length
       for (const pairKey of saved) decided.add(pairKey)
@@ -843,20 +1081,45 @@ export async function runSemanticDedupe(
           .map((item) => item.input),
       )
   }
+  result.unresolved = options.store.dedupe.unresolvedDecisions(
+    new Set(plans.map((plan) => plan.action.fingerprint)),
+  ).length
   return result
 }
 
-/** 最小安全精确层：深链身份一致且正文一致，或跨 URL 的充分长度完整正文逐字一致。 */
+/** 精确层核对完整展示载荷；跨原文还需满足时间资格，不能仅凭正文长度隐藏。 */
 export function exactDuplicateDecisions(participants: DedupeParticipant[]) {
   const groups = new Map<string, DedupeParticipant[]>()
   for (const participant of participants) {
     // 不删标点、不转小写、不截断、不剥离 HTML，避免把观点、数字或正文尾部变化折叠。
-    const body = participant.input.body.content?.trim()
+    const entry = participant.input.body
+    const body = entry.content?.trim()
     if (!body) continue
-    const identity = contentIdentity(participant.input.body)
-    const bodyFingerprint = createHash("sha256").update(body).digest("hex")
+    // 当前来源只提供附件数量，无法证明配图或视频相同，不能走精确自动隐藏。
+    if (
+      (entry.imageCount ?? 0) > 0 ||
+      (entry.mediaLength ?? 0) > 0 ||
+      (entry.attachmentsDuration ?? 0) > 0 ||
+      incompleteDedupeContext(entry)
+    )
+      continue
+    const identity = contentIdentity(entry)
+    const payloadFingerprint = createHash("sha256")
+      .update(
+        JSON.stringify([
+          entry.title.trim(),
+          body,
+          entry.description?.trim() ?? "",
+          entry.author ?? null,
+          entry.language ?? null,
+          entry.updatedAt ?? null,
+          entry.originalContent ?? null,
+          entry.linkedMaterials ?? [],
+        ]),
+      )
+      .digest("hex")
     const key =
-      body.length >= 80 ? `body:${bodyFingerprint}` : `${identity}\u0000${bodyFingerprint}`
+      body.length >= 80 ? `payload:${payloadFingerprint}` : `${identity}\u0000${payloadFingerprint}`
     const group = groups.get(key)
     if (group) group.push(participant)
     else groups.set(key, [participant])
@@ -870,7 +1133,17 @@ export function exactDuplicateDecisions(participants: DedupeParticipant[]) {
     const keep = ordered[0]!
     return ordered
       .slice(1)
-      .filter((hide) => !hide.readReference && hide.input.itemId !== keep.input.itemId)
+      .filter(
+        (hide) =>
+          !hide.readReference &&
+          hide.input.itemId !== keep.input.itemId &&
+          // 同一原文可以延迟进入不同订阅；跨原文的旧模板重发不能直接折叠。
+          (contentIdentity(keep.input.body) === contentIdentity(hide.input.body) ||
+            isWithinDedupeWindow(
+              Date.parse(keep.input.body.publishedAt),
+              Date.parse(hide.input.body.publishedAt),
+            )),
+      )
       .map((hide) => ({
         candidate: {
           entries: [keep.entry, hide.entry] as [SemanticDuplicateEntry, SemanticDuplicateEntry],
@@ -883,6 +1156,7 @@ export function exactDuplicateDecisions(participants: DedupeParticipant[]) {
           pairKey: semanticDuplicatePairKey(keep.entry.itemId, hide.entry.itemId),
           duplicate: true,
           confidence: 1,
+          status: "decided" as const,
           keepEntryId: keep.entry.itemId,
           hideEntryId: hide.entry.itemId,
           reason: "严格相同原文，保留全部来源与正文。",

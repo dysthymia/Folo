@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions, runCodexJson } from "./codex"
+import { CodexRunError } from "./codex"
 import { runSemanticDedupe } from "./processing-dedupe"
 import { runEntryProcessing, settleReadStates } from "./processing-engine"
 import { SharedAnalysisSession } from "./processing-shared-analysis"
@@ -102,7 +103,12 @@ function save(
 }
 
 // 假执行器遵守真实动态证据目录；检查整条管线的调用次数，而非只断言 helper 返回值。
-function executor(options: ReturnType<typeof fixture>, containment = false, malformedSide = false) {
+function executor(
+  options: ReturnType<typeof fixture>,
+  containment = false,
+  malformedSide = false,
+  dedupeProblem?: "missing_result" | "invalid_result",
+) {
   return vi.fn(async <T>(request: CodexJsonOptions<T>) => {
     expect(request.purpose).toBe("entry")
     const inspectSchema = (node: unknown) => {
@@ -212,21 +218,24 @@ function executor(options: ReturnType<typeof fixture>, containment = false, malf
       dedupe: malformedSide
         ? { invalid: true }
         : {
-            results: pairs.map((pair) => ({
-              pairKey: pair.pairKey,
-              duplicate: containment,
-              confidence: 0.99,
-              keepEntryId: pair.keepEntryId,
-              hideEntryId: pair.testEntryId,
-              reason: "逐项核对事实",
-              factComparison: containment
-                ? { verdict: "equivalent", onlyInFirst: [], onlyInSecond: [] }
-                : {
-                    verdict: "different",
-                    onlyInFirst: ["支持离线部署"],
-                    onlyInSecond: ["升级无需停机"],
-                  },
-            })),
+            results: (dedupeProblem === "missing_result" ? [] : pairs).flatMap((pair) => {
+              const result = {
+                pairKey: pair.pairKey,
+                duplicate: containment,
+                confidence: 0.99,
+                keepEntryId: pair.keepEntryId,
+                hideEntryId: pair.testEntryId,
+                reason: "逐项核对事实",
+                factComparison: containment
+                  ? { verdict: "equivalent", onlyInFirst: [], onlyInSecond: [] }
+                  : {
+                      verdict: "different",
+                      onlyInFirst: ["支持离线部署"],
+                      onlyInSecond: ["升级无需停机"],
+                    },
+              }
+              return dedupeProblem === "invalid_result" ? [result, result] : [result]
+            }),
           },
       stories,
     }
@@ -259,6 +268,63 @@ afterEach(() => {
 })
 
 describe("共享材料与规则分析", () => {
+  it.each(["missing_result", "invalid_result"] as const)(
+    "共享%s也计入补判次数，不复用异常产物或立即重复付费",
+    async (status) => {
+      // 验证真实共享请求、派生结果保存和跨任务缓存，异常不影响有效单篇发布。
+      const options = fixture(false)
+      save(options, "first", "公司发布 Core 1.0，支持离线部署。")
+      save(options, "second", "公司发布 Core 1.0，升级无需停机。")
+      const execute = executor(options, false, false, status)
+      expect(await process(options, execute)).toMatchObject({
+        completed: 2,
+        failures: [],
+        metrics: { modelCalls: 1 },
+      })
+      expect(options.sharedAnalysis.dedupeCosts).toMatchObject({
+        requests: 1,
+        pairs: 1,
+        unknownUsageRequests: 0,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      })
+      expect(options.sharedAnalysis.dedupeEvaluations).toMatchObject([
+        { evaluation: { duplicate: false, status } },
+      ])
+      const noExtraCall = vi.fn(async () => {
+        throw new Error("unexpected_extra_model_call")
+      })
+      const run = () =>
+        runSemanticDedupe({
+          ...options,
+          signal: new AbortController().signal,
+          preparedEvaluations: options.sharedAnalysis.dedupeEvaluations,
+          execute: noExtraCall,
+        })
+      expect(await run()).toMatchObject({ batches: 0, unresolved: 1 })
+      expect(await run()).toMatchObject({ candidates: 0, unresolved: 1 })
+      expect(noExtraCall).not.toHaveBeenCalled()
+      const restored = new SharedAnalysisSession(options)
+      await restored.restore(options.store.automation.inputs())
+      expect(restored.dedupeEvaluations).toEqual([])
+    },
+  )
+  it("共享请求失败仍报告真实用量，未知用量单独计数", async () => {
+    for (const usage of [null, { inputTokens: 80, outputTokens: 20, cachedInputTokens: 0 }]) {
+      const options = fixture(false)
+      save(options, "first", "公司发布 Core 1.0，支持离线部署。")
+      save(options, "second", "公司发布 Core 1.0，升级无需停机。")
+      const execute = executor(options)
+      execute.mockRejectedValueOnce(new CodexRunError("INVALID_OUTPUT", usage))
+      await process(options, execute)
+      expect(options.sharedAnalysis.dedupeCosts).toMatchObject({
+        requests: 1,
+        pairs: 1,
+        unknownUsageRequests: usage ? 0 : 1,
+        usage: { inputTokens: usage?.inputTokens ?? 0, outputTokens: usage?.outputTokens ?? 0 },
+      })
+    }
+  })
+
   it("单篇、语义去重和新事件综述共用一次模型调用，并保留可核查引用", async () => {
     const options = fixture()
     save(options, "first", "公司发布 Core 1.0，支持离线部署。")
@@ -400,7 +466,9 @@ describe("共享材料与规则分析", () => {
       completed: 2,
       failures: [],
     })
-    expect(options.sharedAnalysis.dedupeEvaluations).toEqual([])
+    expect(options.sharedAnalysis.dedupeEvaluations).toMatchObject([
+      { evaluation: { duplicate: false, status: "invalid_result" } },
+    ])
     expect(options.store.processingState.published()).toHaveLength(2)
   })
 })

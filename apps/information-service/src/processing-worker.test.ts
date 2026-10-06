@@ -883,6 +883,11 @@ describe("列表加载后台目标范围", () => {
         candidates: 0,
         duplicates: 0,
         exactDuplicates: 0,
+        unresolved: 0,
+        sharedComparisons: 0,
+        relationCacheHits: 0,
+        dedicatedComparisons: 0,
+        unknownUsageRequests: 0,
         pending: 0,
         usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
       }))

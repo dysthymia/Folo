@@ -98,17 +98,40 @@ function BackendDedupeStatus({ ownerId }: { ownerId?: string }) {
           </p>
           <p className="text-xs text-text-secondary">{t("automation.dedupe.shared_model")}</p>
           {snapshot.report ? (
-            <p className="text-xs text-text-secondary">
-              {t("automation.dedupe.recent", {
-                ...snapshot.report,
-                exact: snapshot.report.exactDuplicates ?? t("processing.report.not_collected"),
-                time: new Date(snapshot.report.finishedAt).toLocaleString(i18n.language),
-                input: snapshot.report.usage.inputTokens,
-                output: snapshot.report.usage.outputTokens,
-                // React 文本已经转义，避免日期中的斜杠被重复显示成 HTML 实体。
-                interpolation: { escapeValue: false },
-              })}
-            </p>
+            <div className="space-y-1 text-xs text-text-secondary">
+              <p>
+                {t("automation.dedupe.recent", {
+                  ...snapshot.report,
+                  exact: snapshot.report.exactDuplicates ?? t("processing.report.not_collected"),
+                  time: new Date(snapshot.report.finishedAt).toLocaleString(i18n.language),
+                  input: snapshot.report.usage.inputTokens,
+                  output: snapshot.report.usage.outputTokens,
+                  unknown:
+                    snapshot.report.unknownUsageRequests ?? t("processing.report.not_collected"),
+                  // React 文本已经转义，避免日期中的斜杠被重复显示成 HTML 实体。
+                  interpolation: { escapeValue: false },
+                })}
+              </p>
+              <p>
+                {t("automation.dedupe.comparison_sources", {
+                  unresolved: snapshot.report.unresolved ?? t("processing.report.not_collected"),
+                  shared: snapshot.report.sharedComparisons ?? t("processing.report.not_collected"),
+                  cached: snapshot.report.relationCacheHits ?? t("processing.report.not_collected"),
+                  dedicated:
+                    snapshot.report.dedicatedComparisons ?? t("processing.report.not_collected"),
+                })}
+              </p>
+              {snapshot.report.sharedAnalysis && (
+                <p>
+                  {t("automation.dedupe.shared_usage", {
+                    requests: snapshot.report.sharedAnalysis.requests,
+                    input: snapshot.report.sharedAnalysis.usage.inputTokens,
+                    output: snapshot.report.sharedAnalysis.usage.outputTokens,
+                    unknown: snapshot.report.sharedAnalysis.unknownUsageRequests,
+                  })}
+                </p>
+              )}
+            </div>
           ) : (
             <p className="text-xs text-text-secondary">{t("automation.dedupe.no_report")}</p>
           )}

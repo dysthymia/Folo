@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 
@@ -87,6 +88,13 @@ export interface CodexJsonOptions<T> {
   signal?: AbortSignal
   command?: string
   purpose?: "entry" | "story" | "dedupe" | "chat" | "preview" | "unknown"
+  /** 仅记录任务身份和计数，禁止正文、提示词或凭据进入账本。 */
+  telemetry?: {
+    triggerId?: string
+    tasks?: Array<"entry" | "story" | "dedupe">
+    uniqueDocumentCount?: number
+    pairCount?: number
+  }
   // 自定义模型只影响这个 CLI 任务；上游密钥只留在本机协议转换器内存中。
   qianwen?: AIChatExecution
 }
@@ -355,9 +363,11 @@ const execute = ({
 
 // Folo 聊天与后台处理共享槽位，客户端自己的 Codex 配置和调度不受影响。
 export async function runCodexJson<T>(options: CodexJsonOptions<T>) {
+  const queuedAt = Date.now()
+  const requestId = randomUUID()
   try {
     return await runSerialized(options.runtimeDir, options.signal, () =>
-      runCodexJsonUnlocked(options),
+      runCodexJsonUnlocked(options, queuedAt, requestId),
     )
   } catch (error) {
     if (error instanceof CodexExecutionQueueError) throw new CodexRunError("ABORTED")
@@ -365,22 +375,28 @@ export async function runCodexJson<T>(options: CodexJsonOptions<T>) {
   }
 }
 
-const runCodexJsonUnlocked = async <T>({
-  prompt,
-  schema,
-  validate,
-  model,
-  reasoningEffort = "low",
-  runtimeDir,
-  timeoutMs = 120_000,
-  signal,
-  command = resolveCodexCommand(),
-  qianwen,
-  purpose = "unknown",
-}: CodexJsonOptions<T>): Promise<{
+const runCodexJsonUnlocked = async <T>(
+  {
+    prompt,
+    schema,
+    validate,
+    model,
+    reasoningEffort = "low",
+    runtimeDir,
+    timeoutMs = 120_000,
+    signal,
+    command = resolveCodexCommand(),
+    qianwen,
+    purpose = "unknown",
+    telemetry,
+  }: CodexJsonOptions<T>,
+  queuedAt: number,
+  requestId: string,
+): Promise<{
   result: T
   model: string
   durationMs: number
+  queueDurationMs?: number
   usage: CodexUsage | null
   toolCalls: number
 }> => {
@@ -512,6 +528,7 @@ const runCodexJsonUnlocked = async <T>({
       result: output,
       model,
       durationMs: Date.now() - startedAt,
+      queueDurationMs: startedAt - queuedAt,
       ...execution,
       usage: recordedUsage,
     }
@@ -534,7 +551,17 @@ const runCodexJsonUnlocked = async <T>({
         await appendFile(
           join(runtimeDir, "codex-usage.jsonl"),
           `${JSON.stringify({
+            requestId,
+            queuedAt: new Date(queuedAt).toISOString(),
             startedAt: new Date(startedAt).toISOString(),
+            queueDurationMs: startedAt - queuedAt,
+            executionDurationMs: Date.now() - startedAt,
+            promptChars: prompt.length,
+            schemaChars: JSON.stringify(schema).length,
+            triggerId: telemetry?.triggerId ?? null,
+            tasks: telemetry?.tasks ?? [purpose],
+            uniqueDocumentCount: telemetry?.uniqueDocumentCount ?? null,
+            pairCount: telemetry?.pairCount ?? null,
             finishedAt: new Date().toISOString(),
             model,
             provider: qianwen ? (qianwen.provider ?? "qianwen") : "codex",

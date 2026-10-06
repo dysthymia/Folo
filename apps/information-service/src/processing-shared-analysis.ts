@@ -8,8 +8,8 @@ import { z } from "zod"
 
 import type { AIConfigStore, AIProvider } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
-import type { CodexJsonOptions } from "./codex"
-import { runCodexJson } from "./codex"
+import type { CodexJsonOptions, CodexUsage } from "./codex"
+import { CodexRunError, runCodexJson } from "./codex"
 import type { PreparedDedupeEvaluation } from "./processing-dedupe"
 import { exactDuplicateDecisions, prepareSemanticDedupe } from "./processing-dedupe"
 import type { EvidenceCatalog } from "./processing-evidence"
@@ -19,6 +19,7 @@ import {
   createSemanticDuplicatePrompt,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeSemanticDuplicateOutput,
+  semanticDuplicateEvaluationStatuses,
   semanticDuplicateOutputSchema,
 } from "./semantic-dedupe"
 import type { Store } from "./store"
@@ -68,6 +69,7 @@ const cachedDedupeSchema = z
         keepEntryId: z.string().nullable(),
         hideEntryId: z.string().nullable(),
         reason: z.string().nullable(),
+        status: z.enum(semanticDuplicateEvaluationStatuses).optional(),
         verdict: z
           .enum([
             "equivalent",
@@ -118,6 +120,13 @@ const record = (value: unknown): value is Record<string, unknown> =>
 export class SharedAnalysisSession {
   readonly dedupeEvaluations: PreparedDedupeEvaluation[] = []
   readonly storyGroups: SharedStoryGroup[] = []
+  // 共享调用计费归单篇；此处只报告参与去重的请求总用量，不能与单篇再次相加。
+  readonly dedupeCosts = {
+    requests: 0,
+    pairs: 0,
+    unknownUsageRequests: 0,
+    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+  }
 
   constructor(
     private readonly options: {
@@ -126,6 +135,7 @@ export class SharedAnalysisSession {
       runtimeDir: string
       sourceKeys: string[]
       cutoffAt: string
+      triggerId?: string
     },
   ) {}
 
@@ -153,7 +163,7 @@ export class SharedAnalysisSession {
         exactDuplicateDecisions(plan.participants).map((item) => item.candidate.pairKey),
       )
       for (const candidate of plan.candidates) {
-        if (exactPairs.has(candidate.pairKey)) continue
+        if (exactPairs.has(candidate.pairKey) || store.dedupe.relation(candidate)) continue
         if (pairs.some((item) => item.pairKey === candidate.pairKey)) continue
         if (pairs.length >= MAX_SEMANTIC_DUPLICATE_CANDIDATES) break
         if (!candidate.entries.every((item) => item.contentComplete && item.content?.trim()))
@@ -170,7 +180,7 @@ export class SharedAnalysisSession {
     }
     const storyPlans = this.storyPlans(materials)
     if (!pairs.length && !storyPlans.length) return execute(request)
-    const comparisonRules = createSemanticDuplicatePrompt([]).split("候选：")[0]
+    const comparisonRules = createSemanticDuplicatePrompt([]).split("\n候选（")[0]
     const prompt = `${request.prompt}
 
 同时执行以下已命中的规则。标题、正文及证据目录已在上面的单篇材料中出现，不要重复提取。
@@ -221,17 +231,48 @@ sentences 必须拼成 body，facts.sentenceIndexes 从0开始，inference 必�
       required: ["entry", "dedupe", "stories"],
       additionalProperties: false,
     }
+    const recordUsage = (usage: CodexUsage | null) => {
+      if (!pairs.length) return
+      this.dedupeCosts.requests++
+      this.dedupeCosts.pairs += pairs.length
+      if (usage) {
+        this.dedupeCosts.usage.inputTokens += usage.inputTokens
+        this.dedupeCosts.usage.outputTokens += usage.outputTokens
+        this.dedupeCosts.usage.cachedInputTokens += usage.cachedInputTokens
+      } else this.dedupeCosts.unknownUsageRequests++
+    }
     const response = await execute<SharedEnvelope<T>>({
       ...request,
       prompt,
       schema: envelopeSchema,
+      telemetry: {
+        triggerId: this.options.triggerId,
+        tasks: [
+          "entry",
+          ...(pairs.length ? ["dedupe" as const] : []),
+          ...(storyPlans.length ? ["story" as const] : []),
+        ],
+        uniqueDocumentCount: new Set([...materialIds, ...references.keys()]).size,
+        pairCount: pairs.length,
+      },
       // 逐项校验派生结果，损坏的去重或综述不能连带丢弃有效单篇结果。
       validate: (value): value is SharedEnvelope<T> =>
         record(value) && request.validate(value.entry) && "dedupe" in value && "stories" in value,
+    }).catch((error: unknown) => {
+      // 失败也可能消耗用量；没有计数时保持未知，不从单篇合计中伪造分摊。
+      recordUsage(error instanceof CodexRunError ? error.usage : null)
+      throw error
     })
+    recordUsage(response.usage)
     const provider = materials[0]?.provider ?? (await this.options.aiConfig.read()).provider
     const dedupe = semanticDuplicateOutputSchema.safeParse(response.result.dedupe)
-    const evaluations = dedupe.success ? normalizeSemanticDuplicateOutput(pairs, dedupe.data) : []
+    const evaluations = dedupe.success
+      ? normalizeSemanticDuplicateOutput(pairs, dedupe.data)
+      : normalizeSemanticDuplicateOutput(pairs, { results: [] }).map((evaluation) => ({
+          ...evaluation,
+          status: "invalid_result" as const,
+          reason: "共享去重输出无效，保留原文。",
+        }))
     const savedDedupe: PreparedDedupeEvaluation[] = []
     for (const plan of plans) {
       for (const evaluation of evaluations) {
@@ -276,7 +317,10 @@ sentences 必须拼成 body，facts.sentenceIndexes 从0开始，inference 必�
     this.storyGroups.push(...savedStories)
     await this.persist(
       materials.map((item) => item.input),
-      savedDedupe,
+      // 本批异常写入关系库的冷却和次数限制，但不能跨任务复用成新的模型结果。
+      savedDedupe.filter((item) =>
+        ["decided", "uncertain"].includes(item.evaluation.status ?? "decided"),
+      ),
       savedStories,
     )
     return { ...response, result: response.result.entry }
