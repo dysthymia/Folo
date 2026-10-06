@@ -210,7 +210,8 @@ export const EntryItemWrapper: FC<
   const isWide = !showEntryDetailsColumn
 
   const Link = view === FeedViewType.SocialMedia ? "article" : NavLink
-  const isAll = view === FeedViewType.All
+  // 文章与全部共用紧凑列表，行背景和悬浮操作也保持一致。
+  const isCompactList = view === FeedViewType.All || view === FeedViewType.Articles
   const sourceColorClassName = sourceColorStyle
     ? asRead
       ? "bg-[var(--entry-source-background-read)] hover:bg-[var(--entry-source-background-read-hover)]"
@@ -233,7 +234,7 @@ export const EntryItemWrapper: FC<
           "relative block cursor-button overflow-visible duration-200",
           sourceColorClassName,
           !isWide ? "rounded-none @[650px]:rounded-md" : "rounded-md",
-          isAll && "!rounded-none",
+          isCompactList && "!rounded-none",
           (isActive || isContextMenuOpen) && "!bg-theme-item-active",
           itemClassName,
         )}
@@ -283,7 +284,7 @@ const ActionBar = ({
       className={cn(
         "absolute -right-2 top-0 -translate-y-1/2 rounded-lg border border-gray-200 bg-white/90 p-1 shadow-sm backdrop-blur-sm dark:border-neutral-900 dark:bg-neutral-900",
         isFirstItem && "-right-2 top-4",
-        view === FeedViewType.All && "right-1 top-1/2",
+        (view === FeedViewType.All || view === FeedViewType.Articles) && "right-1 top-1/2",
       )}
       onClick={(e) => {
         e.stopPropagation()

@@ -1,20 +1,20 @@
-import { Skeleton } from "@follow/components/ui/skeleton/index.jsx"
-import { cn } from "@follow/utils/utils"
+import { FeedViewType } from "@follow/constants"
 
 import { RelativeTime } from "~/components/ui/datetime"
 import { Media } from "~/components/ui/media/Media"
-import { ListItem } from "~/modules/entry-column/templates/list-item-template"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
-import { readableContentMaxWidth } from "../styles"
 import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
+import { AllItem } from "./all-item"
+import { ListItemSkeleton } from "./list-item"
 
-export function ArticleItem({ entryId, translation, view }: UniversalItemProps) {
-  return <ListItem entryId={entryId} translation={translation} view={view} />
+export function ArticleItem({ view = FeedViewType.Articles, ...props }: UniversalItemProps) {
+  // 文章复用全部的紧凑单行布局，并保留文章视图的操作上下文。
+  return <AllItem {...props} view={view} />
 }
 
-ArticleItem.wrapperClassName = cn(readableContentMaxWidth, "pl-4 pr-3")
+ArticleItem.wrapperClassName = AllItem.wrapperClassName
 
 export function ArticleItemStateLess({ entry, feed }: EntryItemStatelessProps) {
   return (
@@ -53,28 +53,5 @@ export function ArticleItemStateLess({ entry, feed }: EntryItemStatelessProps) {
   )
 }
 
-export const ArticleItemSkeleton = (
-  <div className={`relative h-[120px] rounded-md ${readableContentMaxWidth}`}>
-    <div className="relative">
-      <div className="group relative flex py-4">
-        <Skeleton className="mr-2 size-5 rounded-sm" />
-        <div className="-mt-0.5 flex-1 text-sm leading-tight">
-          <div className="flex gap-1 text-[10px] font-bold text-material-opaque">
-            <Skeleton className="h-3 w-24" />
-            <span>·</span>
-            <Skeleton className="h-3 w-12 shrink-0" />
-          </div>
-          <div className="relative my-1 break-words font-medium">
-            <Skeleton className="h-3.5 w-full" />
-            <Skeleton className="mt-1 h-3.5 w-3/4" />
-          </div>
-          <div className="mt-1.5 text-[13px] text-material-opaque">
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="mt-1 h-3 w-4/5" />
-          </div>
-        </div>
-        <Skeleton className="ml-2 size-20 overflow-hidden rounded" />
-      </div>
-    </div>
-  </div>
-)
+// 加载占位也使用相同的行高，避免切换到文章列表时先出现大卡片。
+export const ArticleItemSkeleton = ListItemSkeleton
