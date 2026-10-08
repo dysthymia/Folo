@@ -688,6 +688,8 @@ export class ProcessingReadingStore {
           .filter(
             (merge) =>
               (visibleSeqs.has(merge.keep.seq) ||
+                // 保留方已由当前综述覆盖时，重复报道仍应沿用已有去重结果。
+                represented.has(merge.keep.seq) ||
                 (merge.keepReference && scopedSeqs.has(merge.keep.seq))) &&
               visibleSeqs.has(merge.hide.seq),
           )
@@ -1353,8 +1355,7 @@ export class ProcessingReadingStore {
       })
     }
 
-    // 语义去重与综述互不覆盖：已有综述角色（成员或代表）的条目不再参与判重合并，
-    // 只有两侧都还没有角色、也没有被隐藏的判定才会落地。
+    // 综述成员和代表保留原角色；其他重复报道可沿保留方的关系折叠到同一综述入口。
     // 先建立隐藏条目到保留条目的有向关系，再解析最终代表；逐条写角色会让包含链依赖判定顺序。
     const directMerges = new Map<number, ReturnType<typeof this.currentDedupeMerges>[number]>()
     const orderedMerges = this.currentDedupeMerges(inputs, publishedBySeq).sort(
@@ -1368,7 +1369,7 @@ export class ProcessingReadingStore {
       const hideSeq = merge.hide.seq
       if (hideSeq === keepSeq || directMerges.has(hideSeq)) continue
       if (roles.has(hideSeq) || mergedInto.has(hideSeq)) continue
-      if (roles.has(keepSeq) || mergedInto.has(keepSeq)) continue
+      if ((roles.has(keepSeq) || mergedInto.has(keepSeq)) && !roles.get(keepSeq)?.storyId) continue
       if (hiddenBySeq.get(hideSeq) || hiddenBySeq.get(keepSeq)) continue
       if (!inputBySeq.has(hideSeq) || !inputBySeq.has(keepSeq)) continue
       // `always` 是用户显式要求保留的例外，优先级高于语义判定。
@@ -1389,7 +1390,10 @@ export class ProcessingReadingStore {
       // 矛盾判定形成环时没有可见代表，不能把环中所有原文隐藏。
       if (visited.has(keepSeq)) continue
       const hideInput = inputBySeq.get(hideSeq)!
-      const keepInput = inputBySeq.get(keepSeq)!
+      // 去重保留方可能已经是综述成员，导航应指向可见代表，不能指向已折叠的原文。
+      const storyRepresentativeSeq = mergedInto.get(keepSeq) ?? keepSeq
+      const story = storyByRepresentative.get(storyRepresentativeSeq)
+      const keepInput = inputBySeq.get(story ? storyRepresentativeSeq : keepSeq)!
       roles.set(hideSeq, {
         itemId: hideInput.itemId,
         inputSeq: hideSeq,
@@ -1403,10 +1407,19 @@ export class ProcessingReadingStore {
           )
           .join("\n\n"),
         relatedEntryIds: [keepInput.itemId],
-        storyId: null,
-        storyTitle: null,
+        storyId: story?.storyId ?? null,
+        storyTitle: story?.title ?? null,
       })
-      keeperMergedIds.set(keepSeq, [...(keeperMergedIds.get(keepSeq) ?? []), hideInput.itemId])
+      if (story) {
+        const representative = roles.get(storyRepresentativeSeq)!
+        roles.set(storyRepresentativeSeq, {
+          ...representative,
+          // 只补折叠入口关系，不把未参与生成的重复报道计入综述材料或引用。
+          relatedEntryIds: [...new Set([...representative.relatedEntryIds, hideInput.itemId])],
+        })
+      } else {
+        keeperMergedIds.set(keepSeq, [...(keeperMergedIds.get(keepSeq) ?? []), hideInput.itemId])
+      }
     }
     for (const [keepSeq, relatedEntryIds] of keeperMergedIds) {
       const keepInput = inputBySeq.get(keepSeq)

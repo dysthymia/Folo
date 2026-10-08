@@ -430,15 +430,49 @@ describe("语义去重包含链角色", () => {
     expect(store.reading.counts(store.reading.refresh().id).standalone).toBe(3)
   })
 
-  it("已有综述角色的中间成员不会被包含链覆盖", () => {
-    const { store, b } = containmentFixture(false)
+  it("已有综述角色的中间成员保留归属，重复报道继续折叠到综述入口", () => {
+    const { store, a, b } = containmentFixture(false)
     const other = publishDecision(store, entry("D", "2026-01-04T00:00:00.000Z"))
-    createAggregateStory(store, [b, other], "独立综述")
+    const storyId = createAggregateStory(store, [b, other], "独立综述")
     expect(rolesOf(store)).toEqual([
+      expect.objectContaining({ itemId: "C", kind: "merged", relatedEntryIds: ["D"], storyId }),
       expect.objectContaining({ itemId: "B", kind: "merged", relatedEntryIds: ["D"] }),
-      expect.objectContaining({ itemId: "D", kind: "story", relatedEntryIds: ["B"] }),
+      expect.objectContaining({ itemId: "D", kind: "story", relatedEntryIds: ["B", "C"] }),
     ])
+    // 综述的真实材料仍是 B/D，C 只是已验证重复报道；A 不受逆向包含关系影响。
+    expect(rolesOf(store).find((role) => role.itemId === "D")?.materialCount).toBe(2)
+    expect(rolesOf(store).find((role) => role.inputSeq === a.seq)).toBeUndefined()
+    expect(
+      store.stories.currentSnapshot(storyId)?.members.map((member) => member.inputSeq),
+    ).toEqual([b.seq, other.seq])
   })
+
+  it.each([false, true])(
+    "重复链的保留方进入综述后，所有重复报道仍折叠（代表=%s）",
+    (representative) => {
+      const { store, a, b, c } = containmentFixture(false)
+      // 用更早的 C 或更晚的 D 配对，分别覆盖保留方是综述代表和普通成员。
+      const other = representative
+        ? c
+        : publishDecision(store, entry("D", "2026-01-04T00:00:00.000Z"))
+      const storyId = createAggregateStory(store, [a, other], "融资综述")
+      // 原文身份不同，确保验证的是语义去重与综述的衔接，而不是同 URL 的折叠。
+      const roles = rolesOf(store)
+      const storyRole = roles.find((role) => role.kind === "story")!
+      for (const input of [b, c])
+        expect(roles.find((role) => role.inputSeq === input.seq)).toMatchObject({
+          kind: "merged",
+          relatedEntryIds: [storyRole.itemId],
+          storyId,
+        })
+      expect(storyRole.materialCount).toBe(2)
+      const page = store.reading.generatedPage(generatedFeedQuerySchema.parse({ mode: "smart" }))
+      expect(page.items.filter((item) => item.kind === "entry")).toEqual([])
+      expect(page.items.filter((item) => item.kind === "story").map((item) => item.id)).toEqual([
+        storyId,
+      ])
+    },
+  )
 })
 
 // 已读参考保持原读态和未发布状态，只让被覆盖的未读条目获得合并角色。
