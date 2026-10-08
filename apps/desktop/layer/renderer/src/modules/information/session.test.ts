@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { InformationFetcher } from "./session"
 import {
@@ -8,7 +8,30 @@ import {
 } from "./session"
 
 const snapshot = { ownerId: "owner", sources: [], items: [], jobs: [], results: [] }
+afterEach(() => {
+  vi.unstubAllGlobals()
+  document.documentElement.removeAttribute("data-information-page")
+})
 describe("信息工作台复用主站登录", () => {
+  it("独立本机工作台读取快照与设置共享本地会话", async () => {
+    vi.stubGlobal("window", { location: new URL("http://localhost:3031") })
+    document.documentElement.setAttribute("data-information-page", "")
+    const generate = vi.fn()
+    const fetcher = vi
+      .fn<InformationFetcher>()
+      .mockResolvedValueOnce(
+        Response.json({ ownerId: "owner", token: "c".repeat(64), expiresAt: Date.now() + 300_000 }),
+      )
+      .mockResolvedValueOnce(Response.json(snapshot))
+      .mockResolvedValueOnce(Response.json({ provider: "codex", model: "model", hasApiKey: false }))
+    const signal = new AbortController().signal
+    expect(await loadInformationSnapshot(generate, signal, fetcher)).toEqual(snapshot)
+    expect(await loadInformationAISettings(generate, signal, fetcher)).toMatchObject({
+      model: "model",
+    })
+    expect(generate).not.toHaveBeenCalled()
+    expect(fetcher).toHaveBeenCalledTimes(3)
+  })
   it("先取一次性凭据，再以同源 POST 读取结果", async () => {
     const fetcher = vi.fn<InformationFetcher>().mockResolvedValue(Response.json(snapshot))
     const result = await loadInformationSnapshot(

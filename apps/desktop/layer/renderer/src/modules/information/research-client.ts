@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
 
+import { LocalInformationReadError, tryLocalInformationRead } from "./local-read-access"
 import { informationRequestInit } from "./request-init"
 import { getOneTimeToken, InformationLoadError } from "./session"
 
@@ -99,32 +100,50 @@ async function request<T>(
   signal: AbortSignal,
   body?: object,
 ): Promise<T> {
-  const token = await oneTimeToken
-    .generate()
-    .then(getOneTimeToken)
-    .catch((error: unknown) => {
-      throw new ResearchRequestError(
-        error instanceof InformationLoadError &&
-          ["authorization", "account_mismatch"].includes(error.kind)
-          ? "authorization"
-          : "request",
-      )
-    })
-  signal.throwIfAborted()
-  const response = await fetch(
+  // 本机只读先使用短时本地会话；返回 null 才继续原有官方授权流程。
+  const localResponse = await tryLocalInformationRead(
     `/information/v1/${path}`,
-    informationRequestInit({
-      method,
-      signal,
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: {
-        "X-Folo-One-Time-Token": token,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }),
-  )
+    method,
+    signal,
+    body,
+  ).catch((error: unknown) => {
+    throw new ResearchRequestError(
+      error instanceof LocalInformationReadError &&
+        ["authorization", "account_mismatch"].includes(error.kind)
+        ? "authorization"
+        : "request",
+    )
+  })
+  const response =
+    localResponse ??
+    (await (async () => {
+      const token = await oneTimeToken
+        .generate()
+        .then(getOneTimeToken)
+        .catch((error: unknown) => {
+          throw new ResearchRequestError(
+            error instanceof InformationLoadError &&
+              ["authorization", "account_mismatch"].includes(error.kind)
+              ? "authorization"
+              : "request",
+          )
+        })
+      signal.throwIfAborted()
+      return fetch(
+        `/information/v1/${path}`,
+        informationRequestInit({
+          method,
+          signal,
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {
+            "X-Folo-One-Time-Token": token,
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      )
+    })())
   if (!response.ok)
     throw new ResearchRequestError(
       [401, 403].includes(response.status)

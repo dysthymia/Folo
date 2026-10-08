@@ -11,6 +11,7 @@ import { AIConfigStore } from "./ai-config"
 import { FoloChat } from "./chat"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
+import { nativeReaderApi } from "./native-reader-api"
 import { ProcessingTrial } from "./processing-trial"
 import { ResearchSelectionError } from "./research-selection"
 import { createInformationServer, verifyWebBuild } from "./server"
@@ -106,6 +107,14 @@ describe("information HTTP server", () => {
       [
         externalApi({ store, configPath: join(directory, "integrations.json") }),
         { handle: researchHandler },
+        nativeReaderApi({
+          store,
+          aiConfig,
+          // 本地读取不得调用用于官方同步的 reader。
+          getReader: async () => {
+            throw new Error("unexpected_official_read")
+          },
+        }),
       ],
     )
     await new Promise<void>((resolve, reject) => {
@@ -185,7 +194,7 @@ describe("information HTTP server", () => {
       ).status,
     ).toBe(400)
     expect((await request("/information/api/settings", { method: "POST", headers })).status).toBe(
-      400,
+      200,
     )
     expect(store.automation.draft().revision).toBe(0)
   })
@@ -440,12 +449,119 @@ describe("information HTTP server", () => {
     })
   })
 
-  // 每次快照必须有同源请求与主站新凭据，旧本地会话不能独立授权。
+  // 官方操作仍核验新凭据；纯本地读取使用下面独立的工作区会话。
   const signedHeaders = {
     Host: "local.folo.is",
     Origin: "http://local.folo.is",
     "X-Folo-One-Time-Token": "valid-one-time-token",
   }
+
+  async function localHeaders() {
+    const headers = { Host: "local.folo.is", Origin: "http://local.folo.is" }
+    const result = await request("/information/api/local-read-session", {
+      method: "POST",
+      headers,
+      body: { ownerId: "test-owner" },
+    })
+    expect(result.status).toBe(200)
+    const access = JSON.parse(result.body) as { token: string; ownerId: string }
+    expect(access.ownerId).toBe("test-owner")
+    return { ...headers, "X-Folo-Local-Read-Token": access.token }
+  }
+
+  it("官方授权不可用时，本地结果、规则、设置和查询仍可读取", async () => {
+    // 故意让云端鉴权失败，证明成功读取没有偷偷申请或交换官方凭证。
+    authenticate.mockRejectedValue(new WebAuthError(401, "authorization"))
+    const headers = await localHeaders()
+    for (const path of [
+      "/information/api/snapshot",
+      "/information/api/settings",
+      "/information/v1/automation/editor",
+      "/information/v1/rules",
+      "/information/v1/processing/entry-results",
+      "/information/v1/processing/model-settings",
+    ]) {
+      const result = await request(path, {
+        method: "POST",
+        headers: { ...headers, "X-Folo-Read": "1" },
+      })
+      expect(result.status, path).toBe(200)
+    }
+    const query = await request("/information/v1/processing/semantics/query", {
+      method: "POST",
+      headers,
+      body: {},
+    })
+    expect(query.status).toBe(200)
+    const collections = await request("/information/v1/processing/generated-feed/items", {
+      method: "POST",
+      headers,
+      body: { mode: "collections" },
+    })
+    expect(collections.status).toBe(200)
+    expect(
+      researchHandler.mock.calls.some(([, path]) => path === "/processing/generated-feed/items"),
+    ).toBe(false)
+    expect(authenticate).not.toHaveBeenCalled()
+  })
+
+  it("本地票据不能运行模型、写入规则或触发外部同步", async () => {
+    const headers = await localHeaders()
+    const run = vi.spyOn(trial, "run")
+    researchHandler.mockClear()
+    for (const [method, path, body] of [
+      ["PUT", "/information/v1/configuration", {}],
+      ["POST", "/information/v1/rules/trial", {}],
+      ["POST", "/information/v1/processing/list-loaded", {}],
+      ["POST", "/information/v1/research-selections/preview", {}],
+      ["POST", "/information/v1/exports", {}],
+      [
+        "POST",
+        "/information/v1/processing/generated-feed/items",
+        { mode: "collections", refresh: true },
+      ],
+      ["POST", "/information/api/chat", {}],
+    ] as const) {
+      const result = await request(path, { method, headers, body })
+      expect(result.status, path).toBe(403)
+      expect(JSON.parse(result.body)).toEqual({ error: "local_read_only" })
+    }
+    expect(run).not.toHaveBeenCalled()
+    expect(researchHandler).not.toHaveBeenCalled()
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(store.automation.draft().revision).toBe(0)
+  })
+
+  it("本地会话要求同源和已有账号，撤销后不能继续读取", async () => {
+    const endpoint = "/information/api/local-read-session"
+    const invalidHeaders: Record<string, string>[] = [
+      { Host: "local.folo.is" },
+      { Host: "local.folo.is", Origin: "http://evil.example" },
+      { Host: "evil.example", Origin: "http://evil.example" },
+    ]
+    for (const headers of invalidHeaders) {
+      expect(
+        (await request(endpoint, { method: "POST", headers, body: { ownerId: null } })).status,
+      ).toBe(403)
+    }
+    expect(
+      (
+        await request(endpoint, {
+          method: "POST",
+          headers: { Host: "local.folo.is", Origin: "http://local.folo.is" },
+          body: { ownerId: "another-owner" },
+        })
+      ).status,
+    ).toBe(403)
+    const headers = await localHeaders()
+    const path = "/information/v1/rules"
+    expect(
+      (await request(path, { headers: { ...headers, Origin: "http://evil.example" } })).status,
+    ).toBe(403)
+    expect((await request(`${endpoint}/revoke`, { method: "POST", headers })).status).toBe(200)
+    expect((await request(path, { headers })).status).toBe(401)
+    expect(authenticate).not.toHaveBeenCalled()
+  })
   it("AI 试运行仍先检查同源登录，仅显式 trial 请求执行模型", async () => {
     const run = vi.spyOn(trial, "run").mockRejectedValue(new Error("model_failure"))
     const unauthorized = await request("/information/v1/rules/trial", {

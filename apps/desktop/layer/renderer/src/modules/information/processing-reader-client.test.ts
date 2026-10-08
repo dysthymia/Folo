@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
 
@@ -21,6 +22,47 @@ vi.mock("~/lib/auth", () => ({ oneTimeToken: { generate: vi.fn() } }))
 afterEach(() => {
   vi.clearAllMocks()
   vi.unstubAllGlobals()
+  document.documentElement.removeAttribute("data-information-page")
+})
+
+describe("本机阅读无需官方一次性凭据", () => {
+  it("读取本机快照不调用 generate，写入继续获取官方凭据", async () => {
+    vi.stubGlobal("window", {
+      location: new URL("http://local.folo.is:3011"),
+      dispatchEvent: vi.fn(),
+    })
+    document.documentElement.setAttribute("data-information-page", "")
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ ownerId: "owner", token: "a".repeat(64), expiresAt: Date.now() + 300_000 }),
+      )
+      .mockResolvedValueOnce(Response.json({ ok: true }))
+      .mockResolvedValueOnce(Response.json({ ok: true }))
+    vi.stubGlobal("fetch", fetcher)
+    vi.mocked(oneTimeToken.generate).mockResolvedValue({ data: { token: "official" } } as never)
+    const schema = z.object({ ok: z.boolean() })
+    await readingRequest("reading-snapshot", schema, new AbortController().signal)
+    expect(oneTimeToken.generate).not.toHaveBeenCalled()
+    expect(new Headers(fetcher.mock.calls[1]![1].headers).get("X-Folo-Local-Read-Token")).toBe(
+      "a".repeat(64),
+    )
+    await readingRequest("stories/merge", schema, new AbortController().signal, {})
+    expect(oneTimeToken.generate).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[2]![1].headers["X-Folo-One-Time-Token"]).toBe("official")
+  })
+
+  it("本地拒绝访问时不再获取官方凭据", async () => {
+    vi.stubGlobal("window", { location: new URL("http://local.folo.is:3012") })
+    document.documentElement.setAttribute("data-information-page", "")
+    const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 403 }))
+    vi.stubGlobal("fetch", fetcher)
+    await expect(
+      readingRequest("reading-snapshot", z.object({}), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "authorization" })
+    expect(oneTimeToken.generate).not.toHaveBeenCalled()
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
 })
 
 const snapshot = {
@@ -68,6 +110,37 @@ const revision = {
 }
 
 describe("稳定阅读快照 client", () => {
+  it("人工语义纠错失效阅读投影，读取语义画像保持快照稳定", async () => {
+    vi.mocked(oneTimeToken.generate).mockResolvedValue({ data: { token: "once" } } as Awaited<
+      ReturnType<typeof oneTimeToken.generate>
+    >)
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ revision: 1 }))),
+    )
+    const invalidate = vi.spyOn(window, "dispatchEvent")
+    const schema = z.object({ revision: z.number() })
+    await readingRequest("processing/entries/1/semantics", schema, new AbortController().signal)
+    expect(invalidate).not.toHaveBeenCalled()
+    await readingRequest(
+      "processing/entries/1/semantic-overrides",
+      schema,
+      new AbortController().signal,
+      { changes: [] },
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "processing-reading-invalidated" }),
+    )
+    await readingRequest(
+      "processing/events/evt_a/corrections",
+      schema,
+      new AbortController().signal,
+      { action: { type: "rename", title: "Renamed" } },
+    )
+    expect(invalidate).toHaveBeenCalledTimes(2)
+    invalidate.mockRestore()
+  })
+
   it.each(["smart", "pending", "failed"])("接受阅读视图 %s", (view) => {
     expect(
       readingSnapshotPageSchema.parse({

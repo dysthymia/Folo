@@ -4,8 +4,9 @@ import { readFile, realpath, stat } from "node:fs/promises"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { createServer } from "node:http"
 
+import { isLocalInformationRead } from "@follow/information-core"
 import { extname, join, resolve, sep } from "pathe"
-import { ZodError } from "zod"
+import { z, ZodError } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
 import { AIConfigError } from "./ai-config"
@@ -17,6 +18,7 @@ import { ExportStoreError } from "./export-store"
 import { ExternalApiError } from "./external-api"
 import { ExternalConfigError } from "./external-config"
 import { FoloReadError } from "./folo"
+import { LocalReadSessionError, LocalReadSessions } from "./local-read-session"
 import { NotionExportError } from "./notion-export"
 import { EventRegistryError } from "./processing-event-registry"
 import { ProcessingFeedbackError } from "./processing-feedback"
@@ -70,6 +72,7 @@ export function createInformationServer(
   const publicUrl = new URL(publicOrigin)
   // 只接受配置的站点与本机诊断地址，不放宽为任意 Host 或跨域请求。
   const hosts = new Set([publicUrl.host, `127.0.0.1:${port}`, `localhost:${port}`])
+  const localReadSessions = new LocalReadSessions(() => store.ownerId)
   async function handle(request: IncomingMessage, response: ServerResponse) {
     if (!hosts.has(request.headers.host ?? ""))
       return json(response, 403, { error: "invalid_host" })
@@ -80,15 +83,43 @@ export function createInformationServer(
     const url = new URL(request.url ?? "/", origin)
     response.setHeader("X-Content-Type-Options", "nosniff")
     response.setHeader("Referrer-Policy", "no-referrer")
+    if (
+      url.pathname === "/information/api/local-read-session" ||
+      url.pathname === "/information/api/local-read-session/revoke"
+    ) {
+      // 本机同源页面建立只读工作区会话，不传递官方 Token，也不连接 Folo 官方服务。
+      const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+        request.socket.remoteAddress ?? "",
+      )
+      if (!loopback || request.headers.origin !== origin)
+        return json(response, 403, { error: "invalid_origin" })
+      if (request.method !== "POST") return json(response, 405, { error: "method_not_allowed" })
+      try {
+        if (url.pathname.endsWith("/revoke")) {
+          localReadSessions.revoke(request.headers["x-folo-local-read-token"])
+          return json(response, 200, { revoked: true })
+        }
+        const input = z
+          .object({ ownerId: z.string().min(1).max(300).nullable() })
+          .strict()
+          .parse(await readJson(request, 8192))
+        return json(response, 200, localReadSessions.issue(input.ownerId))
+      } catch (error) {
+        return error instanceof LocalReadSessionError
+          ? json(response, error.status, { error: error.code })
+          : json(response, 400, { error: "invalid_request" })
+      }
+    }
     if (url.pathname === "/information/connect") {
       // 旧的本地连接票据不再授予数据访问权，已有主站登录即可打开页面。
       return json(response, 410, { error: "use_folo_login" })
     }
     const automation = url.pathname.startsWith("/information/v1/")
+    const localApiRead = /^\/information\/api\/(?:snapshot|settings)$/u.test(url.pathname)
     const readHeader = request.headers["x-folo-read"]
     // HTTP 站点的浏览器 GET 缺少 Origin/Fetch Metadata；使用带 Origin 的空 POST 承载只读操作。
-    // 该标记只选择 GET 分支，不能绕过下方账号核验或变成任意方法覆盖。
-    const readPost = automation && request.method === "POST" && readHeader === "1"
+    // 该标记只选择 GET 分支；本地与官方会话均由后续独立核验，不能任意覆盖写操作。
+    const readPost = (automation || localApiRead) && request.method === "POST" && readHeader === "1"
     if (
       readHeader !== undefined &&
       (!readPost ||
@@ -102,13 +133,19 @@ export function createInformationServer(
       ["snapshot", "settings", "chat"].some((name) => url.pathname === `/information/api/${name}`)
     ) {
       const settings = url.pathname.endsWith("/settings")
+      const localToken = request.headers["x-folo-local-read-token"]
+      const localRead = localToken !== undefined
+      const method = readPost ? "GET" : request.method!
       if (
         automation
           ? !["GET", "POST", "PUT", "DELETE"].includes(request.method ?? "")
-          : request.method !== "POST" && !(settings && request.method === "PUT")
+          : !readPost &&
+            !(localRead && localApiRead && request.method === "GET") &&
+            request.method !== "POST" &&
+            !(settings && request.method === "PUT")
       )
         return json(response, 405, { error: "method_not_allowed" })
-      // 每次读取都核验主站新生成的一次性凭据，旧本地 Cookie 不能绕过退出或切换账号。
+      // 所有请求先核验同源；纯本地读取使用限定工作区的只读会话，写入仍核验官方凭据。
       // 浏览器的同源 GET 不发送 Origin，改用浏览器生成的 Fetch Metadata；写操作仍要求 Origin。
       const sameOriginRead =
         request.method === "GET" &&
@@ -116,23 +153,43 @@ export function createInformationServer(
         request.headers["sec-fetch-site"] === "same-origin"
       if (request.headers.origin !== origin && !sameOriginRead)
         return json(response, 403, { error: "invalid_origin" })
-      const token = request.headers["x-folo-one-time-token"]
-      if (typeof token !== "string" || !token || token.length > 4096) {
-        return json(response, 401, { error: "authorization" })
-      }
-      try {
-        await authenticate(token)
-      } catch (error) {
-        return error instanceof WebAuthError
-          ? json(response, error.status, { error: error.code })
-          : json(response, 502, { error: "upstream" })
+      let localBody: unknown
+      if (localRead) {
+        try {
+          localReadSessions.verify(localToken)
+          if (method !== "GET") localBody = await readJson(request, 1024 * 1024)
+          if (!isLocalInformationRead(method, url.pathname, localBody))
+            return json(response, 403, { error: "local_read_only" })
+        } catch (error) {
+          return error instanceof LocalReadSessionError
+            ? json(response, error.status, { error: error.code })
+            : json(response, 400, { error: "invalid_request" })
+        }
+      } else {
+        const token = request.headers["x-folo-one-time-token"]
+        if (typeof token !== "string" || !token || token.length > 4096)
+          return json(response, 401, { error: "authorization" })
+        try {
+          await authenticate(token)
+        } catch (error) {
+          return error instanceof WebAuthError
+            ? json(response, error.status, { error: error.code })
+            : json(response, 502, { error: "upstream" })
+        }
       }
       if (automation) {
         try {
-          const method = readPost ? "GET" : request.method!
-          const body = method === "GET" ? undefined : await readJson(request, 1024 * 1024)
+          const body =
+            method === "GET"
+              ? undefined
+              : localRead
+                ? localBody
+                : await readJson(request, 1024 * 1024)
           // 外接服务复用同一登录与同源校验，只有对应的显式操作才触发网络请求。
           const path = url.pathname.slice("/information/v1".length)
+          // 收藏的本地分页直接读缓存，不能借由原生同步处理器偷偷触发官方抓取。
+          if (localRead && path === "/processing/generated-feed/items")
+            return json(response, 200, automationApi(store, method, path, body))
           if (path === "/rules/trial" && method === "POST") {
             if (!ai?.trial) return json(response, 503, { error: "ai_not_configured" })
             const controller = new AbortController()

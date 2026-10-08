@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
 
+import { LocalInformationReadError, tryLocalInformationRead } from "./local-read-access"
 import { informationRequestInit } from "./request-init"
 import { getOneTimeToken } from "./session"
 
@@ -122,22 +123,40 @@ async function request<T>(
   signal: AbortSignal,
   body?: object,
 ): Promise<T> {
-  // 每个请求都获取新的主站一次性凭据，不能跨请求或账号复用。
-  const token = await oneTimeToken.generate().then(getOneTimeToken)
-  const response = await fetch(
+  // 本机只读先使用短时本地会话；返回 null 才继续原有官方授权流程。
+  const localResponse = await tryLocalInformationRead(
     `/information/v1/${path}`,
-    informationRequestInit({
-      method,
-      signal,
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: {
-        "X-Folo-One-Time-Token": token,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }),
-  )
+    method,
+    signal,
+    body,
+  ).catch((error: unknown) => {
+    throw new XRequestError(
+      error instanceof LocalInformationReadError &&
+        ["authorization", "account_mismatch"].includes(error.kind)
+        ? "authorization"
+        : "request",
+    )
+  })
+  const response =
+    localResponse ??
+    (await (async () => {
+      // 每个请求都获取新的主站一次性凭据，不能跨请求或账号复用。
+      const token = await oneTimeToken.generate().then(getOneTimeToken)
+      return fetch(
+        `/information/v1/${path}`,
+        informationRequestInit({
+          method,
+          signal,
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {
+            "X-Folo-One-Time-Token": token,
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      )
+    })())
   if (!response.ok) {
     throw new XRequestError([401, 403].includes(response.status) ? "authorization" : "request")
   }

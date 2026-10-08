@@ -1,5 +1,6 @@
 import { z } from "zod"
 
+import { LocalInformationReadError, tryLocalInformationRead } from "./local-read-access"
 import { informationSnapshotSchema } from "./snapshot"
 
 const informationAISettingsSchema = z.object({
@@ -55,17 +56,33 @@ export async function loadInformationSnapshot(
   signal: AbortSignal,
   fetcher: InformationFetcher = defaultInformationFetcher,
 ) {
-  // 只交换主站签发的一次性凭据，不从 localStorage 复制长期 Token。
-  const generated = await generate()
-  signal.throwIfAborted()
-  const token = getOneTimeToken(generated)
-  const response = await fetcher("/information/api/snapshot", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "X-Folo-One-Time-Token": token },
-    cache: "no-store",
+  // 兼容页读取与原生入口共享本地短时会话，失效时不回退官方凭据。
+  const localResponse = await tryLocalInformationRead(
+    "/information/api/snapshot",
+    "GET",
     signal,
+    undefined,
+    fetcher,
+  ).catch((error: unknown) => {
+    throw new InformationLoadError(
+      error instanceof LocalInformationReadError ? error.kind : "request",
+    )
   })
+  const response =
+    localResponse ??
+    (await (async () => {
+      // 只交换主站签发的一次性凭据，不从 localStorage 复制长期 Token。
+      const generated = await generate()
+      signal.throwIfAborted()
+      const token = getOneTimeToken(generated)
+      return fetcher("/information/api/snapshot", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-Folo-One-Time-Token": token },
+        cache: "no-store",
+        signal,
+      })
+    })())
   if (response.status === 401) throw new InformationLoadError("authorization")
   if (response.status === 403) {
     const body = z.object({ error: z.string() }).safeParse(await response.json())
@@ -85,15 +102,31 @@ export async function loadInformationAISettings(
   signal: AbortSignal,
   fetcher: InformationFetcher = defaultInformationFetcher,
 ): Promise<InformationAISettings> {
-  const token = getOneTimeToken(await generate())
-  signal.throwIfAborted()
-  const response = await fetcher("/information/api/settings", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "X-Folo-One-Time-Token": token },
-    cache: "no-store",
+  // 兼容页读取与原生入口共享本地短时会话，失效时不回退官方凭据。
+  const localResponse = await tryLocalInformationRead(
+    "/information/api/settings",
+    "GET",
     signal,
+    undefined,
+    fetcher,
+  ).catch((error: unknown) => {
+    throw new InformationLoadError(
+      error instanceof LocalInformationReadError ? error.kind : "request",
+    )
   })
+  const response =
+    localResponse ??
+    (await (async () => {
+      const token = getOneTimeToken(await generate())
+      signal.throwIfAborted()
+      return fetcher("/information/api/settings", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-Folo-One-Time-Token": token },
+        cache: "no-store",
+        signal,
+      })
+    })())
   if (!response.ok)
     throw new InformationLoadError(response.status === 401 ? "authorization" : "request")
   const settings = informationAISettingsSchema.safeParse(await response.json())

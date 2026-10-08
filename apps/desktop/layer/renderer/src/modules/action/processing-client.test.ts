@@ -1,5 +1,5 @@
 import type { RuleSet } from "@follow/information-core"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   createProcessingClient,
@@ -12,6 +12,11 @@ import {
   ProcessingRequestError,
   processingRunSchema,
 } from "./processing-client"
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  document.documentElement.removeAttribute("data-information-page")
+})
 
 const ruleSet: RuleSet = {
   formatVersion: 4,
@@ -147,6 +152,39 @@ const previewResponse = {
 }
 
 describe("createProcessingClient", () => {
+  it("本机规则读取使用本地会话，写入继续调用官方 generate", async () => {
+    vi.stubGlobal("window", { location: new URL("http://local.folo.is:3021") })
+    document.documentElement.setAttribute("data-information-page", "")
+    const generate = vi.fn(async () => "official")
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ ownerId: "owner", token: "b".repeat(64), expiresAt: Date.now() + 300_000 }),
+      )
+      .mockResolvedValueOnce(Response.json(editorResponse))
+      .mockResolvedValueOnce(Response.json({ revision: 8, config: ruleSet }))
+    const client = createProcessingClient(generate, fetcher)
+    await client.load(new AbortController().signal)
+    expect(generate).not.toHaveBeenCalled()
+    expect(new Headers(fetcher.mock.calls[1]![1].headers).get("X-Folo-Local-Read-Token")).toBe(
+      "b".repeat(64),
+    )
+    await client.save(ruleSet, 7, new AbortController().signal)
+    expect(generate).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[2]![1].headers["X-Folo-One-Time-Token"]).toBe("official")
+  })
+
+  it("本机读取403不重试且不生成官方 token", async () => {
+    vi.stubGlobal("window", { location: new URL("http://local.folo.is:3022") })
+    document.documentElement.setAttribute("data-information-page", "")
+    const generate = vi.fn(async () => "official")
+    const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 403 }))
+    await expect(
+      createProcessingClient(generate, fetcher).load(new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "authorization" })
+    expect(generate).not.toHaveBeenCalled()
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
   it("列表加载使用独立接口，允许有目标范围的队列响应与零匹配响应", async () => {
     const entry = {
       id: "entry-1",

@@ -2,6 +2,8 @@ import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
 
+import { tryLocalInformationRead } from "../information/local-read-access"
+
 const localAISettingsSchema = z.object({
   // 本机对话与后台共用已保存的自定义模型，不能因提供商新增而退回云端。
   provider: z.enum(["qianwen", "codex", "openai-compatible"]),
@@ -33,13 +35,25 @@ export const requestLocalAISettings = async (
   // 仅依赖 HTTP 调用签名，避免把宿主 fetch 的额外静态属性要求传给测试注入。
   fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch,
 ): Promise<LocalAISettings> => {
-  const token = await generate()
-  const response = await fetcher("/information/api/settings", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "X-Folo-One-Time-Token": token },
-    cache: "no-store",
-  })
+  // 设置读取仅访问本机缓存；模型执行和设置写入仍由各自授权流程处理。
+  const localResponse = await tryLocalInformationRead(
+    "/information/api/settings",
+    "GET",
+    new AbortController().signal,
+    undefined,
+    fetcher,
+  )
+  const response =
+    localResponse ??
+    (await (async () => {
+      const token = await generate()
+      return fetcher("/information/api/settings", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-Folo-One-Time-Token": token },
+        cache: "no-store",
+      })
+    })())
 
   if (!response.ok) {
     throw new Error(`Failed to load local AI settings: ${response.status}`)

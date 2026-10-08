@@ -9,6 +9,10 @@ import {
 } from "@follow/information-core"
 import { z } from "zod"
 
+import {
+  LocalInformationReadError,
+  tryLocalInformationRead,
+} from "../information/local-read-access"
 import { informationRequestInit } from "../information/request-init"
 import { informationSnapshotSchema } from "../information/snapshot"
 
@@ -551,23 +555,38 @@ export function createProcessingClient(
     signal: AbortSignal,
     body?: unknown,
   ): Promise<T> {
-    // 每次请求交换主站新凭据，不缓存授权，也不复用官方 Actions 的写入接口。
-    const token = await generate()
-    signal.throwIfAborted()
-    const response = await fetcher(
-      `/information/v1/${path}`,
-      informationRequestInit({
-        method,
-        signal,
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: {
-          "X-Folo-One-Time-Token": token,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      }),
+    // 本机读取不生成官方凭据，写入继续走原有一次性授权。
+    const localResponse = await tryLocalInformationRead(path, method, signal, body, fetcher).catch(
+      (error: unknown) => {
+        throw new ProcessingRequestError(
+          error instanceof LocalInformationReadError &&
+            ["authorization", "account_mismatch"].includes(error.kind)
+            ? "authorization"
+            : "request",
+        )
+      },
     )
+    const response =
+      localResponse ??
+      (await (async () => {
+        // 每次请求交换主站新凭据，不缓存授权，也不复用官方 Actions 的写入接口。
+        const token = await generate()
+        signal.throwIfAborted()
+        return fetcher(
+          `/information/v1/${path}`,
+          informationRequestInit({
+            method,
+            signal,
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {
+              "X-Folo-One-Time-Token": token,
+              ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          }),
+        )
+      })())
     if (!response.ok) {
       const detail = await response.json().catch(() => null)
       const referenced = z.object({ error: z.literal("tag_referenced") }).safeParse(detail).success

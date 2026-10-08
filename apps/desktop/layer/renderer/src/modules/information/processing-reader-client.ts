@@ -3,6 +3,7 @@ import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
 
+import { LocalInformationReadError, tryLocalInformationRead } from "./local-read-access"
 import { informationRequestInit } from "./request-init"
 import { getOneTimeToken, InformationLoadError } from "./session"
 
@@ -483,32 +484,50 @@ export async function readingRequest<T>(
   signal: AbortSignal,
   body?: object,
 ): Promise<T> {
-  const token = await oneTimeToken
-    .generate()
-    .then(getOneTimeToken)
-    .catch((error: unknown) => {
-      throw new ReadingRequestError(
-        error instanceof InformationLoadError &&
-          ["authorization", "account_mismatch"].includes(error.kind)
-          ? "authorization"
-          : "request",
-      )
-    })
-  signal.throwIfAborted()
-  const response = await fetch(
+  // 本机只读先使用短时本地会话；返回 null 才继续原有官方授权流程。
+  const localResponse = await tryLocalInformationRead(
     `/information/v1/${path}`,
-    informationRequestInit({
-      method: body === undefined ? "GET" : "POST",
-      credentials: "same-origin",
-      cache: "no-store",
-      signal,
-      headers: {
-        "X-Folo-One-Time-Token": token,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }),
-  )
+    body === undefined ? "GET" : "POST",
+    signal,
+    body,
+  ).catch((error: unknown) => {
+    throw new ReadingRequestError(
+      error instanceof LocalInformationReadError &&
+        ["authorization", "account_mismatch"].includes(error.kind)
+        ? "authorization"
+        : "request",
+    )
+  })
+  const response =
+    localResponse ??
+    (await (async () => {
+      const token = await oneTimeToken
+        .generate()
+        .then(getOneTimeToken)
+        .catch((error: unknown) => {
+          throw new ReadingRequestError(
+            error instanceof InformationLoadError &&
+              ["authorization", "account_mismatch"].includes(error.kind)
+              ? "authorization"
+              : "request",
+          )
+        })
+      signal.throwIfAborted()
+      return fetch(
+        `/information/v1/${path}`,
+        informationRequestInit({
+          method: body === undefined ? "GET" : "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          signal,
+          headers: {
+            "X-Folo-One-Time-Token": token,
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      )
+    })())
   if (!response.ok)
     throw new ReadingRequestError(
       [401, 403].includes(response.status)
@@ -523,7 +542,9 @@ export async function readingRequest<T>(
   // 人工纠错立即失效当前阅读投影；查询分页和后台新结果不触发列表换位。
   if (
     body !== undefined &&
-    /(?:\/override|\/undo|\/withdraw|\/remove-member|\/split|^stories\/merge)$/.test(path)
+    /(?:\/override|\/semantic-overrides|\/corrections|\/undo|\/withdraw|\/remove-member|\/split|^stories\/merge)$/.test(
+      path,
+    )
   )
     window.dispatchEvent(new Event("processing-reading-invalidated"))
   return parsed.data
