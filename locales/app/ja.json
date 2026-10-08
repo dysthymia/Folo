@@ -46,6 +46,8 @@
   "automation.action.custom": "カスタム AI 処理",
   "automation.action.dedupe": "意味的な重複排除",
   "automation.action.dedupe_hint": "ルール公開後、処理サービスが一致した独立記事を比較し、意味的な重複をマークします。",
+  "automation.action.dim": "薄く表示",
+  "automation.action.dim_hint": "一致するエントリーを控えめなグレーで表示します。表示と既読・未読状態は維持されます。",
   "automation.action.display": "表示設定",
   "automation.action.filter": "AI フィルター",
   "automation.action.presentation": "表示ポリシー",

@@ -32,7 +32,14 @@ export const buildProcessingActionSummary = (
   t: (key: string) => string,
 ): string => {
   if (!actions.length) return t("actions.action_card.summary.no_actions")
-  return actions.map((action) => t(`processing.type.${action.type}`)).join(" + ")
+  // 普通动作摘要显示具体模式，规则列表里也能直接识别“虚化”。
+  return actions
+    .map((action) =>
+      action.type === "local_filter"
+        ? t(`automation.action.${action.mode}`)
+        : t(`processing.type.${action.type}`),
+    )
+    .join(" + ")
 }
 
 const scopeBadgeLabel = (scope: UnifiedRuleScope, t: (key: string) => string): string =>

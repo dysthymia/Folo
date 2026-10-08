@@ -1,4 +1,4 @@
-import type { SemanticEntity, SemanticTagId } from "@follow/information-core"
+import type { SemanticEntity, SemanticTagId, TagAssessment } from "@follow/information-core"
 import {
   compileInstructions,
   ruleRequiresSemantics,
@@ -106,6 +106,7 @@ export type ProcessingEntryResultsResponse = {
     contentVersion: string
     releaseVersion: number
     semanticTags?: SemanticTagId[]
+    semanticAssessments?: TagAssessment[]
     semanticEntities?: SemanticEntity[]
   }>
 }
@@ -386,7 +387,14 @@ export function processingApi(
     owner(store)
     const availableSources = new Set(store.sources().map((source) => source.key))
     const releases = new Map<number, ReturnType<typeof store.automation.release>>()
-    const semanticTags = store.semantics.presentTagIdsByInput()
+    // 名称展示与规则匹配共用同一代已核验判断，避免把标签 ID 当作置信度为 1 的判断。
+    const semanticAssessments = store.semantics.tagAssessmentsByInput()
+    const semanticTags = new Map(
+      [...semanticAssessments].map(([seq, assessments]) => [
+        seq,
+        assessments.filter((item) => item.state === "present").map((item) => item.tagId),
+      ]),
+    )
     const semanticEntities = store.semantics.presentEntitiesByInput()
     // 时间线只轮询身份和标签索引，正文与完整证据在用户点击后才读取。
     const entries = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
@@ -423,6 +431,9 @@ export function processingApi(
           contentVersion: input.contentVersion,
           releaseVersion: input.releaseVersion,
           ...(semanticTags.has(input.seq) ? { semanticTags: semanticTags.get(input.seq)! } : {}),
+          ...(semanticAssessments.has(input.seq)
+            ? { semanticAssessments: semanticAssessments.get(input.seq)! }
+            : {}),
           ...(semanticEntities.has(input.seq)
             ? { semanticEntities: semanticEntities.get(input.seq)! }
             : {}),

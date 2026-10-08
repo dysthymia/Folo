@@ -15,6 +15,7 @@ type Action = AutomationRule["actions"][number]
 type NewAction =
   | "block"
   | "silence"
+  | "dim"
   | "filter"
   | "summary"
   | "translate"
@@ -41,8 +42,10 @@ export const defaultLocalRulePrompts = {
 // 聚合需要允许材料参与综述；用户已经明确设定的拒绝和独立展示策略保持原样。
 export function addLocalRuleAction(actions: Action[], kind: NewAction): Action[] {
   switch (kind) {
+    // 虚化与普通动作共用保存和执行链，无需额外参数或 AI 指令。
     case "block":
     case "silence":
+    case "dim":
       return [...actions, { type: "local_filter", mode: kind }]
     case "filter":
     case "summary":
@@ -137,6 +140,9 @@ export function LocalRuleActions({
               {t("automation.action.remove")}
             </button>
           </div>
+          {action.type === "local_filter" && action.mode === "dim" && (
+            <p className="text-sm text-text-secondary">{t("automation.action.dim_hint")}</p>
+          )}
           {/* 当前统一规则编辑器也使用同一多选入口，完整保留分类动作的其他字段。 */}
           {action.type === "ai_classify" && (
             <>
@@ -313,6 +319,7 @@ export function LocalRuleActions({
           <option value="">{t("automation.action.choose")}</option>
           <option value="block">{t("automation.action.block")}</option>
           <option value="silence">{t("automation.action.silence")}</option>
+          <option value="dim">{t("automation.action.dim")}</option>
           <option value="filter">{t("automation.action.filter")}</option>
           <option value="summary">{t("automation.action.summary")}</option>
           <option value="translate">{t("automation.action.translate")}</option>

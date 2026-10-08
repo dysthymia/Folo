@@ -44,7 +44,12 @@ export function ProcessingActionEditor({
       {actions.map((action, index) => (
         <div key={index} className="space-y-3 rounded-lg bg-fill-quinary p-3">
           <div className="flex items-center justify-between">
-            <h4 className="text-sm font-medium">{t(`processing.type.${action.type}`)}</h4>
+            {/* 普通动作按具体模式显示名称，避免把虚化显示成笼统的本地动作。 */}
+            <h4 className="text-sm font-medium">
+              {action.type === "local_filter"
+                ? t(`automation.action.${action.mode}`)
+                : t(`processing.type.${action.type}`)}
+            </h4>
             <button
               type="button"
               className={processingButtonClass}
@@ -53,6 +58,9 @@ export function ProcessingActionEditor({
               {t("processing.remove")}
             </button>
           </div>
+          {action.type === "local_filter" && action.mode === "dim" && (
+            <p className="text-sm text-text-secondary">{t("automation.action.dim_hint")}</p>
+          )}
           {action.type === "ai_classify" && (
             <>
               <p className="text-sm text-text-secondary">{t("processing.classify_hint")}</p>
@@ -326,6 +334,16 @@ export function ProcessingActionEditor({
         </div>
       ))}
       <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={actions.some(
+            (action) => action.type === "local_filter" && action.mode === "dim",
+          )}
+          onClick={() => onChange([...actions, { type: "local_filter", mode: "dim" }])}
+        >
+          {t("automation.action.dim")}
+        </button>
         <button
           type="button"
           className={processingButtonClass}

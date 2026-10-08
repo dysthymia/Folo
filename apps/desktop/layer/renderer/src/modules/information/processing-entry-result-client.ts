@@ -1,4 +1,8 @@
-import { semanticEntitySchema, semanticTagIdSchema } from "@follow/information-core"
+import {
+  semanticEntitySchema,
+  semanticTagIdSchema,
+  tagAssessmentSchema,
+} from "@follow/information-core"
 import { getEntry } from "@follow/store/entry/getter"
 import { useWhoami } from "@follow/store/user/hooks"
 import { useEffect, useSyncExternalStore } from "react"
@@ -33,6 +37,8 @@ const resultIndexSchema = z.object({
       contentVersion: z.string(),
       releaseVersion: z.number().int().positive(),
       semanticTags: z.array(semanticTagIdSchema).optional(),
+      // 保留原始状态、置信度与定义版本，供本地标签条件按用户阈值匹配。
+      semanticAssessments: z.array(tagAssessmentSchema).optional(),
       // 实体随当前正文的批量投影返回，避免列表逐条读取详情。
       semanticEntities: z.array(semanticEntitySchema).optional(),
     }),

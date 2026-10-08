@@ -1,4 +1,4 @@
-import type { RuleInput } from "@follow/information-core"
+import type { RuleInput, TagAssessment } from "@follow/information-core"
 import type { ActionFeedField, ActionFilterItem, ActionOperation } from "@follow-app/client-sdk"
 
 import { isEntryStarred } from "../collection/getter"
@@ -226,10 +226,13 @@ const getLocalMatchedRules = (entryId: string) => {
 
 export const getLocalActionMatchedRules = (entryId: string) => getLocalMatchedRules(entryId)
 
-export const getPublishedLocalActionResult = (entryId: string) => {
+export const getPublishedLocalActionResult = (
+  entryId: string,
+  entryTags?: readonly TagAssessment[] | null,
+) => {
   const { snapshot } = usePublishedLocalFilterStore.getState()
   const { ownerKey, isHydrated } = useLocalActionStore.getState()
-  const empty = { blocked: false, silenced: false, matchedRuleIds: [] as string[] }
+  const empty = { blocked: false, silenced: false, dimmed: false, matchedRuleIds: [] as string[] }
   // 同账号可继续使用最后成功的发布快照，换账号和退出登录立即停止旧账号规则。
   if (!snapshot || !isHydrated || snapshot.ownerId !== ownerKey) return empty
   const entry = getEntry(entryId)
@@ -266,6 +269,8 @@ export const getPublishedLocalActionResult = (entryId: string) => {
     entry_attachments_duration: context.entryAttachmentsDuration,
     feed_url: context.feedUrl,
     site_url: context.siteUrl,
+    // 标签来自当前正文的服务端批量投影，缺失时不触发依赖标签的普通动作。
+    entry_tag: entryTags ? [...entryTags] : null,
     read: !!entry.read,
     collected: isEntryStarred(entryId),
     subscription_tag:

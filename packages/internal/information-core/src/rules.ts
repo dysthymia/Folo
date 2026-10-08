@@ -133,7 +133,7 @@ export const actionSchema = z.discriminatedUnion("type", [
     .strict(),
   // 普通本地动作继续由客户端执行，不生成模型指令或触发模型调用。
   // 虚化只改变客户端的显示强度，沿用普通动作的条件匹配和离线缓存。
-  z.object({ type: z.literal("local_filter"), mode: z.enum(["block", "silence"]) }).strict(),
+  z.object({ type: z.literal("local_filter"), mode: z.enum(["block", "silence", "dim"]) }).strict(),
   z
     .object({
       type: z.literal("ai_transform"),

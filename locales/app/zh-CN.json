@@ -46,6 +46,8 @@
   "automation.action.custom": "自定义 AI 处理",
   "automation.action.dedupe": "语义去重",
   "automation.action.dedupe_hint": "规则发布后，处理服务会比较命中的独立条目，并标记语义重复内容。",
+  "automation.action.dim": "虚化",
+  "automation.action.dim_hint": "将命中的条目显示为不显眼的淡灰色，保留条目显示和已读／未读状态。",
   "automation.action.display": "显示设置",
   "automation.action.filter": "AI 筛选",
   "automation.action.presentation": "展示策略",

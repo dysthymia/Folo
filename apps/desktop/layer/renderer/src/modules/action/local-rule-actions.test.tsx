@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type { AutomationRule } from "@follow/information-core"
-import { compileInstructions, ruleSetSchema } from "@follow/information-core"
+import { compileInstructions, ruleSetSchema, ruleUsesAI } from "@follow/information-core"
 import * as React from "react"
 import { act } from "react"
 import { createRoot } from "react-dom/client"
@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 
 import { addLocalRuleAction, LocalRuleActions, removeLocalRuleAction } from "./local-rule-actions"
+import { buildProcessingActionSummary } from "./unified-action-list"
 
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 
@@ -50,6 +51,14 @@ describe("LocalRuleActions", () => {
           select.dispatchEvent(new Event("change", { bubbles: true }))
         })
       }
+      // 菜单新增虚化后可直接保存，也可单独移除，不出现 AI Prompt。
+      await choose("dim")
+      expect(actions).toEqual([{ type: "local_filter", mode: "dim" }])
+      expect(container.querySelector("h4")?.textContent).toBe("automation.action.dim")
+      expect(container.textContent).toContain("automation.action.dim_hint")
+      expect(container.querySelector("textarea")).toBeNull()
+      await act(async () => container.querySelector("button")!.click())
+      expect(actions).toEqual([])
       await choose("block")
       expect(actions).toEqual([{ type: "local_filter", mode: "block" }])
       expect(container.querySelector("textarea")).toBeNull()
@@ -83,6 +92,39 @@ describe("LocalRuleActions", () => {
     )
     expect(removeLocalRuleAction(withSummary, 2)).toEqual([...original, withSummary[3]])
     expect(render(withSummary)).toContain("automation.action.remove")
+  })
+
+  it("虚化保存重载后保留动作名称，组合已有动作且不触发 AI", () => {
+    const actions = addLocalRuleAction([{ type: "display", language: "ja" }], "dim")
+    const config = ruleSetSchema.parse(
+      JSON.parse(
+        JSON.stringify({
+          formatVersion: 4,
+          ownerId: "owner",
+          global: { version: 1, markdown: "" },
+          rules: [
+            {
+              id: "dim",
+              ownerId: "owner",
+              name: "虚化",
+              enabled: true,
+              order: 0,
+              when: { all: true },
+              actions,
+              version: 1,
+              executionLocation: "processing_service",
+            },
+          ],
+        }),
+      ),
+    )
+    expect(config.rules[0]!.actions).toEqual(actions)
+    expect(ruleUsesAI(config.rules[0]!)).toBe(false)
+    expect(
+      compileInstructions(config, { source_id: "feed/1", contextId: "feed/1" }).transformations,
+    ).toEqual([])
+    expect(render(config.rules[0]!.actions)).toContain("automation.action.dim_hint")
+    expect(buildProcessingActionSummary(actions, (key) => key)).toContain("automation.action.dim")
   })
 
   it("保存重载后的翻译动作保留中文要求，并进入实际模型指令", () => {

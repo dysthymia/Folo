@@ -43,6 +43,7 @@ function Probe() {
     <span>
       {String(status)}
       {result?.semanticTags?.join(",")}
+      {result?.semanticAssessments?.map((item) => item.confidence).join(",")}
       {result?.semanticEntities?.map((entity) => entity.name).join(",")}
     </span>
   )
@@ -78,6 +79,16 @@ it("短暂故障保留已确认状态，授权故障后仍能按周期自动恢�
           decisionId: "new",
           releaseVersion: 1,
           semanticTags: ["topic:ai"],
+          semanticAssessments: [
+            {
+              tagId: "topic:ai",
+              definitionVersion: 1,
+              state: "present",
+              confidence: 0.96,
+              reason: "主题明确",
+              evidenceIds: ["body"],
+            },
+          ],
           semanticEntities: [
             {
               kind: "organization",
@@ -100,7 +111,6 @@ it("短暂故障保留已确认状态，授权故障后仍能按周期自动恢�
 
   await act(async () => vi.advanceTimersByTime(60_000))
   expect(host.textContent).toBe("null")
-
   // 授权错误不能把 ownerId 清空，否则下一轮定时器无法再发起请求。
   await act(async () => vi.advanceTimersByTime(60_000))
   expect(host.textContent).toBe("true")
@@ -109,7 +119,7 @@ it("短暂故障保留已确认状态，授权故障后仍能按周期自动恢�
   await act(async () => {
     window.dispatchEvent(new Event("processing-reading-invalidated"))
   })
-  expect(host.textContent).toBe("truetopic:aiRevolut")
+  expect(host.textContent).toBe("truetopic:ai0.96Revolut")
   expect(mocks.read).toHaveBeenCalledTimes(5)
   // 批量接口的实际 schema 必须保留实体，不能在解析时静默丢弃。
   const schema = mocks.read.mock.calls[4]![1]
@@ -138,4 +148,30 @@ it("短暂故障保留已确认状态，授权故障后仍能按周期自动恢�
       ],
     }).results[0].semanticEntities[0].name,
   ).toBe("Revolut")
+  // 保留真实置信度，避免把低置信度标签误判为满足规则。
+  expect(
+    schema.parse({
+      results: [
+        {
+          itemId: "entry",
+          sourceKey: "feed/source",
+          sourceId: "feed/source",
+          inputSeq: 1,
+          contentVersion: "v1",
+          decisionId: "new",
+          releaseVersion: 1,
+          semanticAssessments: [
+            {
+              tagId: "signal:social_chatter",
+              definitionVersion: 1,
+              state: "present",
+              confidence: 0.78,
+              reason: "闲聊",
+              evidenceIds: ["body"],
+            },
+          ],
+        },
+      ],
+    }).results[0].semanticAssessments[0].confidence,
+  ).toBe(0.78)
 })

@@ -46,6 +46,8 @@
   "automation.action.custom": "Custom AI processing",
   "automation.action.dedupe": "Semantic deduplication",
   "automation.action.dedupe_hint": "After the rule is published, the processing service compares matching standalone entries and marks semantic duplicates.",
+  "automation.action.dim": "Dim",
+  "automation.action.dim_hint": "Show matching entries in muted gray while keeping them visible and preserving their read status.",
   "automation.action.display": "Display settings",
   "automation.action.filter": "AI filter",
   "automation.action.presentation": "Presentation policy",

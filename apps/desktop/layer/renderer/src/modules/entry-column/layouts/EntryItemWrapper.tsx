@@ -3,6 +3,7 @@ import { useMobile } from "@follow/components/hooks/useMobile.js"
 import { getMousePosition } from "@follow/components/hooks/useMouse.js"
 import { ActionButton } from "@follow/components/ui/button/action-button.js"
 import { FeedViewType } from "@follow/constants"
+import { useIsEntryDimmedByLocalActions } from "@follow/store/action/local-hooks"
 import { useEntry } from "@follow/store/entry/hooks"
 import { useEntryProcessingRole } from "@follow/store/entry/processing-role"
 import { entrySyncServices } from "@follow/store/entry/store"
@@ -35,7 +36,9 @@ import { useFeedSafeUrl } from "~/hooks/common/useFeedSafeUrl"
 import { useRequireLogin } from "~/hooks/common/useRequireLogin"
 
 import { useNativeReader } from "../../information/native-reader-context"
+import { useProcessingEntryResult } from "../../information/processing-entry-result-client"
 import { getEntrySourceColorStyle } from "../source-color"
+import { entryDimmedClassName } from "../styles"
 
 const sourceColorListViews = new Set([
   FeedViewType.All,
@@ -218,12 +221,17 @@ export const EntryItemWrapper: FC<
       : "bg-[var(--entry-source-background)] hover:bg-[var(--entry-source-background-hover)]"
     : "hover:bg-theme-item-hover"
   const processingRole = useEntryProcessingRole(entryId)
+  // AI 标签到达或人工纠错后，重新匹配标签虚化条件，无需刷新页面或逐条读取详情。
+  const semanticResult = useProcessingEntryResult(entryId)
+  const dimmed = useIsEntryDimmedByLocalActions(entryId, semanticResult?.semanticAssessments)
 
   return (
     <div
       data-entry-id={entry?.id}
       data-read={asRead ? "true" : "false"}
       data-active={isActive ? "true" : "false"}
+      data-entry-dimmed={dimmed ? "true" : undefined}
+      className={dimmed ? entryDimmedClassName : undefined}
       data-processing-role={processingRole?.kind ?? undefined}
       data-processing-role-source={processingRole?.source ?? undefined}
       style={mergedStyle}

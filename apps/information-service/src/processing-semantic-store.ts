@@ -10,6 +10,7 @@ import {
   semanticTagDefinition,
   semanticTagIds,
   semanticTagIdSchema,
+  tagAssessmentSchema,
 } from "@follow/information-core"
 import { z } from "zod"
 
@@ -194,6 +195,39 @@ export class ProcessingSemanticStore {
       const tags = result.get(inputSeq) ?? []
       tags.push(tag.data)
       result.set(inputSeq, tags)
+    }
+    return result
+  }
+
+  // 条件匹配需要真实置信度和否定状态；批量读取当前索引，保留人工纠错及正文代际校验。
+  tagAssessmentsByInput(): Map<number, TagAssessment[]> {
+    this.requireOwner()
+    const result = new Map<number, TagAssessment[]>()
+    const rows = this.db
+      .prepare(
+        `
+      SELECT tags.input_seq,tags.body FROM entry_tag_index tags
+      JOIN entry_semantic_profiles profile ON profile.input_seq=tags.input_seq
+      JOIN processing_inputs current ON current.seq=tags.input_seq AND current.current=1
+        AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id
+      JOIN entry_decisions decision ON decision.id=current.decision_id AND decision.input_seq=current.seq
+        AND decision.generation=current.generation AND decision.release_version=current.release_version
+      WHERE current.status='succeeded' ORDER BY tags.input_seq,tags.tag_id
+    `,
+      )
+      .all()
+    for (const row of rows) {
+      const parsed = tagAssessmentSchema.safeParse(JSON.parse(String(row.body)))
+      if (
+        !parsed.success ||
+        semanticTagDefinition(parsed.data.tagId)?.definitionVersion !==
+          parsed.data.definitionVersion
+      )
+        continue
+      const seq = Number(row.input_seq)
+      const assessments = result.get(seq) ?? []
+      assessments.push(parsed.data)
+      result.set(seq, assessments)
     }
     return result
   }

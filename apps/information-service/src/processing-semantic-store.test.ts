@@ -8,6 +8,7 @@ import { join } from "pathe"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ProcessingInput } from "./automation-store"
+import { processingApi } from "./processing-api"
 import type { ProcessingDecision } from "./processing-decision"
 import { semanticQuerySchema } from "./processing-semantic-store"
 import { Store } from "./store"
@@ -111,6 +112,47 @@ const query = (extra: object = {}) =>
 
 // 使用真实 SQLite、事务和重开文件验证投影；不请求模型、不发布任何外部配置。
 describe("语义档案存储、查询与人工覆盖", () => {
+  it("批量结果索引保留真实置信度和否定判断，纠错与正文替换后同步失效", () => {
+    const store = fixture()
+    const { input, output } = save(store, "dim", [
+      assessment("present", { confidence: 0.78 }),
+      assessment("absent", { tagId: "form:pure_entertainment" }),
+    ])
+    expect(store.semantics.tagAssessmentsByInput().get(input.seq)).toEqual(
+      expect.arrayContaining(output.semanticProfile!.assessments),
+    )
+    const response = processingApi(store, "GET", "/processing/entry-results", null) as {
+      results: Array<{ semanticAssessments: TagAssessment[] }>
+    }
+    expect(response.results[0]!.semanticAssessments).toEqual(
+      expect.arrayContaining(output.semanticProfile!.assessments),
+    )
+    store.semantics.correct(
+      input,
+      {
+        expectedRevision: 0,
+        expectedContentVersion: input.contentVersion,
+        requestId: randomUUID(),
+        changes: [{ tagId: "signal:social_chatter", state: "absent" }],
+      },
+      () => {
+        const result = store.automation.recalculate(
+          store.automation.current(input.sourceKey, input.itemId)!,
+          output,
+        )
+        store.semantics.index(result.input, output, result.id)
+      },
+    )
+    expect(
+      store.semantics
+        .tagAssessmentsByInput()
+        .get(input.seq)
+        ?.find((item) => item.tagId === "signal:social_chatter"),
+    ).toMatchObject({ state: "absent", confidence: 1 })
+    store.saveEntry({ ...input.body, content: "新的正文" })
+    expect(store.semantics.tagAssessmentsByInput().has(input.seq)).toBe(false)
+  })
+
   it("账号数据库与来源授权隔离，未绑定账号不能读取或重放纠错", () => {
     const store = fixture()
     save(store, "allowed", [assessment("present")])

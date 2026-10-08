@@ -152,6 +152,7 @@ export const clearPublishedLocalFilters = (expectedOwnerId?: string): void => {
 export const evaluatePublishedLocalFilters = (ruleSet: RuleSet, input: RuleInput) => {
   let blocked = false
   let silenced = false
+  let dimmed = false
   const matchedRuleIds: string[] = []
   for (const rule of ruleSet.rules) {
     if (!rule.enabled || !rule.actions.some((action) => action.type === "local_filter")) continue
@@ -162,7 +163,9 @@ export const evaluatePublishedLocalFilters = (ruleSet: RuleSet, input: RuleInput
       if (action.type !== "local_filter") continue
       blocked ||= action.mode === "block"
       silenced ||= action.mode === "silence"
+      // 虚化独立于屏蔽和静音，不改变条目的可见性或未读状态。
+      dimmed ||= action.mode === "dim"
     }
   }
-  return { blocked, silenced: silenced && !blocked, matchedRuleIds }
+  return { blocked, silenced: silenced && !blocked, dimmed, matchedRuleIds }
 }
