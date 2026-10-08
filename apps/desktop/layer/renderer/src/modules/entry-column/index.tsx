@@ -197,12 +197,20 @@ function EntryColumnContent() {
     generated ? [] : entriesIds,
     {
       pauseScrollMarkRead,
+      markRangeAsRead: generated
+        ? ({ startIndex, endIndex }) => {
+            // 投影沿用原生滚动范围；原文和 Story 通过各自的状态接口保存已读。
+            for (const item of reader.items.slice(startIndex, endIndex)) {
+              if (!item.read) void reader.mutateItem(item, { read: true })
+            }
+          }
+        : undefined,
     },
   )
 
   const flushScrollMarkRead = useCallback(
     (currentStartIndex: number) => {
-      if (generated || !routeFeedId) return
+      if (!generated && !routeFeedId) return
 
       const { nextAnchorIndex, range } = getScrollMarkReadRangeState({
         anchorIndex: scrollMarkReadAnchorIndexRef.current,
@@ -236,7 +244,8 @@ function EntryColumnContent() {
     (e: React.UIEvent<HTMLDivElement>) => {
       handleScrollBeyond(e)
       if (generated) reader.saveScroll()
-      else handleScroll()
+      // 保存投影滚动位置与滚动标记已读都需要执行。
+      handleScroll()
     },
     [generated, reader, handleScrollBeyond, handleScroll],
   )

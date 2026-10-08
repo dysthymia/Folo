@@ -11,21 +11,31 @@ type EntryMarkReadHandler = (range: Range, enabled?: boolean) => void
 
 export const useEntryMarkReadHandler = (
   entriesIds: string[],
-  { pauseScrollMarkRead = false }: { pauseScrollMarkRead?: boolean } = {},
+  {
+    pauseScrollMarkRead = false,
+    markRangeAsRead,
+  }: {
+    pauseScrollMarkRead?: boolean
+    markRangeAsRead?: (range: Range) => void
+  } = {},
 ) => {
   const renderAsRead = useGeneralSettingKey("renderMarkUnread")
   const scrollMarkUnread = useGeneralSettingKey("scrollMarkUnread")
   const feedView = useRouteParamsSelector((params) => params.view)
 
-  const handleRangeMarkRead = useEventCallback(
-    ({ startIndex, endIndex }: Range, enabled?: boolean) => {
-      if (!enabled) return
-      const idSlice = entriesIds?.slice(startIndex, endIndex)
-      if (!idSlice?.length) return
+  const handleRangeMarkRead = useEventCallback((range: Range, enabled?: boolean) => {
+    if (!enabled) return
+    // 混合列表按可见行分发读态，Story 身份不能进入官方条目的已读队列。
+    if (markRangeAsRead) {
+      markRangeAsRead(range)
+      return
+    }
+    const { startIndex, endIndex } = range
+    const idSlice = entriesIds?.slice(startIndex, endIndex)
+    if (!idSlice?.length) return
 
-      batchMarkRead(idSlice)
-    },
-  )
+    batchMarkRead(idSlice)
+  })
 
   const handleScrollMarkRead = useEventCallback((range: Range, enabled?: boolean) => {
     if (pauseScrollMarkRead) return
