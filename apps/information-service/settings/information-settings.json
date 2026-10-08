@@ -4,13 +4,18 @@
     "draft": {
       "formatVersion": 5,
       "global": {
-        "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。",
-        "version": 3
+        "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。\n\n阅读贡献要求：短公告、数据、反证、教程、评测和具体经验同样可以有价值；缺少图片、串文、音视频或外链材料时说明缺口。AI 工具、产品与成长内容若原文包含实操步骤、失败经验、适用条件或成本，可在事实摘要中提炼，不能自行生成建议或收益承诺。多事件文章按对应片段与事实引用参与综述，保留各事件区别与原文阅读入口。重点关注只提示阅读优先级，不代表持仓建议，不强制原文独立展示。",
+        "attention": {
+          "enabled": true,
+          "watchlist": [],
+          "nearDeadlineHours": 48
+        },
+        "version": 4
       },
       "rules": [
         {
-          "id": "86e61f20-b00d-47a0-8a55-ea822c88b2c6",
-          "name": "去重规则",
+          "id": "reading-confirmed-noise-v1",
+          "name": "已确认纯噪声：隐藏并排除综述",
           "enabled": true,
           "order": 0,
           "when": {
@@ -24,154 +29,40 @@
                       "view": 0,
                       "name": "Blockchain"
                     }
-                  }
-                ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "ai_dedupe",
-              "scope": {
-                "all": true
-              }
-            }
-          ],
-          "version": 3,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "dd6466e1-5543-4224-a0cd-c7bb432beb43",
-          "name": "Blockchain 同事件综述（v3.2 验收）",
-          "enabled": true,
-          "order": 1,
-          "when": {
-            "anyOf": [
-              {
-                "allOf": [
+                  },
                   {
-                    "field": "source_id",
-                    "operator": "in",
+                    "field": "entry_tag",
+                    "operator": "contains_any",
                     "value": [
-                      "feed/1103428142698987522",
-                      "feed/1103428142698987528",
-                      "feed/1106497372717711360",
-                      "feed/1106497868719325184",
-                      "feed/1124071324059041792",
-                      "feed/119679056002200576",
-                      "feed/131152667982631936",
-                      "feed/231195353137392640",
-                      "feed/41418620691087360",
-                      "feed/41477723842378809",
-                      "feed/41477723842378810",
-                      "feed/43255084700406847",
-                      "feed/43255084704601091",
-                      "feed/47638528516183040",
-                      "feed/50763266822526976",
-                      "feed/56604364758455305",
-                      "feed/58374877360520192",
-                      "feed/59077215422915584",
-                      "feed/62295715070061594",
-                      "feed/65685705329411080",
-                      "feed/66081296854096906",
-                      "feed/79332238621864960"
-                    ]
-                  }
-                ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "presentation",
-              "policy": {
-                "standalone": "auto",
-                "aggregation": "allow"
-              }
-            },
-            {
-              "type": "ai_aggregate",
-              "createPrompt": "把允许参与整合、且确实描述同一事件的条目综合为一篇可直接阅读的中文综述。\n不是选择一篇代表文章：整合各来源独有信息，去掉重复表达，突出事实、关键数字、时间、条件及影响对象。\n正文按“发生了什么—关键细节—新进展或分歧”组织，没有对应内容不强行凑栏目。\n关键句段引用原始条目，末尾提供完整来源入口；转载数量不当成事实确定性的证明。\n同一主题的不同事件不要强行合并；反驳与修正应作为新信息保留。\n分别遵守来源条目的综合资格和改写资格；保持独立展示本身不禁止参与综述，aggregation=deny的材料不得使用。",
-              "updatePrompt": "在已有综述基础上处理新增原始材料，重点指出相较上个实质版本新增、修正、反驳了什么。\n复用已有可靠引用，但对关键旧判断需要时回看原文，不只把旧AI摘要再次摘要。\n修正数据要说明旧说法、修正值与依据；信息冲突未解决时并列呈现，不强行消除分歧。\n纯转载或文风修改不生成“重大更新”；有实质变化才更新阅读提示。\n所有新事实就近链接原始条目，遵守当前聚合范围及成员例外。",
-              "scope": {
-                "all": true
-              },
-              "mode": "same_event",
-              "presets": {
-                "create": {
-                  "id": "P06",
-                  "version": 1
-                },
-                "update": {
-                  "id": "P07",
-                  "version": 1
-                }
-              }
-            }
-          ],
-          "version": 3,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "semantic-tags-blockchain",
-          "name": "Blockchain 条目标签分类",
-          "enabled": true,
-          "order": 2,
-          "when": {
-            "anyOf": [
-              {
-                "allOf": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
                   {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 1,
-                      "name": "X"
-                    }
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
                   }
                 ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "ai_classify",
-              "tagIds": [
-                "form:pure_entertainment",
-                "signal:social_chatter",
-                "signal:empty_opinion",
-                "signal:pure_promotion",
-                "signal:original_data",
-                "signal:reasoned_analysis",
-                "form:tutorial",
-                "form:review",
-                "topic:ai",
-                "topic:blockchain",
-                "topic:product",
-                "topic:music",
-                "topic:fintech",
-                "topic:defi",
-                "topic:blockchain_infrastructure",
-                "event:product_launch",
-                "event:feature_update",
-                "event:funding",
-                "event:institutional_accumulation",
-                "event:fund_flow",
-                "event:business_expansion",
-                "event:institutional_investment"
-              ]
-            }
-          ],
-          "version": 3,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
-          "name": "无价值内容",
-          "enabled": true,
-          "order": 3,
-          "when": {
-            "anyOf": [
+              },
               {
                 "allOf": [
                   {
@@ -188,7 +79,200 @@
                     "value": [
                       "form:pure_entertainment",
                       "signal:social_chatter",
+                      "signal:empty_opinion",
                       "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
                     ],
                     "minConfidence": 0.8
                   }
@@ -198,27 +282,25 @@
           },
           "actions": [
             {
-              "type": "local_filter",
-              "mode": "dim"
+              "type": "reading_decision",
+              "visibility": "hide",
+              "aggregationEligibility": "deny"
+            },
+            {
+              "type": "presentation",
+              "policy": {
+                "rewrite": "deny"
+              }
             }
           ],
           "version": 1,
           "executionLocation": "processing_service"
-        }
-      ]
-    },
-    "published": {
-      "formatVersion": 5,
-      "global": {
-        "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。",
-        "version": 3
-      },
-      "rules": [
+        },
         {
-          "id": "86e61f20-b00d-47a0-8a55-ea822c88b2c6",
-          "name": "去重规则",
+          "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
+          "name": "疑似纯噪声：虚化并保留原文",
           "enabled": true,
-          "order": 0,
+          "order": 1,
           "when": {
             "anyOf": [
               {
@@ -230,58 +312,252 @@
                       "view": 0,
                       "name": "Blockchain"
                     }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
                   }
                 ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "ai_dedupe",
-              "scope": {
-                "all": true
-              }
-            }
-          ],
-          "version": 3,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "dd6466e1-5543-4224-a0cd-c7bb432beb43",
-          "name": "Blockchain 同事件综述（v3.2 验收）",
-          "enabled": true,
-          "order": 1,
-          "when": {
-            "anyOf": [
+              },
               {
                 "allOf": [
                   {
-                    "field": "source_id",
-                    "operator": "in",
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
                     "value": [
-                      "feed/1103428142698987522",
-                      "feed/1103428142698987528",
-                      "feed/1106497372717711360",
-                      "feed/1106497868719325184",
-                      "feed/1124071324059041792",
-                      "feed/119679056002200576",
-                      "feed/131152667982631936",
-                      "feed/231195353137392640",
-                      "feed/41418620691087360",
-                      "feed/41477723842378809",
-                      "feed/41477723842378810",
-                      "feed/43255084700406847",
-                      "feed/43255084704601091",
-                      "feed/47638528516183040",
-                      "feed/50763266822526976",
-                      "feed/56604364758455305",
-                      "feed/58374877360520192",
-                      "feed/59077215422915584",
-                      "feed/62295715070061594",
-                      "feed/65685705329411080",
-                      "feed/66081296854096906",
-                      "feed/79332238621864960"
-                    ]
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
                   }
                 ]
               }
@@ -289,29 +565,14 @@
           },
           "actions": [
             {
-              "type": "presentation",
-              "policy": {
-                "standalone": "auto",
-                "aggregation": "allow"
-              }
+              "type": "local_filter",
+              "mode": "dim"
             },
             {
-              "type": "ai_aggregate",
-              "createPrompt": "把允许参与整合、且确实描述同一事件的条目综合为一篇可直接阅读的中文综述。\n不是选择一篇代表文章：整合各来源独有信息，去掉重复表达，突出事实、关键数字、时间、条件及影响对象。\n正文按“发生了什么—关键细节—新进展或分歧”组织，没有对应内容不强行凑栏目。\n关键句段引用原始条目，末尾提供完整来源入口；转载数量不当成事实确定性的证明。\n同一主题的不同事件不要强行合并；反驳与修正应作为新信息保留。\n分别遵守来源条目的综合资格和改写资格；保持独立展示本身不禁止参与综述，aggregation=deny的材料不得使用。",
-              "updatePrompt": "在已有综述基础上处理新增原始材料，重点指出相较上个实质版本新增、修正、反驳了什么。\n复用已有可靠引用，但对关键旧判断需要时回看原文，不只把旧AI摘要再次摘要。\n修正数据要说明旧说法、修正值与依据；信息冲突未解决时并列呈现，不强行消除分歧。\n纯转载或文风修改不生成“重大更新”；有实质变化才更新阅读提示。\n所有新事实就近链接原始条目，遵守当前聚合范围及成员例外。",
-              "scope": {
-                "all": true
-              },
-              "mode": "same_event",
-              "presets": {
-                "create": {
-                  "id": "P06",
-                  "version": 1
-                },
-                "update": {
-                  "id": "P07",
-                  "version": 1
-                }
+              "type": "presentation",
+              "policy": {
+                "aggregation": "deny",
+                "rewrite": "deny"
               }
             }
           ],
@@ -319,8 +580,8 @@
           "executionLocation": "processing_service"
         },
         {
-          "id": "semantic-tags-blockchain",
-          "name": "Blockchain 条目标签分类",
+          "id": "reading-security-attention-v1",
+          "name": "安全事件重点关注",
           "enabled": true,
           "order": 2,
           "when": {
@@ -331,8 +592,719 @@
                     "field": "category_ref",
                     "operator": "eq",
                     "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
                       "view": 1,
                       "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "attention",
+              "level": "urgent",
+              "reason": "原文支持的安全事件，请核对影响范围与官方说明。"
+            }
+          ],
+          "version": 1,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "reading-important-attention-v1",
+          "name": "可行动事件与实用经验重点关注",
+          "enabled": true,
+          "order": 3,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "attention",
+              "level": "important",
+              "reason": "有明确事件变化或可用方法，保留来源、适用条件与时间信息。"
+            }
+          ],
+          "version": 1,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "86e61f20-b00d-47a0-8a55-ea822c88b2c6",
+          "name": "内容池：语义去重",
+          "enabled": true,
+          "order": 4,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "ai_dedupe",
+              "scope": {
+                "anyOf": [
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "Blockchain"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "X"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "AI"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "创业"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "version": 4,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "dd6466e1-5543-4224-a0cd-c7bb432beb43",
+          "name": "内容池：同事件综述",
+          "enabled": true,
+          "order": 5,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "ai_aggregate",
+              "createPrompt": "把允许参与整合、且确实描述同一事件的条目综合为一篇可直接阅读的中文综述。\n不是选择一篇代表文章：整合各来源独有信息，去掉重复表达，突出事实、关键数字、时间、条件及影响对象。\n正文按“发生了什么—关键细节—新进展或分歧”组织，没有对应内容不强行凑栏目。\n关键句段引用原始条目，末尾提供完整来源入口；转载数量不当成事实确定性的证明。\n同一主题的不同事件不要强行合并；反驳与修正应作为新信息保留。\n分别遵守来源条目的综合资格和改写资格；保持独立展示本身不禁止参与综述，aggregation=deny的材料不得使用。",
+              "updatePrompt": "在已有综述基础上处理新增原始材料，重点指出相较上个实质版本新增、修正、反驳了什么。\n复用已有可靠引用，但对关键旧判断需要时回看原文，不只把旧AI摘要再次摘要。\n修正数据要说明旧说法、修正值与依据；信息冲突未解决时并列呈现，不强行消除分歧。\n纯转载或文风修改不生成“重大更新”；有实质变化才更新阅读提示。\n所有新事实就近链接原始条目，遵守当前聚合范围及成员例外。",
+              "scope": {
+                "anyOf": [
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "Blockchain"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "X"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "AI"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "创业"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "mode": "same_event",
+              "presets": {
+                "create": {
+                  "id": "P06",
+                  "version": 1
+                },
+                "update": {
+                  "id": "P07",
+                  "version": 1
+                }
+              }
+            }
+          ],
+          "version": 4,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "semantic-tags-blockchain",
+          "name": "内容池：新内容语义分类",
+          "enabled": true,
+          "order": 6,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
                     }
                   }
                 ]
@@ -364,20 +1336,85 @@
                 "event:institutional_accumulation",
                 "event:fund_flow",
                 "event:business_expansion",
-                "event:institutional_investment"
+                "event:institutional_investment",
+                "event:security_incident",
+                "event:incentive_airdrop",
+                "event:tokenomics_change",
+                "event:listing_trading_support",
+                "event:regulation",
+                "event:macro_change",
+                "topic:personal_growth",
+                "signal:concrete_experience"
               ]
             }
           ],
-          "version": 3,
+          "version": 4,
           "executionLocation": "processing_service"
-        },
-        {
-          "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
-          "name": "无价值内容",
+        }
+      ]
+    },
+    "published": {
+      "formatVersion": 5,
+      "global": {
+        "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。\n\n阅读贡献要求：短公告、数据、反证、教程、评测和具体经验同样可以有价值；缺少图片、串文、音视频或外链材料时说明缺口。AI 工具、产品与成长内容若原文包含实操步骤、失败经验、适用条件或成本，可在事实摘要中提炼，不能自行生成建议或收益承诺。多事件文章按对应片段与事实引用参与综述，保留各事件区别与原文阅读入口。重点关注只提示阅读优先级，不代表持仓建议，不强制原文独立展示。",
+        "attention": {
           "enabled": true,
-          "order": 3,
+          "watchlist": [],
+          "nearDeadlineHours": 48
+        },
+        "version": 4
+      },
+      "rules": [
+        {
+          "id": "reading-confirmed-noise-v1",
+          "name": "已确认纯噪声：隐藏并排除综述",
+          "enabled": true,
+          "order": 0,
           "when": {
             "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
               {
                 "allOf": [
                   {
@@ -394,7 +1431,483 @@
                     "value": [
                       "form:pure_entertainment",
                       "signal:social_chatter",
+                      "signal:empty_opinion",
                       "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.95
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "reading_decision",
+              "visibility": "hide",
+              "aggregationEligibility": "deny"
+            },
+            {
+              "type": "presentation",
+              "policy": {
+                "rewrite": "deny"
+              }
+            }
+          ],
+          "version": 1,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
+          "name": "疑似纯噪声：虚化并保留原文",
+          "enabled": true,
+          "order": 1,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
+                    ],
+                    "minConfidence": 0.8
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "form:pure_entertainment",
+                      "signal:social_chatter",
+                      "signal:empty_opinion",
+                      "signal:pure_promotion"
+                    ],
+                    "minConfidence": 0.8
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "not_contains_any",
+                    "value": [
+                      "signal:original_data",
+                      "signal:reasoned_analysis",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience",
+                      "event:product_launch",
+                      "event:feature_update",
+                      "event:incentive_airdrop",
+                      "event:security_incident",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change"
                     ],
                     "minConfidence": 0.8
                   }
@@ -406,9 +1919,788 @@
             {
               "type": "local_filter",
               "mode": "dim"
+            },
+            {
+              "type": "presentation",
+              "policy": {
+                "aggregation": "deny",
+                "rewrite": "deny"
+              }
+            }
+          ],
+          "version": 2,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "reading-security-attention-v1",
+          "name": "安全事件重点关注",
+          "enabled": true,
+          "order": 2,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": ["event:security_incident"],
+                    "minConfidence": 0.9
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "attention",
+              "level": "urgent",
+              "reason": "原文支持的安全事件，请核对影响范围与官方说明。"
             }
           ],
           "version": 1,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "reading-important-attention-v1",
+          "name": "可行动事件与实用经验重点关注",
+          "enabled": true,
+          "order": 3,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  },
+                  {
+                    "field": "entry_tag",
+                    "operator": "contains_any",
+                    "value": [
+                      "event:incentive_airdrop",
+                      "event:tokenomics_change",
+                      "event:listing_trading_support",
+                      "event:regulation",
+                      "event:macro_change",
+                      "form:tutorial",
+                      "form:review",
+                      "signal:concrete_experience"
+                    ],
+                    "minConfidence": 0.9
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "attention",
+              "level": "important",
+              "reason": "有明确事件变化或可用方法，保留来源、适用条件与时间信息。"
+            }
+          ],
+          "version": 1,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "86e61f20-b00d-47a0-8a55-ea822c88b2c6",
+          "name": "内容池：语义去重",
+          "enabled": true,
+          "order": 4,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "ai_dedupe",
+              "scope": {
+                "anyOf": [
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "Blockchain"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "X"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "AI"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "创业"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "version": 4,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "dd6466e1-5543-4224-a0cd-c7bb432beb43",
+          "name": "内容池：同事件综述",
+          "enabled": true,
+          "order": 5,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "ai_aggregate",
+              "createPrompt": "把允许参与整合、且确实描述同一事件的条目综合为一篇可直接阅读的中文综述。\n不是选择一篇代表文章：整合各来源独有信息，去掉重复表达，突出事实、关键数字、时间、条件及影响对象。\n正文按“发生了什么—关键细节—新进展或分歧”组织，没有对应内容不强行凑栏目。\n关键句段引用原始条目，末尾提供完整来源入口；转载数量不当成事实确定性的证明。\n同一主题的不同事件不要强行合并；反驳与修正应作为新信息保留。\n分别遵守来源条目的综合资格和改写资格；保持独立展示本身不禁止参与综述，aggregation=deny的材料不得使用。",
+              "updatePrompt": "在已有综述基础上处理新增原始材料，重点指出相较上个实质版本新增、修正、反驳了什么。\n复用已有可靠引用，但对关键旧判断需要时回看原文，不只把旧AI摘要再次摘要。\n修正数据要说明旧说法、修正值与依据；信息冲突未解决时并列呈现，不强行消除分歧。\n纯转载或文风修改不生成“重大更新”；有实质变化才更新阅读提示。\n所有新事实就近链接原始条目，遵守当前聚合范围及成员例外。",
+              "scope": {
+                "anyOf": [
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "Blockchain"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "X"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "AI"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 1,
+                          "name": "个人成长"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "field": "category_ref",
+                        "operator": "eq",
+                        "value": {
+                          "view": 0,
+                          "name": "创业"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "mode": "same_event",
+              "presets": {
+                "create": {
+                  "id": "P06",
+                  "version": 1
+                },
+                "update": {
+                  "id": "P07",
+                  "version": 1
+                }
+              }
+            }
+          ],
+          "version": 4,
+          "executionLocation": "processing_service"
+        },
+        {
+          "id": "semantic-tags-blockchain",
+          "name": "内容池：新内容语义分类",
+          "enabled": true,
+          "order": 6,
+          "when": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "Blockchain"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "X"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "AI"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 1,
+                      "name": "个人成长"
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "field": "category_ref",
+                    "operator": "eq",
+                    "value": {
+                      "view": 0,
+                      "name": "创业"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "type": "ai_classify",
+              "tagIds": [
+                "form:pure_entertainment",
+                "signal:social_chatter",
+                "signal:empty_opinion",
+                "signal:pure_promotion",
+                "signal:original_data",
+                "signal:reasoned_analysis",
+                "form:tutorial",
+                "form:review",
+                "topic:ai",
+                "topic:blockchain",
+                "topic:product",
+                "topic:music",
+                "topic:fintech",
+                "topic:defi",
+                "topic:blockchain_infrastructure",
+                "event:product_launch",
+                "event:feature_update",
+                "event:funding",
+                "event:institutional_accumulation",
+                "event:fund_flow",
+                "event:business_expansion",
+                "event:institutional_investment",
+                "event:security_incident",
+                "event:incentive_airdrop",
+                "event:tokenomics_change",
+                "event:listing_trading_support",
+                "event:regulation",
+                "event:macro_change",
+                "topic:personal_growth",
+                "signal:concrete_experience"
+              ]
+            }
+          ],
+          "version": 4,
           "executionLocation": "processing_service"
         }
       ]
@@ -419,32 +2711,410 @@
       "mode": "rules"
     },
     "sourceKeys": [
+      "feed/100448326073657344",
+      "feed/102912050414121984",
+      "feed/103998104227037184",
+      "feed/104514846811579392",
+      "feed/105785700832177152",
+      "feed/105809442459282432",
+      "feed/105860942759636992",
+      "feed/106292822692375552",
+      "feed/107016697093871616",
+      "feed/107104125923992576",
+      "feed/107274098002168832",
+      "feed/108645357396460544",
+      "feed/108774121813274624",
+      "feed/1090023358747222016",
+      "feed/109007100515103744",
+      "feed/1101384288374226944",
       "feed/1103428142698987522",
       "feed/1103428142698987528",
+      "feed/1103428142698987531",
+      "feed/1103428142698987532",
       "feed/1106497372717711360",
       "feed/1106497868719325184",
+      "feed/1115420572713353216",
       "feed/1124071324059041792",
+      "feed/112880946149180419",
+      "feed/112881516101624842",
+      "feed/112881516101624903",
+      "feed/112883110808380421",
+      "feed/112883110808380446",
+      "feed/1142432730424672390",
+      "feed/1142432730424672401",
+      "feed/1142432730424672412",
+      "feed/1142432730424672437",
+      "feed/1142432730424672453",
+      "feed/1142432730424672455",
+      "feed/1146620630175449088",
+      "feed/115020036798477312",
+      "feed/1162896575140069376",
+      "feed/1179061047063871488",
+      "feed/118329760012515328",
       "feed/119679056002200576",
+      "feed/121882933330763776",
+      "feed/1231129560846565376",
+      "feed/126876190047292418",
+      "feed/1273487338139156480",
+      "feed/128097277604214807",
+      "feed/129118350545015808",
+      "feed/129707019991612416",
+      "feed/1303382567893729280",
+      "feed/130525615742726148",
+      "feed/130525615742726162",
       "feed/131152667982631936",
+      "feed/1315998708394754048",
+      "feed/1315999209983180800",
+      "feed/1315999230770151424",
+      "feed/1315999289607847936",
+      "feed/1315999720111210496",
+      "feed/1316022855069990912",
+      "feed/1316022998682959872",
+      "feed/1316023197358751744",
+      "feed/1316023389357211648",
+      "feed/1316023567917121536",
+      "feed/1316023738776289280",
+      "feed/1316023906749775872",
+      "feed/1316024042846552064",
+      "feed/1316024145657331712",
+      "feed/1316024315660861440",
+      "feed/1316024486117376000",
+      "feed/1316024745728016384",
+      "feed/1316024889391316992",
+      "feed/1316043699804569600",
+      "feed/1316043971142483968",
+      "feed/1316043974632144896",
+      "feed/1316043987986808832",
+      "feed/1316044131599777792",
+      "feed/1316044139870945280",
+      "feed/1316044143847145472",
+      "feed/1316044246792142848",
+      "feed/1316044319471042560",
+      "feed/1316044350106238976",
+      "feed/1316044373174910976",
+      "feed/1316044558949023744",
+      "feed/1316044589684883456",
+      "feed/1316044643187425280",
+      "feed/1316044746820288512",
+      "feed/1316044746820288513",
+      "feed/1316044846409842688",
+      "feed/1316044954337673216",
+      "feed/1316044962659172352",
+      "feed/1316045064815640576",
+      "feed/1316045071828516864",
+      "feed/1316045122529263616",
+      "feed/1316045232621355008",
+      "feed/1316045287650623488",
+      "feed/1316045335247585280",
+      "feed/1316045397843378176",
+      "feed/1316045438125473792",
+      "feed/1316045466931953664",
+      "feed/1316045504429031424",
+      "feed/1316045539409526784",
+      "feed/1316045613413826560",
+      "feed/1316045629419290624",
+      "feed/1316045728589414400",
+      "feed/1316045734125895680",
+      "feed/1316045760315129856",
+      "feed/1316045832624930816",
+      "feed/1316045929765011456",
+      "feed/1316045936727556096",
+      "feed/1316045954142306304",
+      "feed/1316046034488393728",
+      "feed/1316046035964788736",
+      "feed/1316046111512592384",
+      "feed/1316050540177522688",
+      "feed/1316050616228642816",
+      "feed/1316050695182221312",
+      "feed/1316050787859562496",
+      "feed/1316050803378487296",
+      "feed/1316050903353917440",
+      "feed/1316051091661389824",
+      "feed/1316051150146764800",
+      "feed/1316051371773788160",
+      "feed/1316051410428493824",
+      "feed/1316052834411479040",
+      "feed/1316052874525802496",
+      "feed/1316052922072432640",
+      "feed/1316052997066588160",
+      "feed/1316053047180132352",
+      "feed/1316053164251545600",
+      "feed/1316053254529744896",
+      "feed/1316053256257798144",
+      "feed/1316053282832908288",
+      "feed/1316053438357700608",
+      "feed/1316053550026850304",
+      "feed/1316053551889121280",
+      "feed/1316053579084988416",
+      "feed/1316054401520893952",
+      "feed/1316054918594691072",
+      "feed/1316054987733598208",
+      "feed/1316055107321593856",
+      "feed/1316055211407441920",
+      "feed/1316055302172180480",
+      "feed/1316055407751200768",
+      "feed/1316055503163228160",
+      "feed/1316055520544423936",
+      "feed/1316055576311889920",
+      "feed/1316055610151534592",
+      "feed/1316055657614278656",
+      "feed/1316055739889745920",
+      "feed/1316055767437934592",
+      "feed/1316055917795344384",
+      "feed/1316057215311675392",
+      "feed/1316057247658147840",
+      "feed/1316057307921907712",
+      "feed/1316057359662841856",
+      "feed/1316057382328860672",
+      "feed/1316057417963667456",
+      "feed/1316057583185690624",
+      "feed/1316057663078793216",
+      "feed/1316057688009736192",
+      "feed/1316057745488478208",
+      "feed/1316057860294967296",
+      "feed/1316057860697620480",
+      "feed/1316057893497077760",
+      "feed/1316057967098724352",
+      "feed/1316058113798701056",
+      "feed/1316058116801822720",
+      "feed/1316059560128937984",
+      "feed/1316059582962728960",
+      "feed/1316059618161328128",
+      "feed/1316059783970553856",
+      "feed/1316059865474269184",
+      "feed/1316060078645575680",
+      "feed/1316060160333840384",
+      "feed/1316060335672524800",
+      "feed/1316060484855529472",
+      "feed/1316061838323875840",
+      "feed/1316061861912641536",
+      "feed/1316062078506500096",
+      "feed/1316062157929840640",
+      "feed/1316062267518615552",
+      "feed/1316062294815145984",
+      "feed/1316062384875241472",
+      "feed/133363393374963712",
+      "feed/133380812333163527",
+      "feed/133380904032217101",
+      "feed/136002636528794624",
+      "feed/147277052752943104",
+      "feed/149688129439343616",
+      "feed/152143473646163968",
+      "feed/161357556062113792",
+      "feed/167910655182898176",
+      "feed/168466201003137024",
+      "feed/168927456572310528",
+      "feed/174130573888514048",
+      "feed/174296621127830528",
+      "feed/177634611730123776",
+      "feed/180245689399750656",
+      "feed/182991304368348160",
+      "feed/183372062538825728",
+      "feed/183437539728164887",
+      "feed/183844092561340416",
+      "feed/187702008971600924",
+      "feed/187702008971600932",
+      "feed/187702008971600939",
+      "feed/187702008971600955",
+      "feed/187702008971600979",
+      "feed/187702008971600988",
+      "feed/187702008979989508",
+      "feed/187702008979989513",
+      "feed/194228066461775872",
+      "feed/194362332777281536",
+      "feed/198569464573081600",
+      "feed/200406350942673925",
+      "feed/200406350942673929",
+      "feed/203681388611407873",
+      "feed/205218771754995712",
+      "feed/206731754960195584",
+      "feed/207748715775062016",
+      "feed/208067814365067264",
+      "feed/208917490250272768",
+      "feed/209739905945618432",
+      "feed/213142726114962432",
+      "feed/217515479152629760",
+      "feed/217597060234588160",
+      "feed/217810076944734208",
+      "feed/220703564592366592",
+      "feed/223957708270605475",
+      "feed/227409093775643648",
       "feed/231195353137392640",
+      "feed/231782113711215616",
+      "feed/233403197346796544",
+      "feed/233978910653977600",
+      "feed/234987516372739072",
+      "feed/235190506660945920",
+      "feed/238548245557607424",
+      "feed/239938149273558016",
+      "feed/242164616398402560",
+      "feed/242167106081381376",
+      "feed/242809167872849920",
+      "feed/251099653792673792",
+      "feed/265417046706008064",
+      "feed/271267297081962496",
+      "feed/41359648680482841",
+      "feed/41359690177602674",
+      "feed/41373653871256584",
+      "feed/41374113210459143",
+      "feed/41374113210459144",
+      "feed/41390833066598400",
+      "feed/41396806564878336",
+      "feed/41399246064476160",
+      "feed/41415624297308160",
       "feed/41418620691087360",
+      "feed/41446522110034944",
+      "feed/41459996870678529",
+      "feed/41459996870678583",
+      "feed/41469968534837248",
       "feed/41477723842378809",
       "feed/41477723842378810",
+      "feed/41772739045395456",
+      "feed/41784537861424128",
+      "feed/41788131780301824",
+      "feed/41788197198861312",
+      "feed/41788553530151936",
+      "feed/41795937307751551",
+      "feed/41883513058048000",
+      "feed/41887164189727744",
+      "feed/42176727623708675",
+      "feed/42235855896760320",
+      "feed/42237281413489664",
+      "feed/42237560821518336",
+      "feed/42247388826570752",
+      "feed/42375390734181376",
+      "feed/42387138730045440",
+      "feed/42558824964206592",
+      "feed/42952680694484992",
+      "feed/42959440433688576",
+      "feed/42971155740676096",
+      "feed/43169149776421888",
+      "feed/43171452480049152",
+      "feed/43172672515224576",
+      "feed/43173209527149568",
+      "feed/43173643576292352",
+      "feed/43174063732084736",
+      "feed/43177665616032768",
+      "feed/43178807942893568",
+      "feed/43240128705735680",
       "feed/43255084700406847",
       "feed/43255084704601091",
+      "feed/46166936600683520",
+      "feed/47554082034537472",
       "feed/47638528516183040",
+      "feed/48039983835900989",
+      "feed/48568200132678656",
+      "feed/49631049067616256",
+      "feed/49641282953075712",
       "feed/50763266822526976",
+      "feed/51079051666911232",
+      "feed/51871467330102272",
+      "feed/51963726826725376",
+      "feed/52357479513292805",
+      "feed/53682534339699712",
+      "feed/54497986887097344",
+      "feed/54832473514660864",
+      "feed/54881039747481600",
+      "feed/55152127410117632",
+      "feed/55159763889467392",
+      "feed/55206566644447232",
+      "feed/55206648830406656",
+      "feed/55311609950023680",
+      "feed/56160717857838080",
+      "feed/56338102377426944",
       "feed/56604364758455305",
+      "feed/57129110429767680",
+      "feed/57209110970803200",
+      "feed/57348292969442304",
+      "feed/57392383357035520",
+      "feed/57593358692852736",
+      "feed/57745095610233856",
+      "feed/57946150572403712",
+      "feed/58067412472835072",
+      "feed/58136103229684736",
+      "feed/58142073070648320",
+      "feed/58340791868206080",
+      "feed/58357858514662400",
       "feed/58374877360520192",
+      "feed/58520752231162880",
+      "feed/58702884584935424",
+      "feed/58767978945613824",
+      "feed/58922458209199104",
       "feed/59077215422915584",
+      "feed/59286987713662976",
+      "feed/59417201433153536",
+      "feed/59500912887844864",
+      "feed/59586282152624128",
+      "feed/60622545828390912",
+      "feed/61247962978800640",
+      "feed/61586602335170561",
+      "feed/61705245682790400",
+      "feed/61713496614422528",
+      "feed/62112350657889280",
       "feed/62295715070061594",
+      "feed/62295715070061600",
+      "feed/62295715070061601",
+      "feed/62295715070061605",
+      "feed/64309072829965312",
+      "feed/64309072834159616",
+      "feed/64309072834159618",
+      "feed/64365081939660805",
+      "feed/64365081939660808",
+      "feed/64365081939660813",
+      "feed/64365081943855135",
+      "feed/64365081948049421",
+      "feed/64365081948049425",
+      "feed/64365081948049457",
+      "feed/64365081948049466",
+      "feed/64365081948049479",
+      "feed/64365081948049483",
+      "feed/64365081948049487",
       "feed/65685705329411080",
+      "feed/65942005040102400",
       "feed/66081296854096906",
-      "feed/79332238621864960"
+      "feed/66090931808241664",
+      "feed/66411889133677568",
+      "feed/66416421224510464",
+      "feed/67693487743293440",
+      "feed/67936449720381440",
+      "feed/68044258775258112",
+      "feed/71825980427273228",
+      "feed/74847450794440704",
+      "feed/78328450268273664",
+      "feed/79332238621864960",
+      "feed/79881760187952128",
+      "feed/82700135518167040",
+      "feed/84263260297795584",
+      "feed/84597166523030528",
+      "feed/87378906301274112",
+      "feed/89504466386593812",
+      "feed/89504466386593818",
+      "feed/89504466386593832",
+      "feed/89504466386593843",
+      "feed/89504466386593881",
+      "feed/89504466386593895",
+      "feed/89504466386593919",
+      "feed/89504466386593923",
+      "feed/89897856502298624",
+      "feed/89898501542025216",
+      "feed/89911675177006080",
+      "feed/90990731856950272",
+      "feed/91669526491385856",
+      "feed/91825926876747776",
+      "feed/92807517148155904",
+      "feed/92824098831025152",
+      "feed/92828556914803712",
+      "feed/94643613455391744",
+      "inbox/dysthymia"
     ],
-    "historySince": "2026-09-11T16:00:00.000Z",
+    "historySince": "2026-10-08T16:26:51.065Z",
     "timeZone": "Asia/Shanghai",
     "enabled": true,
+    "runOnListLoad": true,
+    "classification": {
+      "mode": "new_content",
+      "enabledAt": "2026-10-08T16:26:51.065Z"
+    },
     "times": ["08:00", "12:00", "15:00", "20:00", "23:00"],
     "pollIntervalMinutes": null,
     "readyBy": null
