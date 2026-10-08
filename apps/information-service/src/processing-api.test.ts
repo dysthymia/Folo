@@ -54,6 +54,112 @@ afterEach(() => {
 })
 
 describe("处理服务 API", () => {
+  it("重点关注随最新发布的清单即时投影，客观旧决定不换代，覆盖与策略待定独立返回", () => {
+    const store = fixture()
+    const draft = store.automation.draft()
+    draft.config.global.attention = { enabled: true, watchlist: [] }
+    store.automation.saveDraft(draft.config, draft.revision)
+    store.automation.publish(1, { mode: "future" }, randomUUID())
+    store.saveEntry({ ...entry, content: "Acme 发布新功能" })
+    const input = store.automation.assign(store.automation.inputs()[0]!.seq)
+    const decision = {
+      schemaVersion: 2,
+      fingerprint: "semantic",
+      provider: "codex",
+      model: "test",
+      generatedAt: entry.publishedAt,
+      durationMs: 1,
+      usage: null,
+      status: "keep",
+      title: "Acme 新闻",
+      summary: "",
+      reason: "保留原文",
+      labels: [],
+      policy: { standalone: "auto", aggregation: "allow", rewrite: "allow" },
+      sourceRole: "reporting",
+      context: { source_id: source.key, contextId: source.key },
+      facts: [],
+      semantic: null,
+      reused: false,
+      pendingPolicyFields: ["aggregation"],
+      semanticProfile: {
+        schemaVersion: 2,
+        contentVersion: input.contentVersion,
+        materialDigest: "material",
+        definitionDigest: "definition",
+        coverage: "partial",
+        materialCoverage: "complete",
+        semanticAssessmentCoverage: "partial",
+        assessedTagIds: ["event:feature_update"],
+        assessments: [
+          {
+            tagId: "event:feature_update",
+            state: "present",
+            definitionVersion: 1,
+            confidence: 0.96,
+            reason: "发布新功能",
+            evidenceIds: ["E1"],
+          },
+        ],
+        evidence: { E1: "Acme 发布新功能" },
+        entityVersion: 1,
+        entities: [
+          {
+            kind: "project",
+            name: "Acme",
+            parentName: null,
+            aliases: [],
+            confidence: 0.98,
+            evidenceIds: ["E1"],
+          },
+        ],
+        substantiveContribution: {
+          state: "present",
+          confidence: 0.96,
+          reason: "新功能信息有用",
+          evidenceIds: ["E1"],
+        },
+      },
+    } satisfies ProcessingDecision
+    store.semantics.publish(input, decision)
+    const before = store.processingState.published()[0]!
+    expect(processingApi(store, "GET", "/processing/entry-results", {})).toMatchObject({
+      results: [
+        {
+          attention: { level: "none" },
+          pendingPolicyFields: ["aggregation"],
+          materialCoverage: "complete",
+          semanticAssessmentCoverage: "partial",
+          contribution: { state: "present" },
+        },
+      ],
+    })
+    const next = store.automation.draft()
+    next.config.global.attention = {
+      enabled: true,
+      watchlist: [{ id: "acme", name: "Acme", aliases: [] }],
+    }
+    store.automation.saveDraft(next.config, next.revision)
+    store.automation.publish(2, { mode: "future" }, randomUUID())
+    expect(processingApi(store, "GET", "/processing/entry-results", {})).toMatchObject({
+      results: [
+        {
+          decisionId: before.decisionId,
+          attention: { level: "important", matchedWatchIds: ["acme"] },
+        },
+      ],
+    })
+    expect(store.processingState.published()[0]!.decisionId).toBe(before.decisionId)
+    expect(processingApi(store, "GET", `/processing/entries/${input.seq}`, {})).toMatchObject({
+      entry: {
+        attention: { level: "important" },
+        pendingPolicyFields: ["aggregation"],
+        materialCoverage: "complete",
+        semanticAssessmentCoverage: "partial",
+      },
+    })
+  })
+
   it("只用当前 decision 的引用反馈标记待核对，旧 decision 不污染新结果", () => {
     const store = fixture()
     store.automation.publish(0, { mode: "future" }, randomUUID())

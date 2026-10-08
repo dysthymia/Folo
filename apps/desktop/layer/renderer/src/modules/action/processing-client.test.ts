@@ -550,6 +550,33 @@ describe("createProcessingClient", () => {
     expect(fetcher).not.toHaveBeenCalledWith(expect.stringContaining("/actions"), expect.anything())
   })
 
+  it("公共设置激活传递可选关注配置，旧正文调用不发送该字段", async () => {
+    const response = {
+      revision: 7,
+      config: ruleSet,
+      effectiveConfig: ruleSet,
+      release: releaseResponse,
+      schedule: { revision: 0, config: null },
+    }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(response))
+    const client = createProcessingClient(async () => "token", fetcher)
+    const attention = { enabled: true, watchlist: [{ id: "watch-1", name: "Folo", aliases: [] }] }
+    await client.activateGlobal("要求", 6, "request-1", new AbortController().signal, attention)
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      markdown: "要求",
+      expectedRevision: 6,
+      requestId: "request-1",
+      attention,
+    })
+    fetcher.mockResolvedValueOnce(Response.json(response))
+    await client.activateGlobal("要求", 6, "request-2", new AbortController().signal)
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      markdown: "要求",
+      expectedRevision: 6,
+      requestId: "request-2",
+    })
+  })
+
   it("validates schedule, frozen release, run and input response contracts", async () => {
     const schedule = {
       revision: 4,
@@ -562,6 +589,7 @@ describe("createProcessingClient", () => {
         times: ["09:00", "12:00", "15:00", "18:00", "21:00"],
         pollIntervalMinutes: 15,
         readyBy: { leadMinutes: 30 },
+        classification: { mode: "new_content" as const, enabledAt: "2026-10-08T00:00:00Z" },
       },
     }
     const fetcher = vi

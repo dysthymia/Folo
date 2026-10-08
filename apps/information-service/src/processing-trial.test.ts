@@ -189,6 +189,13 @@ describe("规则 AI 试运行", () => {
             facts: [],
             summary: prompts.length === 1 ? "简单问候" : "二次变换摘要",
             eventMentions: [],
+            materialCoverage: "complete",
+            substantiveContribution: {
+              state: "absent",
+              confidence: 0.98,
+              reason: "全文只有问候。",
+              evidenceIds: [],
+            },
             entities: [],
             tagAssessments: [
               {

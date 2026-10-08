@@ -1,11 +1,35 @@
 import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
-import type { AutomationRule, RuleSet } from "@follow/information-core"
+import type { AttentionSettings, AutomationRule, RuleSet } from "@follow/information-core"
 import { ruleRequiresSemantics, ruleSetSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import type { SourceEntry } from "./folo"
+
+// 注意力发布只改变阅读提示；规则的内容指令、范围及策略仍须完全一致。
+function attentionOnlyRuleChange(previous: RuleSet | null, next: RuleSet) {
+  if (!previous) return false
+  const objective = (config: RuleSet) => ({
+    ...config,
+    global: { markdown: config.global.markdown },
+    rules: config.rules.flatMap((rule) => {
+      const actions = rule.actions.filter((action) => action.type !== "attention")
+      return actions.length ? [{ ...rule, version: 0, actions }] : []
+    }),
+  })
+  const attention = (config: RuleSet) => ({
+    global: config.global.attention ?? null,
+    rules: config.rules.flatMap((rule) => {
+      const actions = rule.actions.filter((action) => action.type === "attention")
+      return actions.length ? [{ ...rule, version: 0, actions }] : []
+    }),
+  })
+  return (
+    JSON.stringify(objective(previous)) === JSON.stringify(objective(next)) &&
+    JSON.stringify(attention(previous)) !== JSON.stringify(attention(next))
+  )
+}
 
 export class AutomationError extends Error {
   constructor(
@@ -196,9 +220,10 @@ export class AutomationStore {
     expectedRevision: number,
     requestId: string,
     afterActivate?: () => void,
+    attention?: AttentionSettings,
   ) {
     return this.activateChange(
-      { type: "global", markdown },
+      { type: "global", markdown, ...(attention === undefined ? {} : { attention }) },
       expectedRevision,
       requestId,
       afterActivate,
@@ -318,7 +343,7 @@ export class AutomationStore {
   private activateChange(
     change:
       | { type: "rule"; ruleId: string; rule: AutomationRule | null }
-      | { type: "global"; markdown: string }
+      | { type: "global"; markdown: string; attention?: AttentionSettings }
       | { type: "rules"; rules: AutomationRule[] }
       | { type: "reorder"; ruleIds: string[] },
     expectedRevision: number,
@@ -352,15 +377,18 @@ export class AutomationStore {
       let draftConfig = previous.config
       let effectiveConfig = active
       if (change.type === "global") {
+        // 旧客户端仅提交正文时保留关注配置；显式提交才同步更新草稿与生效配置。
+        const attention = change.attention === undefined ? {} : { attention: change.attention }
         draftConfig = {
           ...draftConfig,
-          global: { ...draftConfig.global, markdown: change.markdown },
+          global: { ...draftConfig.global, markdown: change.markdown, ...attention },
         }
         effectiveConfig = {
           ...active,
           global: {
             ...active.global,
             markdown: change.markdown,
+            ...attention,
             version: active.global.version + Number(active.global.markdown !== change.markdown),
           },
         }
@@ -469,7 +497,7 @@ export class AutomationStore {
       )
       const scope = { mode: "future" as const }
       const createdAt = new Date().toISOString()
-      // 普通保存不重算已有材料或失效既有 Story；后续新输入在领取时绑定新版本。
+      // 普通激活（含纯关注配置）只保存未来版本；既有输入的状态、代数与发布绑定均不变。
       const inserted = this.db
         .prepare(
           "INSERT INTO rule_set_releases(draft_revision,activation_seq,body,scope,targets,created_at) VALUES(?,?,?,?,?,?)",
@@ -570,6 +598,16 @@ export class AutomationStore {
       )
       .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
       .map((row) => this.inputFromRow(row))
+  }
+
+  // 分类启用水位以首次入库为准；只读取历史元数据，正文水合换代不会伪装成新文。
+  firstReceivedAt(sourceKey: string, itemId: string): string | null {
+    const row = this.db
+      .prepare(
+        "SELECT MIN(received_at) AS first_received_at FROM processing_inputs WHERE source_key=? AND item_id=?",
+      )
+      .get(sourceKey, itemId)
+    return row?.first_received_at == null ? null : String(row.first_received_at)
   }
 
   current(sourceKey: string, itemId: string): ProcessingInput | null {
@@ -720,11 +758,14 @@ export class AutomationStore {
     const selected = scope.mode === "selected" ? new Set(scope.inputIds) : null
     if (selected && [...selected].some((id) => !inputs.some((input) => input.seq === id)))
       throw new AutomationError("invalid_target")
+    // 即便用户选了既有内容，纯注意力变更也不换代或重排模型任务。
+    const attentionOnly = attentionOnlyRuleChange(this.effective().config, this.draft().config)
     const targets = inputs.filter(
       (input) =>
-        input.releaseVersion === null ||
-        (scope.mode === "selected" && selected!.has(input.seq)) ||
-        (scope.mode === "recent" && Date.parse(input.receivedAt) >= Date.parse(scope.since)),
+        !attentionOnly &&
+        (input.releaseVersion === null ||
+          (scope.mode === "selected" && selected!.has(input.seq)) ||
+          (scope.mode === "recent" && Date.parse(input.receivedAt) >= Date.parse(scope.since))),
     )
     const targetIds = new Set(targets.map((input) => input.seq))
     const unchanged = inputs.filter(

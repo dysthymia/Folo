@@ -798,7 +798,8 @@ export function useGeneratedReader({
     if (item.kind === "story")
       void navigate(storyReaderLocation(location.pathname, params, item.storyId))
     else navigateEntry({ entryId: item.id })
-    if (!item.read) void mutateItem(item, { read: true })
+    // Story 正文返回后才确认已读，避免打开瞬间吞掉“自上次阅读以来”的比较基线。
+    if (item.kind === "entry" && !item.read) void mutateItem(item, { read: true })
   }
   const loadMore = async () => {
     const saved = sessionRef.current

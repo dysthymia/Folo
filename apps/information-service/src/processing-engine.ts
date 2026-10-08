@@ -23,7 +23,7 @@ import {
   createEntryModelSelectionSchema,
   entryModelOutputSchema,
 } from "./processing-decision"
-import { hasConfirmedEvent, materializeEvent } from "./processing-event"
+import { materializeEvent } from "./processing-event"
 import { materializeEventMentions } from "./processing-event-mentions"
 import type { EvidenceCatalog } from "./processing-evidence"
 import {
@@ -116,8 +116,9 @@ export type EntryProcessingOptions = {
   sourceKeys: string[]
   // 水合小批只处理本批当前输入，防止反复扫描或调用其他批次。
   inputSeqs?: readonly number[]
-  // worker 仅在列表加载时启用分类，显式单篇/验收调用继续沿用所选规则。
+  // 主动分类必须遵守调度启用水位；显式列表或单篇调用继续沿用所选规则。
   allowClassification?: boolean
+  classificationSince?: string
   historySince: string
   cutoffAt?: string
   signal: AbortSignal
@@ -125,6 +126,30 @@ export type EntryProcessingOptions = {
   onProgress?: (result: EntryProcessingResult) => void
   // 同一证据目录可同时产出单篇、去重与新综述，避免各规则重读正文。
   sharedAnalysis?: SharedAnalysisSession
+}
+
+// 用条目最早入库时间判断新内容，正文水合生成新 seq 不能把旧文挪过启用水位。
+const classificationArrivalTimes = new WeakMap<EntryProcessingOptions, Map<string, number>>()
+function classificationAllowed(
+  options: EntryProcessingOptions,
+  input: { sourceKey: string; itemId: string; receivedAt: string },
+) {
+  if (options.allowClassification === false) return false
+  if (!options.classificationSince) return true
+  let times = classificationArrivalTimes.get(options)
+  if (!times) {
+    times = new Map()
+    classificationArrivalTimes.set(options, times)
+  }
+  const key = JSON.stringify([input.sourceKey, input.itemId])
+  let first = times.get(key)
+  if (first === undefined) {
+    first = Date.parse(
+      options.store.automation.firstReceivedAt(input.sourceKey, input.itemId) ?? input.receivedAt,
+    )
+    times.set(key, first)
+  }
+  return first >= Date.parse(options.classificationSince)
 }
 
 // 每次只接受固定 TargetSnapshot；模型建议不能覆盖程序解析出的展示和材料资格。
@@ -298,7 +323,7 @@ export async function runEntryProcessing(
             candidateConfig,
             activeConfig,
             context,
-            options.allowClassification,
+            classificationAllowed(options, candidate),
           ),
           context,
         ) ||
@@ -335,7 +360,7 @@ export async function runEntryProcessing(
         release,
         activeConfig,
         target.snapshot.context,
-        options.allowClassification,
+        classificationAllowed(options, candidate),
       )
       const instructions = compileInstructions(effectiveConfig, target.snapshot.context)
       const fingerprint = entryFingerprint({
@@ -358,6 +383,19 @@ export async function runEntryProcessing(
         metrics.cacheHits++
         decision = {
           ...cached,
+          // 缓存保存的是旧阅读投影；复用模型判断时仍按当前显式隐藏授权重算。
+          ...(cached.semantic
+            ? {
+                status: resolvedStatus(instructions, cached.semantic),
+                policy: resolvedPolicy(
+                  instructions,
+                  cached.semantic,
+                  text.length > MAX_ENTRY_CHARS,
+                ),
+                reason: policyReason(instructions, cached.semantic),
+                pendingPolicyFields: [...instructions.pendingPolicyFields],
+              }
+            : {}),
           context: target.snapshot.context,
           semantic: cached.semantic ? { ...cached.semantic, entryId: target.input.itemId } : null,
           semanticProfile: cached.semanticProfile
@@ -456,7 +494,8 @@ export async function runEntryProcessing(
           status: resolvedStatus(instructions, model.output),
           title: model.output.title,
           summary: model.output.summary,
-          reason: model.output.reason,
+          reason: policyReason(instructions, model.output),
+          pendingPolicyFields: [...instructions.pendingPolicyFields],
           labels: model.output.labels,
           policy: resolvedPolicy(instructions, model.output, text.length > MAX_ENTRY_CHARS),
           sourceRole: target.snapshot.sourceRole,
@@ -580,7 +619,7 @@ async function prepareNormalEntryBatches(
             candidateConfig,
             activeConfig,
             context,
-            options.allowClassification,
+            classificationAllowed(options, candidate),
           ),
           context,
         ) ||
@@ -612,7 +651,7 @@ async function prepareNormalEntryBatches(
         release,
         activeConfig,
         target.snapshot.context,
-        options.allowClassification,
+        classificationAllowed(options, candidate),
       )
       const instructions = compileInstructions(effectiveConfig, target.snapshot.context)
       const fingerprint = entryFingerprint({
@@ -637,6 +676,14 @@ async function prepareNormalEntryBatches(
           target.input,
           {
             ...cached,
+            ...(cached.semantic
+              ? {
+                  status: resolvedStatus(instructions, cached.semantic),
+                  policy: resolvedPolicy(instructions, cached.semantic, false),
+                  reason: policyReason(instructions, cached.semantic),
+                  pendingPolicyFields: [...instructions.pendingPolicyFields],
+                }
+              : {}),
             context: target.snapshot.context,
             semantic: cached.semantic ? { ...cached.semantic, entryId: target.input.itemId } : null,
             semanticProfile: cached.semanticProfile
@@ -676,8 +723,16 @@ async function prepareNormalEntryBatches(
           semanticDefinitions: semanticDefinitionsForIds(instructions.semanticTagIds),
         }),
       })
-    } catch {
-      // 准备失败仍交给原单篇路径记录既有错误分类，批层不改变错误语义。
+    } catch (error) {
+      // 已领取的缓存项不会再进单篇路径，拒绝异常证据时必须立即记录失败，不能遗留运行态。
+      if (batches.handledInputSeqs.has(candidate.seq)) {
+        const current =
+          options.store.automation.current(candidate.sourceKey, candidate.itemId) ?? candidate
+        const code = processingErrorCode(error)
+        options.store.processingState.fail(current, code)
+        result.failures.push({ inputSeq: candidate.seq, code })
+      }
+      // 尚未领取的准备失败仍交给原单篇路径记录既有错误分类。
     }
   }
   for (const group of boundedBatchGroups(prepared)) {
@@ -1035,7 +1090,8 @@ function decisionForOutput(
     status: resolvedStatus(item.instructions, output),
     title: output.title,
     summary: output.summary,
-    reason: output.reason,
+    reason: policyReason(item.instructions, output),
+    pendingPolicyFields: [...item.instructions.pendingPolicyFields],
     labels: output.labels,
     policy: resolvedPolicy(item.instructions, output, false),
     sourceRole: item.target.snapshot.sourceRole,
@@ -1084,7 +1140,7 @@ function entryFingerprint(input: {
     const analysis = semanticAnalysisInstructions(input.instructions)
     // 语义缓存只依赖材料、模型及分析指令；阅读动作和摘要长度在发布时重算。
     return hash({
-      version: "semantic-entry-v2",
+      version: "semantic-entry-v3",
       promptVersion: ENTRY_PROMPT_VERSION,
       // 实体协议仅改变语义缓存身份，普通摘要继续沿用既有缓存。
       entityVersion: SEMANTIC_ENTITY_VERSION,
@@ -1112,7 +1168,7 @@ function entryFingerprint(input: {
     // 原文身份与实际模型指令一致才复用；分类等审计上下文保留在各自决定中。
     sourceRole: input.target.sourceRole,
     historySince: input.historySince,
-    global: input.instructions.global,
+    global: semanticAnalysisInstructions(input.instructions).global,
     transformations: input.instructions.transformations,
     matches: input.instructions.matches,
     policy: input.instructions.policy,
@@ -1137,21 +1193,27 @@ export function sourceRole(store: ProcessingEngineStore, sourceKey: string | nul
   return roles.join(" / ") || "unknown"
 }
 
+// 非语义旧指令也保留真实待定说明，不能把规则条件不足解释为材料缺失。
+function policyReason(
+  instructions: ReturnType<typeof compileInstructions>,
+  output: EntryModelOutput,
+) {
+  return instructions.pendingPolicyFields.length
+    ? `阅读策略待定（${instructions.pendingPolicyFields.join("、")}），原文保持可读：${output.reason}`
+    : output.reason
+}
+
 export function resolvedStatus(
   instructions: ReturnType<typeof compileInstructions>,
   output: EntryModelOutput,
 ) {
-  if (
-    instructions.pendingPolicyFields.includes("standalone") ||
-    output.disposition === "needs_context"
-  )
-    return "needs_context"
+  if (output.disposition === "needs_context") return "needs_context"
+  // 标签置信度不足使阅读策略待定，原文仍可读；材料缺失独立由模型 disposition 表示。
+  if (instructions.pendingPolicyFields.includes("standalone")) return "keep"
   if (instructions.policy.standalone === "always") return "keep"
   if (instructions.policy.standalone === "never") return "hide"
-  // 只有“有效重复拟综合”但身份不明时保留独立入口；纯噪声和显式隐藏仍按既有规则处理。
-  if (output.disposition === "hide" && output.aggregation && !hasConfirmedEvent(output.event))
-    return "keep"
-  return output.disposition
+  // 模型没有自由隐藏授权；异常/缺少证据的模型结论不能变成正式隐藏决定。
+  return "keep"
 }
 
 export function resolvedPolicy(
@@ -1163,17 +1225,13 @@ export function resolvedPolicy(
     return { standalone: "always", aggregation: "deny", rewrite: "deny" } as const
   }
   const pending = new Set(instructions.pendingPolicyFields)
+  // 独立入口隐藏只能来自明确策略，模型 hide 仅是可追溯的语义建议。
   const hiddenByModel = output.disposition === "hide"
   // 三个显式字段逐一覆盖语义默认值，折叠独立入口不会隐式剥夺综合资格。
   return {
     standalone: pending.has("standalone")
       ? "always"
-      : (instructions.policy.standalone ??
-        (hiddenByModel && output.aggregation && !hasConfirmedEvent(output.event)
-          ? "always"
-          : hiddenByModel
-            ? "never"
-            : defaultPolicy.standalone)),
+      : (instructions.policy.standalone ?? (hiddenByModel ? "always" : defaultPolicy.standalone)),
     aggregation: pending.has("aggregation")
       ? "deny"
       : (instructions.policy.aggregation ?? (output.aggregation ? "allow" : "deny")),
@@ -1193,6 +1251,10 @@ async function publishDecision(
   result: EntryProcessingResult,
   snapshot: TargetSnapshot,
 ) {
+  // 模型缓存也须验证原文证据，历史异常引用不能再次正式发布。
+  const originalText = sourceText(input.body.content ?? "")
+  if (decision.facts.some((fact) => !containsQuote(originalText, fact.quote)))
+    throw new Error("invalid_model_reference")
   if (decision.semanticProfile) {
     const config =
       input.releaseVersion === null ? null : options.store.automation.release(input.releaseVersion)
@@ -1206,7 +1268,7 @@ async function publishDecision(
         config,
         options.store.automation.effective?.().config,
         decision.context,
-        options.allowClassification,
+        classificationAllowed(options, input),
       )
       const assessments = options.store.semantics.assessments(input, decision.semanticProfile)
       const instructions = compileInstructions(effectiveConfig, {

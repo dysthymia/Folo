@@ -1,4 +1,5 @@
 import {
+  contributionAssessmentSchema,
   semanticEntitySchema,
   semanticTagDefinitionSchema,
   semanticTagIdSchema,
@@ -25,6 +26,9 @@ export const entrySemanticProfileSchema = z.object({
   assessments: z.array(tagAssessmentSchema),
   evidence: z.record(z.string(), z.string()),
   coverage: z.enum(["complete", "partial"]),
+  materialCoverage: z.enum(["complete", "partial"]).optional(),
+  semanticAssessmentCoverage: z.enum(["complete", "partial"]).optional(),
+  substantiveContribution: contributionAssessmentSchema.optional(),
   // 旧画像没有实体字段，保留读取兼容，不把缺失字段解释为新识别结果。
   entityVersion: z.number().int().positive().optional(),
   entities: z.array(semanticEntitySchema).optional(),

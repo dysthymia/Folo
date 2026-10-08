@@ -3,6 +3,7 @@ import { resolveScheduleSourceKeys } from "@follow/information-core"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
+import { ProcessingClassificationSettings } from "./processing-classification-settings"
 import type {
   ProcessingEditor,
   ProcessingInput,
@@ -248,6 +249,10 @@ export function ProcessingRunSettings({
         {t("processing.run.on_list_load")}
       </label>
       <p className="text-xs text-text-secondary">{t("processing.run.on_list_load_hint")}</p>
+      <ProcessingClassificationSettings
+        value={config.classification}
+        onChange={(classification) => change({ classification })}
+      />
       <fieldset className="space-y-2" data-schedule-scope={runScope.mode}>
         <legend className="text-sm font-medium">{t("processing.run.scope")}</legend>
         <div className="flex flex-wrap gap-3 text-sm">

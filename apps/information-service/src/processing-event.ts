@@ -189,7 +189,10 @@ function eventInstant(value: string): number | null {
   return Number.isFinite(time) ? time : null
 }
 
-function occurrenceRange(anchor: NonNullable<EventIdentity["anchor"]>): [number, number] | null {
+// 召回复用身份确认的时间区间，避免重复实现时区与夏令时规则。
+export function occurrenceRange(
+  anchor: NonNullable<EventIdentity["anchor"]>,
+): [number, number] | null {
   if (anchor.kind === "event_time") {
     const instant = eventInstant(anchor.value)
     return instant === null ? null : [instant, instant + 1]

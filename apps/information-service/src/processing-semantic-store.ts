@@ -164,9 +164,11 @@ export class ProcessingSemanticStore {
         tagId: String(row.tag_id),
         state: String(row.state) as "present" | "absent",
       }))
+    const currentProfile = profile ?? this.view(input).profile
     return effectiveSemanticAssessments(
-      profile?.assessments ?? this.view(input).profile?.assessments ?? [],
+      currentProfile?.assessments ?? [],
       changes,
+      currentProfile?.substantiveContribution,
     )
   }
 

@@ -30,6 +30,8 @@ export function renderSemanticTagRequirements(ids: readonly string[]) {
   if (!definitions.length) return ""
   return `语义标签评估：逐个返回全部指定 tagId 的 tagAssessments，definitionVersion 必须与定义一致。标签含义不取决于用户偏好、隐藏动作或展示长度。
 state=present 需要明确证据；不存在须以完整已读材料为依据，缺失正文、图片或引用内容必须保留 unknown，不能把未读当作 absent。confidence 是客观自评，不为迎合规则提高置信度。
+必须返回 materialCoverage=complete 或 partial：该字段只说明可供判断的原文材料是否完整，不由标签 unknown 或低置信度决定；缺失图片/正文/影响判断的引用填 partial。
+必须同时返回 substantiveContribution={state, confidence, reason, evidenceIds}，独立记录证据支持的实质贡献，present 必须引用当前证据且给出真实置信度；没有充分材料填 unknown。
 教程、原始数据、实测、论据、具体经验和可用事实均属于实质贡献；文章含推广但仍有这些贡献时，纯推广、纯娱乐、纯闲聊、空泛观点等整篇无价值标签不能为 present。
 只用当前证据目录里的 evidenceIds，不返回自由引文；标签证据独立于 facts 上限，不能因 facts 未保留某节而假定该节不存在。
 标签定义：${JSON.stringify(definitions)}
@@ -86,11 +88,83 @@ export function createTagAssessmentsSelectionSchema(
     })
 }
 
+// 实质贡献独立于标签和摘要上限保存，普通单篇与长文共用相同证据约束。
+export const substantiveContributionSchema = z
+  .object({
+    state: z.enum(["present", "absent", "unknown"]),
+    confidence: z.number().finite().min(0).max(1).nullable(),
+    reason: z.string().trim().min(1).max(4000),
+    evidenceIds: z.array(z.string().trim().min(1).max(200)).max(100),
+  })
+  .strict()
+export type SubstantiveContribution = z.infer<typeof substantiveContributionSchema>
+
+export function substantiveContributionForCatalog(catalog: EvidenceCatalog) {
+  const ids = catalog.fragments.map((item) => item.evidenceId)
+  return substantiveContributionSchema
+    .extend({
+      evidenceIds: ids.length
+        ? z.array(z.enum(ids as [string, ...string[]])).max(100)
+        : z.array(z.string()).max(0),
+    })
+    .superRefine((value, context) => {
+      if (value.state === "present" && !value.evidenceIds.length)
+        context.addIssue({
+          code: "custom",
+          path: ["evidenceIds"],
+          message: "missing_contribution_evidence",
+        })
+    })
+}
+
+export function hasReliableContribution(value: SubstantiveContribution | undefined) {
+  return (
+    value?.state === "present" && (value.confidence ?? 0) >= 0.8 && value.evidenceIds.length > 0
+  )
+}
+
+// 单篇也必须保护已证实的贡献；冲突保留 unknown，而非改写模型的原始判断。
+export function protectWholeContentAssessments(
+  assessments: readonly TagAssessment[],
+  contribution: SubstantiveContribution | undefined,
+): TagAssessment[] {
+  // 教程、实测、原始数据和有据分析的可靠正证本身也构成贡献反例。
+  const positive = assessments.filter(
+    (item) =>
+      ["form:tutorial", "form:review", "signal:original_data", "signal:reasoned_analysis"].includes(
+        item.tagId,
+      ) &&
+      item.state === "present" &&
+      (item.confidence ?? 0) >= 0.8 &&
+      item.evidenceIds.length > 0,
+  )
+  const protectedContribution = hasReliableContribution(contribution) || positive.length > 0
+  const evidenceIds = [
+    ...new Set([
+      ...(hasReliableContribution(contribution) ? contribution!.evidenceIds : []),
+      ...positive.flatMap((item) => item.evidenceIds),
+    ]),
+  ]
+  return assessments.map((item) =>
+    protectedContribution && isWholeContentNoiseTag(item.tagId) && item.state === "present"
+      ? {
+          ...item,
+          state: "unknown",
+          confidence: null,
+          reason: `纯噪声判断与已证实的实质贡献冲突，保留原文待确认：${contribution?.reason ?? positive.map((item) => item.reason).join("；")}`,
+          evidenceIds: [...new Set([...item.evidenceIds, ...evidenceIds])].slice(0, 100),
+        }
+      : item,
+  )
+}
+
 export type ChunkSemanticObservation = {
   coverage: "complete" | "partial"
   tagAssessments: TagAssessment[]
   substantiveContribution: {
     state: TagAssessment["state"]
+    confidence?: number | null
+    reason?: string
     evidenceIds: string[]
   }
 }
@@ -105,7 +179,12 @@ export function combineChunkTagAssessments(
       chunk.tagAssessments.find((item) => item.tagId === definition.id),
     )
     const complete = chunks.length > 0 && chunks.every((chunk) => chunk.coverage === "complete")
-    const substantive = chunks.filter((chunk) => chunk.substantiveContribution.state === "present")
+    const substantive = chunks.filter(
+      (chunk) =>
+        chunk.substantiveContribution.state === "present" &&
+        (chunk.substantiveContribution.confidence ?? 0) >= 0.8 &&
+        chunk.substantiveContribution.evidenceIds.length > 0,
+    )
     const knownNoContribution = chunks.every(
       (chunk) => chunk.substantiveContribution.state === "absent",
     )
@@ -172,4 +251,52 @@ export function combineChunkTagAssessments(
       ].slice(0, 100),
     }
   })
+}
+
+// 任一证据充分的分块可证明贡献存在；否定必须覆盖整篇，缺失保持未知。
+export function combineChunkContributions(
+  chunks: readonly ChunkSemanticObservation[],
+): SubstantiveContribution {
+  const present = chunks.flatMap((chunk) => {
+    const value = chunk.substantiveContribution
+    return value.state === "present" && value.evidenceIds.length
+      ? [
+          {
+            ...value,
+            confidence: value.confidence ?? null,
+            reason: value.reason ?? "已读分块提供可用事实、方法、论据或经验。",
+          },
+        ]
+      : []
+  })
+  if (present.length)
+    return {
+      state: "present",
+      confidence: present.some((item) => item.confidence !== null)
+        ? Math.max(
+            ...present.flatMap((item) => (item.confidence === null ? [] : [item.confidence])),
+          )
+        : null,
+      reason: present
+        .map((item) => item.reason)
+        .join("；")
+        .slice(0, 4000),
+      evidenceIds: [...new Set(present.flatMap((item) => item.evidenceIds))].slice(0, 100),
+    }
+  const absent =
+    chunks.length > 0 &&
+    chunks.every(
+      (chunk) => chunk.coverage === "complete" && chunk.substantiveContribution.state === "absent",
+    )
+  return {
+    state: absent ? "absent" : "unknown",
+    confidence:
+      absent && chunks.every((chunk) => chunk.substantiveContribution.confidence != null)
+        ? Math.min(...chunks.map((chunk) => chunk.substantiveContribution.confidence!))
+        : null,
+    reason: absent
+      ? "全部分块完整评估后均未发现实质贡献。"
+      : "材料覆盖或贡献判断不足，不能确认整篇没有实质贡献。",
+    evidenceIds: [],
+  }
 }

@@ -5,6 +5,8 @@ export const evidenceFactSelectionSchema = z
     text: z.string().min(1).max(2_000),
     evidenceId: z.string().min(1).max(80),
     kind: z.enum(["fact", "source_claim", "inference"]),
+    // 序号只引用同次输出的提及；null明确无归属，旧结果省略时保留兼容。
+    eventMentionIndex: z.number().int().min(0).max(3).nullable().optional(),
   })
   .strict()
 
@@ -21,16 +23,24 @@ const MAX_QUOTE_CHARS = 4_000
 const prefixPattern = /^[A-Za-z][\w-]{0,31}$/u
 
 // 每次请求只把本次目录里的编号暴露给结构化输出；空目录只能返回空 facts。
-export function evidenceFactsSelectionSchema(catalog: EvidenceCatalog, maxFacts: number) {
+export function evidenceFactsSelectionSchema(
+  catalog: EvidenceCatalog,
+  maxFacts: number,
+  allowEventAssignments = true,
+) {
+  // 分块没有整篇提及序号，明确禁止把局部序号误带到最终有序事件列表。
+  const factSchema = allowEventAssignments
+    ? evidenceFactSelectionSchema
+    : evidenceFactSelectionSchema.omit({ eventMentionIndex: true })
   if (!Number.isSafeInteger(maxFacts) || maxFacts < 0)
     throw new Error("invalid_evidence_fact_limit")
   const [firstEvidenceId, ...remainingEvidenceIds] = catalog.fragments.map(
     (fragment) => fragment.evidenceId,
   )
-  if (firstEvidenceId === undefined) return z.array(evidenceFactSelectionSchema).max(0)
+  if (firstEvidenceId === undefined) return z.array(factSchema).max(0)
   return z
     .array(
-      evidenceFactSelectionSchema.extend({
+      factSchema.extend({
         evidenceId: z.enum([firstEvidenceId, ...remainingEvidenceIds]),
       }),
     )
@@ -73,7 +83,12 @@ export function renderEvidenceCatalog(catalog: EvidenceCatalog): string {
 export function materializeEvidenceFacts(
   catalog: EvidenceCatalog,
   selections: readonly EvidenceFactSelection[],
-): Array<{ text: string; quote: string; kind: EvidenceFactSelection["kind"] }> {
+): Array<{
+  text: string
+  quote: string
+  kind: EvidenceFactSelection["kind"]
+  eventMentionIndex?: number | null
+}> {
   return selections.map(({ evidenceId, ...selection }) => {
     const quote = catalog.resolve(evidenceId)
     if (quote === null) throw new Error("invalid_model_reference")

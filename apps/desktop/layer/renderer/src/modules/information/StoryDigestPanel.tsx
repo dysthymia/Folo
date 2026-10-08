@@ -7,6 +7,8 @@ import { smartReadingPath } from "~/modules/information/reading-mode-link"
 
 import type { StoryDigest } from "./processing-reader-client"
 import { loadStoryDigest, ReadingRequestError } from "./processing-reader-client"
+import { ProcessingSignals } from "./ProcessingSignals"
+import { StoryReadDelta } from "./StoryReadDelta"
 import { StoryReadingActions } from "./StoryReadingActions"
 
 /**
@@ -21,11 +23,13 @@ export function StoryDigestPanel({
   storyTitle,
   revision,
   embedded = false,
+  onReady,
 }: {
   storyId: string
   storyTitle?: string
   revision?: number
   embedded?: boolean
+  onReady?: (revision: number) => void
 }) {
   const { t } = useTranslation("app")
   const owner = useWhoami()?.id
@@ -36,6 +40,10 @@ export function StoryDigestPanel({
   const [busy, setBusy] = useState(true)
   const [failed, setFailed] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
+  const onReadyRef = useRef(onReady)
+  useEffect(() => {
+    onReadyRef.current = onReady
+  }, [onReady])
   useEffect(() => {
     const invalidate = () => {
       // 人工撤回后先收起旧引用，重新核验当前版本；普通后台更新不替换正在读的正文。
@@ -61,7 +69,11 @@ export function StoryDigestPanel({
     }
     loadStoryDigest(storyId, controller.signal, revision)
       .then((result) => {
-        if (!controller.signal.aborted) setDigest(result)
+        if (!controller.signal.aborted) {
+          // 先取得上次已读的累积范围，再确认真实读到的冻结版本；导航取消不能写回回执。
+          setDigest(result)
+          if (result.status === "ready") onReadyRef.current?.(result.revision)
+        }
       })
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return
@@ -107,6 +119,8 @@ export function StoryDigestPanel({
         </p>
       </header>
 
+      {digest.attention && <ProcessingSignals signals={{ attention: digest.attention }} compact />}
+      {digest.readDelta && <StoryReadDelta delta={digest.readDelta} />}
       <p className={embedded ? "whitespace-pre-wrap" : "whitespace-pre-wrap leading-6"}>
         {digest.body}
       </p>

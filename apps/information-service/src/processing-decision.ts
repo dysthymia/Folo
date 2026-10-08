@@ -19,11 +19,16 @@ import {
   eventMentionsSelectionForCatalog,
   eventMentionsSelectionSchema,
   validateEventMentionRelationship,
+  validateFactEventAssignments,
 } from "./processing-event-mentions"
 import type { EvidenceCatalog } from "./processing-evidence"
 import { evidenceFactSelectionSchema, evidenceFactsSelectionSchema } from "./processing-evidence"
 import { semanticEntitiesForCatalog } from "./processing-semantic-entities"
-import { createTagAssessmentsSelectionSchema } from "./processing-semantic-prompt"
+import {
+  createTagAssessmentsSelectionSchema,
+  substantiveContributionForCatalog,
+  substantiveContributionSchema,
+} from "./processing-semantic-prompt"
 
 // 模型只能建议语义结论，最终展示/综合/改写资格仍由显式规则和缺失材料保护决定。
 const entryModelBaseSchema = z.object({
@@ -41,6 +46,8 @@ const persistedTagAssessments = z.array(tagAssessmentSchema).max(100).optional()
 export const entryModelOutputSchema = entryModelBaseSchema
   .extend({
     tagAssessments: persistedTagAssessments,
+    substantiveContribution: substantiveContributionSchema.optional(),
+    materialCoverage: z.enum(["complete", "partial"]).optional(),
     entities: semanticEntitiesSchema.optional(),
     eventMentions: eventMentionsSchema.optional(),
     event: eventIdentitySchema.nullable().optional(),
@@ -51,6 +58,7 @@ export const entryModelOutputSchema = entryModelBaseSchema
             text: z.string().min(1).max(2000),
             quote: z.string().min(1).max(4000),
             kind: z.enum(["fact", "source_claim", "inference"]),
+            eventMentionIndex: z.number().int().min(0).max(3).nullable().optional(),
           })
           .strict(),
       )
@@ -58,6 +66,9 @@ export const entryModelOutputSchema = entryModelBaseSchema
   })
   .strict()
   .refine(validateEventMentionRelationship, { message: "inconsistent_primary_event" })
+  .refine((value) => validateFactEventAssignments(value), {
+    message: "invalid_fact_event_assignment",
+  })
 export type EntryModelOutput = z.infer<typeof entryModelOutputSchema>
 
 export function applyEntryDisplay(
@@ -82,6 +93,8 @@ export function applyEntryDisplay(
 export const entryModelSelectionSchema = entryModelBaseSchema
   .extend({
     tagAssessments: persistedTagAssessments,
+    substantiveContribution: substantiveContributionSchema.optional(),
+    materialCoverage: z.enum(["complete", "partial"]).optional(),
     entities: semanticEntitiesSchema.optional(),
     eventMentions: eventMentionsSelectionSchema.optional(),
     event: eventSelectionSchema.nullable(),
@@ -101,17 +114,22 @@ export function createEntryModelSelectionSchema(
     .extend({
       entryId: z.enum([entryId]),
       event: eventSelectionForCatalog(catalog),
-      facts: evidenceFactsSelectionSchema(catalog, 30),
+      facts: evidenceFactsSelectionSchema(catalog, 30, requiredTagIds.length > 0),
     })
     .strict()
   return requiredTagIds.length
     ? base
         .extend({
           tagAssessments: createTagAssessmentsSelectionSchema(catalog, requiredTagIds),
+          substantiveContribution: substantiveContributionForCatalog(catalog),
+          materialCoverage: z.enum(["complete", "partial"]),
           entities: semanticEntitiesForCatalog(catalog),
           eventMentions: eventMentionsSelectionForCatalog(catalog),
         })
         .refine(validateEventMentionRelationship, { message: "inconsistent_primary_event" })
+        .refine((value) => validateFactEventAssignments(value, catalog), {
+          message: "invalid_fact_event_assignment",
+        })
     : base
 }
 export type EntrySemanticProfile = {
@@ -125,13 +143,19 @@ export type EntrySemanticProfile = {
   entityVersion?: number
   entities?: SemanticEntity[]
   evidence: Record<string, string>
+  // coverage 保留旧合并含义；新字段区分原文缺失与标签结论待定。
   coverage: "complete" | "partial"
+  materialCoverage?: "complete" | "partial"
+  semanticAssessmentCoverage?: "complete" | "partial"
+  substantiveContribution?: EntryModelOutput["substantiveContribution"]
 }
 export type ProcessingDecision = {
   schemaVersion: 1 | 2
   fingerprint: string
   // 专用变换保留基础语义缓存地址，人工纠错可从原始结果重新投影。
   analysisFingerprint?: string
+  // 定向修复保留原决定与原因，便于追踪异常候选的恢复来源。
+  repair?: { sourceDecisionId: string; reason: string }
   provider: AIProvider
   model: string
   generatedAt: string
@@ -143,6 +167,8 @@ export type ProcessingDecision = {
   reason: string
   labels: string[]
   policy: Required<PresentationPolicy>
+  // 规则待定不意味着材料缺失；原文保持可读，并独立说明尚未决定的策略字段。
+  pendingPolicyFields?: Array<keyof PresentationPolicy>
   sourceRole: string
   context: RuleInput
   facts: EntryModelOutput["facts"]

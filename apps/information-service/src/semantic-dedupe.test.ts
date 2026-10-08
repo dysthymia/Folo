@@ -9,12 +9,14 @@ import {
   evaluateSemanticDuplicateCandidates,
   getSemanticDuplicateCandidates,
   MAX_DEDUPE_CONTENT_LENGTH,
+  MAX_FULL_DEDUPE_CONTENT_LENGTH,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeDedupeText,
   normalizeSemanticDuplicateOutput,
   semanticDuplicateOutputSchema,
   semanticDuplicatePairKey,
   truncateDedupeDescription,
+  upgradeFullDedupeCandidates,
 } from "./semantic-dedupe"
 
 function entry(
@@ -791,5 +793,109 @@ describe("摘要与文本归一化", () => {
   it("标题归一化与客户端一致：去标点、折叠空白、转小写", () => {
     expect(normalizeDedupeText("OpenAI，发布 GPT-6！")).toBe("openai 发布 gpt 6")
     expect(normalizeDedupeText("   ")).toBeNull()
+  })
+})
+
+describe("长文按需完整核对", () => {
+  const long = (id: string, hours: number, tail: string) => ({
+    ...entry(id, "OpenAI 发布 GPT 新版模型", at(hours)),
+    ...dedupeContentEvidence("完整背景材料。".repeat(900) + tail),
+  })
+  it("高相似候选升级完整正文，尾部事实进入同一请求且缓存正文不重复发送", () => {
+    const samples = [
+      long("a", 0, "文末独有事实：限制仅对美国客户开放。"),
+      long("b", 1, "文末独有事实：欧洲客户也可申请。"),
+    ]
+    const candidates = getSemanticDuplicateCandidates(samples)
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]!.entries.every((entry) => entry.contentComplete)).toBe(true)
+    const prompt = createSemanticDuplicatePrompt(candidates)
+    expect(prompt).toContain("文末独有事实：限制仅对美国客户开放。")
+    expect(prompt).toContain("文末独有事实：欧洲客户也可申请。")
+    expect(prompt).not.toContain('"fullContent"')
+    expect(prompt.match(/文末独有事实：欧洲客户也可申请。/gu)).toHaveLength(1)
+    expect(
+      normalizeSemanticDuplicateOutput(candidates, {
+        results: [
+          {
+            pairKey: candidates[0]!.pairKey,
+            duplicate: false,
+            confidence: 0.99,
+            keepEntryId: null,
+            hideEntryId: null,
+            factComparison: {
+              verdict: "different",
+              onlyInFirst: ["限制仅对美国客户开放"],
+              onlyInSecond: ["欧洲客户也可申请"],
+            },
+            reason: "适用范围冲突",
+          },
+        ],
+      })[0],
+    ).toMatchObject({ status: "decided", duplicate: false, verdict: "different" })
+  })
+  it("低相似廉价候选不冒充全文完成，明确区分预算不足和已确认不同", () => {
+    const base = getSemanticDuplicateCandidates([
+      entry("a", "相同新闻", at(0)),
+      entry("b", "相同新闻", at(1)),
+    ])[0]!
+    const candidate = {
+      ...base,
+      similarity: 0.5,
+      entries: [
+        long("a", 0, "尾部新事实"),
+        long("b", 1, "其他新事实"),
+      ] as SemanticDuplicateCandidate["entries"],
+    }
+    const upgraded = upgradeFullDedupeCandidates([candidate])
+    expect(upgraded[0]!.entries.every((entry) => entry.contentComplete)).toBe(false)
+    expect(normalizeSemanticDuplicateOutput(upgraded, { results: [] })[0]).toMatchObject({
+      status: "incomplete",
+      duplicate: false,
+      reason: expect.stringContaining("有界比较预算"),
+    })
+  })
+  it("低文本相似但已确认事件值得核对，超60000上限仍不升级", () => {
+    const recall = { eventIds: ["evt_11111111-1111-4111-8111-111111111111"], identities: [] }
+    const candidates = getSemanticDuplicateCandidates([
+      { ...long("a", 0, "尾部事实A"), title: "甲新成果", recall },
+      { ...long("b", 1, "尾部事实B"), title: "Independent launch", recall },
+    ])
+    expect(candidates[0]!.similarity).toBe(0)
+    expect(candidates[0]!.entries.every((entry) => entry.contentComplete)).toBe(true)
+    const tooLong = getSemanticDuplicateCandidates([
+      {
+        ...long("a", 0, "尾部事实A"),
+        ...dedupeContentEvidence("文".repeat(MAX_FULL_DEDUPE_CONTENT_LENGTH + 1)),
+      },
+      long("b", 1, "尾部事实B"),
+    ])
+    expect(normalizeSemanticDuplicateOutput(tooLong, { results: [] })[0]).toMatchObject({
+      status: "incomplete",
+      reason: expect.stringContaining("超过60000"),
+    })
+  })
+  it("每八对至多升级两对且不同目标轮流获额度，整批字符预算不超限", () => {
+    const samples = Array.from({ length: 12 }, (_, index) =>
+      long(`id-${index}`, index, `独有尾部 ${index}`),
+    )
+    const candidates = getSemanticDuplicateCandidates(samples, { maxCandidates: 16 })
+    expect(candidates.length).toBeGreaterThan(8)
+    for (let offset = 0; offset < candidates.length; offset += 8) {
+      const upgraded = candidates
+        .slice(offset, offset + 8)
+        .filter((candidate) => candidate.entries.every((entry) => entry.contentComplete))
+      expect(upgraded).toHaveLength(2)
+      expect(new Set(upgraded.map((candidate) => candidate.testEntryId)).size).toBe(2)
+    }
+    const huge = Array.from({ length: 4 }, (_, index) => ({
+      ...long(`huge-${index}`, index, ""),
+      ...dedupeContentEvidence("长".repeat(59_999)),
+    }))
+    const hugePairs = getSemanticDuplicateCandidates(huge)
+    const expanded = hugePairs.filter((candidate) =>
+      candidate.entries.every((entry) => entry.contentComplete),
+    )
+    expect(expanded).toHaveLength(1)
   })
 })

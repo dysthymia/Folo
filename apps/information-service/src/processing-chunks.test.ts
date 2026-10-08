@@ -448,6 +448,8 @@ it("语义长文保留 facts 外的后文贡献，拒绝不完整评估且策略
             ),
             substantiveContribution: {
               state: useful ? "present" : "absent",
+              confidence: 0.99,
+              reason: "本块实质贡献判断。",
               evidenceIds: useful ? [`C${index}E000001`] : [],
             },
           },
@@ -487,6 +489,13 @@ it("语义长文保留 facts 外的后文贡献，拒绝不完整评估且策略
           entities: [],
           // 故意让综合器误判纯推广，确定性覆盖归并必须修正这个结论。
           tagAssessments: assessments("present", "absent", "FE000001"),
+          materialCoverage: "complete",
+          substantiveContribution: {
+            state: "unknown",
+            confidence: null,
+            reason: "使用已验证分块贡献。",
+            evidenceIds: [],
+          },
         }
         expect(
           options.validate({
@@ -537,7 +546,7 @@ it("语义长文保留 facts 外的后文贡献，拒绝不完整评估且策略
     expect(files).toHaveLength(2)
     expect(
       JSON.parse(await readFile(join(runtimeDir, "entry-chunk-cache", files[0]!), "utf8")),
-    ).toMatchObject({ version: "semantic-chunks-v3" })
+    ).toMatchObject({ version: "semantic-chunks-v4" })
     // 当前定义版本与证据映射须在读取缓存时再次核实，损坏缓存只重跑对应分块。
     const cachedPath = join(runtimeDir, "entry-chunk-cache", files[0]!)
     const cached = JSON.parse(await readFile(cachedPath, "utf8")) as {
@@ -624,7 +633,12 @@ it("长文多事件身份独立于有限facts保留原文证据，未读关联�
               eventMentions: [
                 { identity: identity(id, index), role: "reports", isPrimary: index === 1 },
               ],
-              substantiveContribution: { state: "present", evidenceIds: [id] },
+              substantiveContribution: {
+                state: "present",
+                confidence: 0.99,
+                reason: "可追溯模型信息。",
+                evidenceIds: [id],
+              },
             },
           }
         } else {
@@ -643,6 +657,13 @@ it("长文多事件身份独立于有限facts保留原文证据，未读关联�
             labels: [],
             facts: [],
             tagAssessments: tags("FE000001"),
+            materialCoverage: "partial",
+            substantiveContribution: {
+              state: "unknown",
+              confidence: null,
+              reason: "使用已验证分块贡献。",
+              evidenceIds: [],
+            },
             entities: [
               {
                 kind: "organization",

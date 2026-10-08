@@ -1,6 +1,11 @@
-import type { SemanticEntity, SemanticTagId, TagAssessment } from "@follow/information-core"
+import type {
+  EntryProcessingSignals,
+  SemanticEntity,
+  SemanticTagId,
+  TagAssessment,
+} from "@follow/information-core"
 
-export type ProcessingEntryResult = {
+export type ProcessingEntryResult = EntryProcessingSignals & {
   itemId: string
   sourceKey: string
   sourceId: string | null

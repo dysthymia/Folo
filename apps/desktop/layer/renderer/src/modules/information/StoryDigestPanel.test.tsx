@@ -92,6 +92,76 @@ describe("综述正文首帧及人工撤回保护", () => {
     expect(container.textContent).toContain("账号B正文")
   })
 
+  it("正文成功加载才确认真实冻结版本，切换账号后旧响应不能标已读", async () => {
+    const onReady = vi.fn()
+    const old = deferred<StoryDigest>()
+    mocks.load.mockReturnValueOnce(old.promise)
+    await act(async () =>
+      root.render(
+        <StoryDigestPanel storyId="same-story" revision={2} onReady={onReady} embedded />,
+      ),
+    )
+    expect(onReady).not.toHaveBeenCalled()
+    mocks.owner = "owner-b"
+    mocks.load.mockResolvedValueOnce({ ...ready("账号B正文"), revision: 3 })
+    await act(async () =>
+      root.render(
+        <StoryDigestPanel storyId="same-story" revision={3} onReady={onReady} embedded />,
+      ),
+    )
+    expect(onReady.mock.calls).toEqual([[3]])
+    await act(async () => old.resolve(ready("旧正文")))
+    expect(onReady.mock.calls).toEqual([[3]])
+  })
+
+  it("显示累计修订与反证原文入口，并保持载入时的已读比较范围", async () => {
+    const citation = {
+      id: "c1",
+      quote: "相反说法原文",
+      sourceKey: "feed/1",
+      sourceTitle: "反证报道",
+      sourceUrl: "https://example.com/counter",
+    }
+    const before = {
+      id: "fact",
+      text: "原截止日期",
+      kind: "fact" as const,
+      dependencies: [],
+      citations: [],
+    }
+    const after = { ...before, text: "修正后的截止日期", citations: [citation] }
+    mocks.load.mockResolvedValueOnce({
+      ...ready("当前综述"),
+      readDelta: {
+        scope: "since_read",
+        fromRevision: 1,
+        toRevision: 4,
+        currentRevision: 4,
+        fromSubstantiveRevision: 1,
+        toSubstantiveRevision: 4,
+        substantiveUpdateCount: 3,
+        added: [{ ...after, id: "counter", kind: "source_claim", text: "来源提出反证" }],
+        removed: [],
+        revised: [{ before, after }],
+      },
+    })
+    const onReady = vi.fn()
+    await act(async () =>
+      root.render(<StoryDigestPanel storyId="same-story" onReady={onReady} embedded />),
+    )
+    expect(container.querySelector('[data-story-read-delta="since_read"]')).not.toBeNull()
+    expect(container.textContent).toContain("原截止日期")
+    expect(container.textContent).toContain("修正后的截止日期")
+    expect(container.textContent).toContain("来源提出反证")
+    expect(container.querySelector('a[href="https://example.com/counter"]')).not.toBeNull()
+    // 已读状态更新导致父组件重渲染，不重新请求并吃掉当前阅读的比较基线。
+    await act(async () =>
+      root.render(<StoryDigestPanel storyId="same-story" onReady={() => {}} embedded />),
+    )
+    expect(mocks.load).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-story-read-delta="since_read"]')).not.toBeNull()
+  })
+
   it("旧账号忽略取消仍晚返回的响应不能覆盖新正文", async () => {
     const old = deferred<StoryDigest>()
     mocks.load.mockReturnValueOnce(old.promise).mockResolvedValueOnce(ready("账号B正文"))

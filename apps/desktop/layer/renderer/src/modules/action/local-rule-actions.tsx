@@ -3,6 +3,7 @@ import { applyPreset } from "@follow/information-core"
 import { useTranslation } from "react-i18next"
 
 import { createSameEventAggregateAction } from "./processing-action-preset"
+import { ProcessingAttentionAction } from "./processing-attention-action"
 import type { ProcessingEditor } from "./processing-client"
 import {
   processingButtonClass,
@@ -13,6 +14,7 @@ import { SemanticTagPicker } from "./semantic-tag-picker"
 
 type Action = AutomationRule["actions"][number]
 type NewAction =
+  | "attention"
   | "block"
   | "silence"
   | "dim"
@@ -42,6 +44,13 @@ export const defaultLocalRulePrompts = {
 // 聚合需要允许材料参与综述；用户已经明确设定的拒绝和独立展示策略保持原样。
 export function addLocalRuleAction(actions: Action[], kind: NewAction): Action[] {
   switch (kind) {
+    case "attention":
+      return actions.some((action) => action.type === "attention")
+        ? actions
+        : [
+            ...actions,
+            { type: "attention", level: "important", reason: "关注本规则匹配的有据实质变化" },
+          ]
     // 虚化与普通动作共用保存和执行链，无需额外参数或 AI 指令。
     case "block":
     case "silence":
@@ -152,6 +161,9 @@ export function LocalRuleActions({
                 onChange={(tagIds) => update(index, { ...action, tagIds })}
               />
             </>
+          )}
+          {action.type === "attention" && (
+            <ProcessingAttentionAction action={action} onChange={(next) => update(index, next)} />
           )}
           {action.type === "ai_transform" && (
             <label className="block space-y-1 text-sm">
@@ -317,6 +329,12 @@ export function LocalRuleActions({
           }}
         >
           <option value="">{t("automation.action.choose")}</option>
+          <option
+            value="attention"
+            disabled={actions.some((action) => action.type === "attention")}
+          >
+            {t("processing.attention.title")}
+          </option>
           <option value="block">{t("automation.action.block")}</option>
           <option value="silence">{t("automation.action.silence")}</option>
           <option value="dim">{t("automation.action.dim")}</option>

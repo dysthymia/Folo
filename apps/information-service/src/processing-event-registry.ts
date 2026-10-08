@@ -444,27 +444,46 @@ export class ProcessingEventRegistry {
   }
 
   confirmedEventIdsForMembers(
-    members: readonly { inputSeq: number; decisionId: string }[],
+    members: readonly { inputSeq: number; decisionId: string; eventMentionIndex?: number }[],
   ): string[] {
     this.requireOwner()
     if (!members.length) return []
     const current = this.currentMembers(members.map((member) => member.inputSeq))
     let common: string | undefined
     for (const ref of members) {
-      // 确认唯一主报道关系；次要背景提及不改变主归属，逐事实隔离由 Story 发布边界执行。
-      const mentions = current.filter(
-        (member) =>
-          member.inputSeq === ref.inputSeq &&
-          member.decisionId === ref.decisionId &&
-          member.isPrimary,
+      const belonging = current.filter(
+        (member) => member.inputSeq === ref.inputSeq && member.decisionId === ref.decisionId,
       )
-      if (
-        mentions.length !== 1 ||
-        mentions[0]!.state !== "confirmed" ||
-        mentions[0]!.role !== "reports" ||
-        !mentions[0]!.isPrimary
-      )
-        return []
+      let mentions: RegistryMembership[]
+      if (ref.eventMentionIndex === undefined) {
+        // 旧成员只接受唯一主报道；没有事实归属许可证的分析和背景仍不能进入。
+        mentions = belonging.filter((member) => member.isPrimary && member.role === "reports")
+      } else {
+        if (
+          !Number.isInteger(ref.eventMentionIndex) ||
+          ref.eventMentionIndex < 0 ||
+          ref.eventMentionIndex > 3
+        )
+          return []
+        const row = this.db
+          .prepare("SELECT body FROM entry_decisions WHERE id=? AND input_seq=?")
+          .get(ref.decisionId, ref.inputSeq)
+        const decision = row ? (JSON.parse(String(row.body)) as ProcessingDecision) : null
+        const mention = decision?.semantic
+          ? normalizeEventMentions(decision.semantic)[ref.eventMentionIndex]
+          : null
+        if (!mention || !["reports", "analysis_of", "tutorial_for"].includes(mention.role))
+          return []
+        const selectedKey = identityKey(mention.identity)
+        // 序号只定位不可变决定的片段；人工关系仍以稳定mentionId及当前确认状态为准。
+        mentions = belonging.filter((member) => {
+          const saved = this.db
+            .prepare("SELECT identity_key FROM processing_event_members WHERE member_key=?")
+            .get(membershipKey(member, member.mentionId))
+          return saved?.identity_key === selectedKey && member.role === mention.role
+        })
+      }
+      if (mentions.length !== 1 || mentions[0]!.state !== "confirmed") return []
       const event = this.event(mentions[0]!.eventId)
       if (!event || event.status !== "confirmed" || (common && common !== event.id)) return []
       common = event.id

@@ -147,6 +147,21 @@ export async function processingDiagnostics(store: Store, ledgerPath: string, no
       reused: published.filter((item) => item.decision.reused).length,
       durationMs: distribution(published.map((item) => item.decision.durationMs)),
     },
+    // 阅读结果与调用量分开计数；没有用户标注分母时不伪造准确率或去重召回率。
+    readingOutcomes: {
+      denominator: published.length,
+      readableDecisions: published.filter(({ decision }) => decision.status !== "hide").length,
+      hiddenDecisions: published.filter(({ decision }) => decision.status === "hide").length,
+      materialNeedsContext: published.filter(({ decision }) => decision.status === "needs_context")
+        .length,
+      policyPending: published.filter(
+        ({ decision }) => (decision.pendingPolicyFields?.length ?? 0) > 0,
+      ).length,
+      auditedRepairs: published.filter(({ decision }) => decision.repair !== undefined).length,
+      auditedFalseHideRate: null,
+      storyFactPrecision: null,
+      dedupeRecallRate: null,
+    },
     modelCalls: {
       ledgerAvailable,
       observedFrom,

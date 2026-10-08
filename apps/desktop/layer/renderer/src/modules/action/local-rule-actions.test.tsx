@@ -24,6 +24,18 @@ const render = (actions: AutomationRule["actions"]) =>
   )
 
 describe("LocalRuleActions", () => {
+  it("attention保存明确级别与原因，不添加AI或强制独立展示策略", () => {
+    const actions = addLocalRuleAction([], "attention")
+    expect(actions).toEqual([
+      { type: "attention", level: "important", reason: "关注本规则匹配的有据实质变化" },
+    ])
+    expect(addLocalRuleAction(actions, "attention")).toEqual(actions)
+    expect(ruleUsesAI({ actions })).toBe(false)
+    const markup = render(actions)
+    expect(markup).toContain("processing.attention.rule_hint")
+    expect(markup).not.toContain("textarea")
+    expect(markup).not.toContain("standalone")
+  })
   it("shows Prompt only after choosing an AI action, then removes exactly that action", async () => {
     const container = document.createElement("div")
     document.body.append(container)

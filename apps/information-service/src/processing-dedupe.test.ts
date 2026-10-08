@@ -1063,7 +1063,7 @@ describe("去重根因回归", () => {
     expect(uncertain).toHaveBeenCalledTimes(1)
     publishDecision(
       store,
-      entry("newer", "OpenAI 发布 GPT-6 模型", "2026-01-10T06:00:00Z", "字".repeat(4001)),
+      entry("newer", "OpenAI 发布 GPT-6 模型", "2026-01-10T06:00:00Z", "字".repeat(60_001)),
     )
     const execute = negativeExecute()
     expect(await runFixture(store, aiConfig, execute)).toMatchObject({ batches: 0, unresolved: 1 })
@@ -1139,7 +1139,7 @@ describe("去重根因回归", () => {
     publishRules(store, [dedupeRule({ all: true })])
     publishDecision(
       store,
-      entry("older", "同一核心事件", "2026-01-10T00:00:00Z", "字".repeat(4001)),
+      entry("older", "同一核心事件", "2026-01-10T00:00:00Z", "字".repeat(60_001)),
     )
     publishDecision(store, entry("newer", "同一核心事件", "2026-01-10T06:00:00Z", "完整版本A。"))
     publishDecision(store, entry("newest", "同一核心事件", "2026-01-10T12:00:00Z", "完整版本B。"))
@@ -1887,4 +1887,58 @@ describe("最近 24 小时已读参考", () => {
     ).toMatchObject({ duplicates: 0 })
     expect(store.dedupe.merges(fingerprintsOf(store))).toHaveLength(before)
   })
+})
+
+it("长文高相似度按全文比较尾部差异，确定不同与超限incomplete分别持久化", async () => {
+  const { store, aiConfig } = fixture()
+  publishRules(store, [dedupeRule({ all: true })])
+  const background = "同一事件背景详细说明。".repeat(500)
+  publishDecision(
+    store,
+    entry(
+      "older",
+      "OpenAI 发布 GPT-6 模型",
+      "2026-01-10T00:00:00Z",
+      `${background}最后条款：仅美国开放。`,
+    ),
+  )
+  publishDecision(
+    store,
+    entry(
+      "newer",
+      "OpenAI 发布 GPT-6 模型",
+      "2026-01-10T06:00:00Z",
+      `${background}最后条款：欧洲也可申请。`,
+    ),
+  )
+  const execute = negativeExecute()
+  expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+    candidates: 1,
+    batches: 1,
+    unresolved: 0,
+    duplicates: 0,
+  })
+  expect(execute.mock.calls[0]![0].prompt).toContain("最后条款：仅美国开放。")
+  expect(execute.mock.calls[0]![0].prompt).toContain("最后条款：欧洲也可申请。")
+  expect(store.dedupe.decidedPairKeys(fingerprintsOf(store)).size).toBe(1)
+  publishDecision(
+    store,
+    entry(
+      "newer",
+      "OpenAI 发布 GPT-6 模型",
+      "2026-01-10T06:00:00Z",
+      background + "长".repeat(60_001),
+    ),
+  )
+  expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+    batches: 0,
+    unresolved: 1,
+    duplicates: 0,
+  })
+  expect(store.dedupe.unresolvedDecisions(fingerprintsOf(store))[0]).toMatchObject({
+    status: "incomplete",
+    reason: expect.stringContaining("超过60000"),
+  })
+  expect(execute).toHaveBeenCalledTimes(1)
+  expect(rolesOf(store)).toEqual([])
 })

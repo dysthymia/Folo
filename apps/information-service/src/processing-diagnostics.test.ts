@@ -73,6 +73,17 @@ it("区分未知用量、失败调用和真实计数，不推测尚未测量的�
     const missing = await processingDiagnostics(store, path)
     expect(missing.modelCalls.ledgerAvailable).toBe(false)
     expect(missing.modelCalls.completeUsage).toBe(false)
+    expect(missing.readingOutcomes).toEqual({
+      denominator: 0,
+      readableDecisions: 0,
+      hiddenDecisions: 0,
+      materialNeedsContext: 0,
+      policyPending: 0,
+      auditedRepairs: 0,
+      auditedFalseHideRate: null,
+      storyFactPrecision: null,
+      dedupeRecallRate: null,
+    })
     expect(missing.backlog).toEqual({ contexts: 0, oldestAgeSeconds: null, bySource: [] })
     const base = {
       startedAt: "2026-09-01T00:00:00.000Z",

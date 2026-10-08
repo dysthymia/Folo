@@ -8,6 +8,7 @@ import type {
   SemanticOverrideState,
 } from "./processing-semantic-client"
 import { loadEntrySemantics, saveEntrySemanticOverride } from "./processing-semantic-client"
+import { ProcessingSignals } from "./ProcessingSignals"
 
 export function EntrySemanticPanel({
   profile,
@@ -82,6 +83,13 @@ export function EntrySemanticPanel({
   const effectiveProfile = loaded?.profile ?? profile
   return (
     <section className="space-y-3 rounded-lg border border-fill-secondary p-3">
+      <ProcessingSignals
+        signals={{
+          materialCoverage: effectiveProfile.materialCoverage,
+          semanticAssessmentCoverage: effectiveProfile.semanticAssessmentCoverage,
+          contribution: effectiveProfile.substantiveContribution,
+        }}
+      />
       <h4 className="font-medium">{t("semantic.profile_title")}</h4>
       <p className="text-xs text-text-secondary">
         {t(`semantic.coverage.${effectiveProfile.coverage}`)} ·{" "}

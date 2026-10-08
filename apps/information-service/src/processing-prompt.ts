@@ -28,7 +28,7 @@ export const SOURCE_FIDELITY_REQUIREMENTS = `原文忠实要求：
 
 // 独立入口与证据资格逐条判断：有效重复可折叠，纯噪声和待补上下文不能进入综述。
 export const ENTRY_PRESENTATION_REQUIREMENTS = `逐条展示与综合要求：
-- disposition 只决定是否独立阅读；aggregation 单独决定是否具备事件综述的证据价值。
+- disposition 是可追溯的语义建议，不能授予隐藏权限；是否隐藏由显式阅读规则最终决定。aggregation 单独决定是否具备事件综述的证据价值。
 - 纯噪声：disposition=hide 且 aggregation=false；有证据价值的重复材料可 disposition=hide 且 aggregation=true。
 - 缺正文、图片未读或引用原帖缺失时 disposition=needs_context 且 aggregation=false，不能把缺材料当成无价值。
 - 重要短公告、有效链接、图表、反证可保留；涉及资格、领取、快照、截止的重要公告优先独立阅读，不等事件综述。
@@ -52,4 +52,5 @@ export const EVENT_MENTION_REQUIREMENTS = `事件提及要求：
 - 最多一个 isPrimary=true，主提及 identity 必须逐字段等于 legacy event；event=null 时全部 isPrimary=false。标题与正文重点直接报道的具体事件设为主提及，不能因缺发生锚点或附带历史背景而丢掉主次关系。周报或并列多事件可以没有主事件，不能拿周报主题、领域标签或模糊主体制造主事件。
 - 只提取材料明确讨论的少量具体事件；没有可核实的发生锚点、版本或轮次时，可作为次要候选保留并令 anchor/version/round=null，不编造日期或官方URL。未知来源链接只能候选，不能冒充已确认事件。
 - subject/object/version/round 的值必须受各自选定的连续片段明确支持，官方URL必须来自该片段。不按相似拼写、简称或记忆中的别名合并实体。未读取链接、图片或引用内容不能被补成已确认身份。
+- 单篇及整篇最终 facts 可逐条返回 eventMentionIndex，使用本次输出 eventMentions 数组的 0..3 序号。数值只在该事实证据完整属于对应身份证据片段且不涉及其他事件时使用；无法明确归属返回 null。省略仅兼容旧结果的主事件保护，不会自动分给周报中其他事件。分块事实不返回该序号，整篇综合时重新绑定最终提及顺序。
 - 多事件身份只建立提及关系，不宣称整篇 facts 都属于主事件；不能将另一事件的事实注入主事件。主事件与背景事件选择各自独立的证据片段，facts 同样逐条选本事件片段；无法分开的混合片段不具备主事件综述资格。`

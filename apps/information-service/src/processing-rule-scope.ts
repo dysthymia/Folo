@@ -100,7 +100,7 @@ export function activateRuleSchedule(store: Store) {
     ) ?? false
   // 旧计划只在用户首次保存统一规则时迁移；保留原来的时间、历史边界和暂停状态。
   if (!previous.config && !hasAI) return previous
-  if (previous.config?.scope.mode === "rules") return previous
+  if (previous.config?.scope.mode === "rules" && previous.config.classification) return previous
   const now = new Date()
   now.setHours(0, 0, 0, 0)
   return store.schedule.save(
@@ -111,6 +111,11 @@ export function activateRuleSchedule(store: Store) {
         enabled: true,
       }),
       scope: { mode: "rules" },
+      // 旧计划在下一次规则发布时进入新内容模式，既有历史窗口和暂停状态仍保留。
+      classification: previous.config?.classification ?? {
+        mode: "new_content",
+        enabledAt: new Date().toISOString(),
+      },
       sourceKeys: resolveAIRuleSourceKeys(store, active),
     },
     previous.revision,
@@ -124,7 +129,7 @@ export function runnableReleasedConfig(
   context?: RuleInput,
   allowClassification = true,
 ): RuleSet {
-  // 默认分类由列表加载触发；既有定时去重/综述不能因此扩大成历史标签回跑。
+  // 调用方按主动分类水位授权；仅去掉主动分类，entry_tag 依赖仍可驱动必要分析。
   if (!allowClassification)
     config = {
       ...config,

@@ -28,7 +28,14 @@ import type { ProcessingStateStore } from "./processing-state"
 import { dedupeContentEvidence, SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD } from "./semantic-dedupe"
 import { sourceText } from "./service"
 import type { Store } from "./store"
-import type { Story, StoryRevision, StoryStore } from "./story-store"
+import type {
+  Story,
+  StoryFactKind,
+  StoryReadDelta,
+  StoryReadDeltaFact,
+  StoryRevision,
+  StoryStore,
+} from "./story-store"
 
 export type ReadingView =
   "smart" | "standalone" | "all" | "hidden" | "pending" | "skipped" | "failed" | "stories"
@@ -196,6 +203,18 @@ export type StoryDigestSource = {
   title: string
   url: string | null
 }
+export type StoryDigestDeltaFact = {
+  id: string
+  kind: StoryFactKind
+  text: string
+  dependencies: string[]
+  citations: StoryDigestCitation[]
+}
+export type StoryDigestReadDelta = Omit<StoryReadDelta, "added" | "removed" | "revised"> & {
+  added: StoryDigestDeltaFact[]
+  removed: StoryDigestDeltaFact[]
+  revised: Array<{ before: StoryDigestDeltaFact; after: StoryDigestDeltaFact }>
+}
 export type StoryDigest =
   | {
       status: "ready"
@@ -210,6 +229,7 @@ export type StoryDigest =
       sentences: StoryDigestSentence[]
       /** 句子中未被任何引用支撑的条数，用于提示「分歧与未证实」需人工核对。 */
       uncitedSentenceCount: number
+      readDelta: StoryDigestReadDelta
     }
   | {
       status: "repairing" | "missing"
@@ -624,7 +644,9 @@ export class ProcessingReadingStore {
         storyItems.push(item)
         storyMembers.set(
           story.id,
-          members.map((member) => member.input.seq),
+          members
+            .filter((member) => storyRepresentsWholeEntry(member))
+            .map((member) => member.input.seq),
         )
       }
     }
@@ -814,7 +836,11 @@ export class ProcessingReadingStore {
     )
     const snapshots = this.currentStories(decisions)
     const represented = new Set(
-      snapshots.flatMap(({ revision }) => revision.members.map((member) => member.inputSeq)),
+      snapshots.flatMap(({ revision }) =>
+        revision.members
+          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq)))
+          .map((member) => member.inputSeq),
+      ),
     )
     const representedContent = new Set(
       published
@@ -861,7 +887,8 @@ export class ProcessingReadingStore {
           represented:
             (!restored &&
               published?.decision.policy.standalone !== "always" &&
-              (representedContent.has(identity) || semanticallyMerged.has(input.seq))) ||
+              ((storyRepresentsWholeEntry(published) && representedContent.has(identity)) ||
+                semanticallyMerged.has(input.seq))) ||
             duplicate,
         },
         sortAt: input.receivedAt,
@@ -1003,7 +1030,7 @@ export class ProcessingReadingStore {
    * `revisionAvailable`），只是把引用按句子分组，并补上更新时间与来源数。
    */
   storyDigest(storyId: string, requestedRevision?: number): StoryDigest {
-    this.requireOwner()
+    const owner = this.requireOwner()
     if (!isUuid(storyId)) throw new ProcessingReadingError("invalid_snapshot")
     const unavailable = (status: "repairing" | "missing"): StoryDigest => ({
       status,
@@ -1067,10 +1094,59 @@ export class ProcessingReadingStore {
         ]
       }),
     }))
+    const delta = this.stories.readDelta(storyId, owner, revision.revision)
+    const revisions = new Map<number, StoryRevision>([[revision.revision, revision]])
+    const deltaFact = (fact: StoryReadDeltaFact): StoryDigestDeltaFact => {
+      const snapshot = revisions.get(fact.revision) ?? this.stories.revision(storyId, fact.revision)
+      if (snapshot) revisions.set(fact.revision, snapshot)
+      return {
+        id: fact.id,
+        kind: fact.kind,
+        text: fact.text,
+        dependencies: fact.dependsOnFactIds.flatMap((id) => {
+          const dependency = snapshot?.facts.find((item) => item.id === id)
+          return dependency ? [dependency.text] : []
+        }),
+        // 旧事实仍可说明移除范围，但失效或撤回材料不能再次暴露原文摘引。
+        citations: fact.citationIds.flatMap((id) => {
+          const citation = snapshot?.citations.find((item) => item.id === id)
+          const span = snapshot?.sourceSpans.find((item) => item.id === citation?.sourceSpanId)
+          const published = span ? decisionBySeq.get(span.inputSeq) : undefined
+          const input = published?.input
+          const member = snapshot?.members.find((item) => item.inputSeq === span?.inputSeq)
+          if (
+            !span ||
+            !input ||
+            published?.decisionId !== member?.decisionId ||
+            !this.sourceAvailable(input.sourceKey) ||
+            this.stories.isMaterialWithdrawn(span.inputSeq)
+          )
+            return []
+          return [
+            {
+              id,
+              quote: span.quote,
+              sourceKey: input.sourceKey,
+              sourceTitle: input.body.title,
+              sourceUrl: input.body.url,
+            },
+          ]
+        }),
+      }
+    }
     return {
       status: "ready",
       storyId,
       revision: revision.revision,
+      readDelta: {
+        ...delta,
+        added: delta.added.map(deltaFact),
+        removed: delta.removed.map(deltaFact),
+        revised: delta.revised.map(({ before, after }) => ({
+          before: deltaFact(before),
+          after: deltaFact(after),
+        })),
+      },
       title: revision.title,
       body: revision.body,
       updatedAt: revision.createdAt,
@@ -1293,7 +1369,12 @@ export class ProcessingReadingStore {
         title: revision.title,
         memberSeqs: revision.members
           .map((member) => member.inputSeq)
-          .filter((seq) => inputBySeq.has(seq) && !hiddenBySeq.get(seq))
+          .filter(
+            (seq) =>
+              inputBySeq.has(seq) &&
+              !hiddenBySeq.get(seq) &&
+              storyRepresentsWholeEntry(publishedBySeq.get(seq)),
+          )
           .sort((left, right) => left - right),
       }))
       .filter((story) => story.memberSeqs.length > 0)
@@ -1318,7 +1399,7 @@ export class ProcessingReadingStore {
     }
     for (const input of inputs) {
       const published = publishedBySeq.get(input.seq)
-      if (!published || published.decision.policy.standalone === "always") continue
+      if (!published || !storyRepresentsWholeEntry(published)) continue
       if (roles.has(input.seq) || mergedInto.has(input.seq)) continue
       const representativeSeq = storyByContent.get(contentIdentity(input.body))
       if (representativeSeq === undefined || representativeSeq === input.seq) continue
@@ -1513,7 +1594,9 @@ export class ProcessingReadingStore {
     )
     return new Set(
       this.currentStories(decisions).flatMap(({ revision }) =>
-        revision.members.map((member) => member.inputSeq),
+        revision.members
+          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq)))
+          .map((member) => member.inputSeq),
       ),
     )
   }
@@ -1874,4 +1957,20 @@ export class ProcessingReadingStore {
       audit,
     }
   }
+}
+
+// 分事件事实贡献不等于全篇被覆盖；周报、分析和教程仍在原来的独立阅读流保留。
+function storyRepresentsWholeEntry(published: PublishedDecision | undefined) {
+  if (!published || published.decision.policy.standalone === "always") return false
+  const semantic = published.decision.semantic
+  const mentions = semantic?.eventMentions
+  if (
+    (mentions?.length ?? 0) > 1 ||
+    mentions?.some(
+      (mention) =>
+        !mention.isPrimary || mention.role !== "reports" || mention.identity.kind !== "event",
+    )
+  )
+    return false
+  return !semantic?.event || semantic.event.kind === "event"
 }

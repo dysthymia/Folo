@@ -1,4 +1,4 @@
-import type { AutomationRule, RuleSet } from "@follow/information-core"
+import type { AttentionSettings, AutomationRule, RuleSet } from "@follow/information-core"
 import {
   conditionSchema,
   conditionSetSchema,
@@ -203,6 +203,7 @@ export const processingPreviewWireSchema = z
     global: z
       .object({
         markdown: z.string(),
+        attention: ruleSetSchema.shape.global.shape.attention,
         version: positiveIntegerSchema,
         preset: presetRefSchema.optional(),
       })
@@ -315,6 +316,11 @@ const scheduleConfigSchema = z
     enabled: z.boolean(),
     // 旧服务尚无该字段时，列表触发按新版默认开启解释。
     runOnListLoad: z.boolean().optional(),
+    // 主动分类水位由服务端保存，客户端编辑其它计划字段时必须原样保留。
+    classification: z
+      .object({ mode: z.enum(["new_content", "list_loaded"]), enabledAt: isoDateTime })
+      .strict()
+      .optional(),
     times: z
       .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u))
       .min(1)
@@ -690,11 +696,14 @@ export function createProcessingClient(
       expectedRevision: number,
       requestId: string,
       signal: AbortSignal,
+      attention?: AttentionSettings,
     ) =>
       request("global-instructions/activate", "PUT", ruleActivationSchema, signal, {
         markdown,
         expectedRevision,
         requestId,
+        // 旧调用省略关注配置，服务端保留原值而不会关闭已生效的关注清单。
+        ...(attention === undefined ? {} : { attention }),
       }),
     createTag: (name: string, expectedRevision: number, signal: AbortSignal) =>
       request("subscription-tags", "POST", tagSnapshotSchema, signal, { name, expectedRevision }),

@@ -108,6 +108,37 @@ describe("综述拆分预览和旧链接保护", () => {
     expect(target).toBeDefined()
     await act(async () => target!.dispatchEvent(new MouseEvent("click", { bubbles: true })))
   }
+  // 深链已取得拆分去向时首屏显示独立材料数量，无需再次请求才能恢复可读入口。
+  it("复用已解析的拆分状态并保留原文入口", async () => {
+    await act(async () =>
+      root.render(
+        <StoryReadingActions
+          storyId="split-story"
+          unavailable
+          resolution={{
+            kind: "split",
+            splitInto: [],
+            independentInputSeqs: [11, 19, 23],
+            story: {
+              id: "split-story",
+              aggregationRuleId: "rule",
+              aggregationScopeVersion: "v1",
+              status: "split",
+              currentRevision: 1,
+              currentSubstantiveRevision: 1,
+              mergedInto: null,
+              splitInto: [],
+              createdAt: "2026-10-09T00:00:00Z",
+              updatedAt: "2026-10-09T00:00:00Z",
+            },
+          }}
+        />,
+      ),
+    )
+    expect(container.textContent).toContain('processing.digest.split_notice {"count":3}')
+    expect(container.querySelector('a[href="/timeline/all/all"]')).not.toBeNull()
+    expect(mocks.request).not.toHaveBeenCalled()
+  })
 
   it("预览和取消只发GET，不提前拆分或改变读态", async () => {
     mocks.request.mockResolvedValue(preview())

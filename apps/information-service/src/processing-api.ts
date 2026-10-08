@@ -1,4 +1,11 @@
-import type { SemanticEntity, SemanticTagId, TagAssessment } from "@follow/information-core"
+import type {
+  EntryAttention,
+  EntryProcessingSignals,
+  RuleSet,
+  SemanticEntity,
+  SemanticTagId,
+  TagAssessment,
+} from "@follow/information-core"
 import {
   compileInstructions,
   ruleRequiresSemantics,
@@ -9,7 +16,9 @@ import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
 import type { SourceEntry } from "./folo"
+import type { GeneratedFeedQuery } from "./generated-feeds"
 import { generatedFeedQuerySchema } from "./generated-feeds"
+import { mergeAttention, processingAttention } from "./processing-attention"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingDuplicateGroup } from "./processing-duplicates"
@@ -47,6 +56,14 @@ const scheduleConfig = z
     timeZone: z.string().min(1).max(100),
     enabled: z.boolean(),
     runOnListLoad: z.boolean().optional(),
+    // 新内容自动分析与阅读时按需分类分开，旧请求继续兼容。
+    classification: z
+      .object({
+        mode: z.enum(["new_content", "list_loaded"]),
+        enabledAt: z.iso.datetime({ offset: true }),
+      })
+      .strict()
+      .optional(),
     times: z
       .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u))
       .min(1)
@@ -64,7 +81,7 @@ const scheduleConfig = z
 export type ProcessingEntryDecisionView = Pick<
   ProcessingDecision,
   "status" | "title" | "summary" | "reason" | "labels" | "policy"
-> & { id: string }
+> & { id: string; pendingPolicyFields?: ProcessingDecision["pendingPolicyFields"] }
 export type ProcessingEntryMetadataView = {
   sourceSyncedAt: string | null
   listMembershipVersion: number
@@ -74,7 +91,7 @@ export type ProcessingEntryOverrideView = {
   mode: "restore" | "hide" | "automatic"
   revision: number
 }
-export type ProcessingEntryListItem = {
+export type ProcessingEntryListItem = EntryProcessingSignals & {
   seq: number
   sourceKey: string
   itemId: string
@@ -108,6 +125,11 @@ export type ProcessingEntryResultsResponse = {
     semanticTags?: SemanticTagId[]
     semanticAssessments?: TagAssessment[]
     semanticEntities?: SemanticEntity[]
+    attention?: EntryAttention
+    pendingPolicyFields?: ProcessingDecision["pendingPolicyFields"]
+    materialCoverage?: "complete" | "partial"
+    semanticAssessmentCoverage?: "complete" | "partial"
+    contribution?: EntryProcessingSignals["contribution"]
   }>
 }
 export type ProcessingEntryDetailResponse = {
@@ -141,7 +163,7 @@ export type ReadingSnapshotResponse = {
 }
 export type ReadingSnapshotPageResponse = ReadingSnapshotPage
 export type ResearchPackResponse = ResearchPack
-export type StoryDigestResponse = StoryDigest
+export type StoryDigestResponse = StoryDigest & { attention?: EntryAttention }
 
 function owner(store: Store): string {
   if (!store.ownerId) throw new AutomationError("owner_required")
@@ -206,7 +228,119 @@ function readingSnapshotResponse(store: Store, snapshot: ReadingSnapshot): Readi
   }
 }
 
+// 私人关注按当前生效配置投影，与执行时冻结的客观决定分开；草稿不会提前生效。
+function currentAttentionConfig(store: Store): RuleSet | null {
+  const latest = store.automation.releases()[0]
+  return latest ? store.automation.release(latest.version) : null
+}
+function decisionSignals(
+  decision: ProcessingDecision,
+  config: RuleSet | null,
+  assessments?: readonly TagAssessment[],
+  entities?: readonly SemanticEntity[],
+): EntryProcessingSignals {
+  return {
+    attention: processingAttention({
+      config,
+      decision,
+      assessments: assessments ?? [],
+      entities: entities ?? [],
+    }),
+    ...(decision.pendingPolicyFields ? { pendingPolicyFields: decision.pendingPolicyFields } : {}),
+    ...(decision.semanticProfile?.materialCoverage
+      ? { materialCoverage: decision.semanticProfile.materialCoverage }
+      : {}),
+    ...(decision.semanticProfile?.semanticAssessmentCoverage
+      ? { semanticAssessmentCoverage: decision.semanticProfile.semanticAssessmentCoverage }
+      : {}),
+    ...(decision.semanticProfile?.substantiveContribution
+      ? { contribution: decision.semanticProfile.substantiveContribution }
+      : {}),
+  }
+}
+export function storyAttention(store: Store, storyId: string, revision?: number): EntryAttention {
+  const snapshot =
+    revision === undefined
+      ? store.stories.currentSnapshot(storyId)
+      : store.stories.revision(storyId, revision)
+  const config = currentAttentionConfig(store)
+  const published = new Map(
+    store.processingState
+      .published(snapshot?.members.map((member) => member.inputSeq) ?? [])
+      .map((item) => [item.input.seq, item]),
+  )
+  const assessments = store.semantics.tagAssessmentsByInput()
+  const entities = store.semantics.presentEntitiesByInput()
+  return mergeAttention(
+    snapshot?.members.flatMap((member) => {
+      const item = published.get(member.inputSeq)
+      return item?.decisionId === member.decisionId &&
+        !store.stories.isMaterialWithdrawn(member.inputSeq)
+        ? [
+            processingAttention({
+              config,
+              decision: item.decision,
+              assessments: assessments.get(member.inputSeq) ?? [],
+              entities: entities.get(member.inputSeq) ?? [],
+            }),
+          ]
+        : []
+    }) ?? [],
+  )
+}
+export function generatedPageWithAttention(store: Store, query: GeneratedFeedQuery) {
+  const page = store.reading.generatedPage(query)
+  const snapshots = new Map(
+    page.items.flatMap((item) =>
+      item.kind === "story"
+        ? [[item.storyId, store.stories.revision(item.storyId, item.revision)] as const]
+        : [],
+    ),
+  )
+  const seqs = [
+    ...new Set(
+      [...snapshots.values()].flatMap(
+        (snapshot) => snapshot?.members.map((member) => member.inputSeq) ?? [],
+      ),
+    ),
+  ]
+  const config = currentAttentionConfig(store)
+  const assessments = store.semantics.tagAssessmentsByInput()
+  const entities = store.semantics.presentEntitiesByInput()
+  // 整页只读一批成员，避免每个Story重复扫描全部决定和客观判断。
+  const index = new Map(store.processingState.published(seqs).map((item) => [item.input.seq, item]))
+  return {
+    ...page,
+    items: page.items.map((item) => {
+      if (item.kind !== "story") return item
+      const snapshot = snapshots.get(item.storyId)
+      return {
+        ...item,
+        attention: mergeAttention(
+          snapshot?.members.flatMap((member) => {
+            const source = index.get(member.inputSeq)
+            return source?.decisionId === member.decisionId &&
+              !store.stories.isMaterialWithdrawn(member.inputSeq)
+              ? [
+                  processingAttention({
+                    config,
+                    decision: source.decision,
+                    assessments: assessments.get(member.inputSeq) ?? [],
+                    entities: entities.get(member.inputSeq) ?? [],
+                  }),
+                ]
+              : []
+          }) ?? [],
+        ),
+      }
+    }),
+  }
+}
+
 function entryView(store: Store, inputSeqs?: readonly number[]): ProcessingEntryListItem[] {
+  const attentionConfig = currentAttentionConfig(store)
+  const semanticAssessments = store.semantics.tagAssessmentsByInput()
+  const semanticEntities = store.semantics.presentEntitiesByInput()
   const decisions = new Map(
     store.processingState
       .published(inputSeqs)
@@ -244,6 +378,14 @@ function entryView(store: Store, inputSeqs?: readonly number[]): ProcessingEntry
       read: input.body.read,
       receivedAt: input.receivedAt,
       status: input.status,
+      ...(result
+        ? decisionSignals(
+            result.decision,
+            attentionConfig,
+            semanticAssessments.get(input.seq),
+            semanticEntities.get(input.seq),
+          )
+        : {}),
       decision: result
         ? {
             id: result.decisionId,
@@ -253,6 +395,7 @@ function entryView(store: Store, inputSeqs?: readonly number[]): ProcessingEntry
             reason: result.decision.reason,
             labels: result.decision.labels,
             policy: result.decision.policy,
+            pendingPolicyFields: result.decision.pendingPolicyFields,
           }
         : null,
       reviewNeeded: issueCount > 0,
@@ -282,7 +425,7 @@ export function processingApi(
   if (path === "/processing/generated-feed/stats" && method === "GET")
     return store.reading.generatedStats()
   if (path === "/processing/generated-feed/items" && (method === "POST" || method === "GET"))
-    return store.reading.generatedPage(generatedFeedQuerySchema.parse(body ?? {}))
+    return generatedPageWithAttention(store, generatedFeedQuerySchema.parse(body ?? {}))
   const generatedEntryPath = /^\/processing\/generated-feed\/entries\/([^/]+)$/.exec(path)
   if (generatedEntryPath && method === "GET")
     return store.reading.generatedEntryState(decodeURIComponent(generatedEntryPath[1]!))
@@ -378,13 +521,19 @@ export function processingApi(
       method === "POST"
         ? z.object({ revision: positiveInteger.optional() }).strict().parse(body).revision
         : undefined
-    return store.reading.storyDigest(storyDigestPath[1]!, requested) satisfies StoryDigestResponse
+    const digest = store.reading.storyDigest(storyDigestPath[1]!, requested)
+    return (
+      digest.status === "ready"
+        ? { ...digest, attention: storyAttention(store, digest.storyId, digest.revision) }
+        : digest
+    ) satisfies StoryDigestResponse
   }
   if (path === "/processing/roles" && method === "GET")
     // 时间线角色投影不受计划范围限制：时间线覆盖全部订阅，只取当前 input。
     return { roles: store.reading.roles() } satisfies ProcessingEntryRolesResponse
   if (path === "/processing/entry-results" && method === "GET") {
     owner(store)
+    const attentionConfig = currentAttentionConfig(store)
     const availableSources = new Set(store.sources().map((source) => source.key))
     const releases = new Map<number, ReturnType<typeof store.automation.release>>()
     // 名称展示与规则匹配共用同一代已核验判断，避免把标签 ID 当作置信度为 1 的判断。
@@ -412,7 +561,10 @@ export function processingApi(
       // 处理状态取执行时实际命中的 AI 规则；仅摘要变换才暴露可打开的 AI 结果。
       if (
         !instructions.matched.some((rule) => ruleUsesAI(rule) || ruleRequiresSemantics(rule)) &&
-        !decision.semanticProfile
+        !decision.semanticProfile &&
+        !attentionConfig?.rules.some(
+          (rule) => rule.enabled && rule.actions.some((action) => action.type === "attention"),
+        )
       )
         return []
       return [
@@ -430,6 +582,12 @@ export function processingApi(
           decisionId,
           contentVersion: input.contentVersion,
           releaseVersion: input.releaseVersion,
+          ...decisionSignals(
+            decision,
+            attentionConfig,
+            semanticAssessments.get(input.seq),
+            semanticEntities.get(input.seq),
+          ),
           ...(semanticTags.has(input.seq) ? { semanticTags: semanticTags.get(input.seq)! } : {}),
           ...(semanticAssessments.has(input.seq)
             ? { semanticAssessments: semanticAssessments.get(input.seq)! }
@@ -439,7 +597,11 @@ export function processingApi(
             : {}),
           hasResult:
             !!decision.semanticProfile ||
-            (!!decision.summary.trim() && instructions.transformations.length > 0),
+            (!!decision.summary.trim() && instructions.transformations.length > 0) ||
+            !!decision.pendingPolicyFields?.length ||
+            !!attentionConfig?.rules.some(
+              (rule) => rule.enabled && rule.actions.some((action) => action.type === "attention"),
+            ),
         },
       ]
     })

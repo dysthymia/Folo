@@ -1,3 +1,4 @@
+import { entryAttentionSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import { generatedItemKey } from "./generated-feed-identity"
@@ -29,6 +30,7 @@ export const generatedReaderItemSchema = z.discriminatedUnion("kind", [
     kind: z.literal("story"),
     origin: z.literal("generated"),
     storyId: z.string(),
+    attention: entryAttentionSchema.optional(),
     generatedFeedId: z.literal("generated:events"),
     revision: z.number().int().positive(),
     substantiveRevision: z.number().int().nonnegative(),

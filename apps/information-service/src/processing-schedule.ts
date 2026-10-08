@@ -15,6 +15,8 @@ export type ProcessingScheduleInput = {
   enabled: boolean
   /** 列表加载也可唤醒后台；enabled 仍是总暂停开关。 */
   runOnListLoad?: boolean
+  /** 新内容模式以首次入库时间建立启用水位；旧计划缺失时仍按列表加载运行。 */
+  classification?: { mode: "new_content" | "list_loaded"; enabledAt: string }
   times?: readonly string[]
   pollIntervalMinutes?: number | null
   readyBy?: { leadMinutes: number } | null
@@ -29,6 +31,7 @@ export type ProcessingScheduleConfig = {
   timeZone: string
   enabled: boolean
   runOnListLoad: boolean
+  classification?: { mode: "new_content" | "list_loaded"; enabledAt: string }
   times: string[]
   pollIntervalMinutes: number | null
   readyBy: { leadMinutes: number } | null
@@ -222,6 +225,21 @@ function normalizeConfig(input: unknown): ProcessingScheduleConfig {
     timeZone: timeZone(input.timeZone),
     enabled: input.enabled,
     runOnListLoad: input.runOnListLoad !== false,
+    ...(input.classification === undefined
+      ? {}
+      : {
+          classification: (() => {
+            if (
+              !isRecord(input.classification) ||
+              !["new_content", "list_loaded"].includes(String(input.classification.mode))
+            )
+              throw new ProcessingScheduleError("invalid_schedule")
+            return {
+              mode: input.classification.mode as "new_content" | "list_loaded",
+              enabledAt: parseIso(input.classification.enabledAt, "invalid_schedule"),
+            }
+          })(),
+        }),
     times,
     pollIntervalMinutes,
     readyBy,
@@ -448,6 +466,11 @@ export class ProcessingScheduleStore {
       const previous = this.snapshot()
       if (previous.revision !== expectedRevision)
         throw new ProcessingScheduleError("revision_conflict")
+      // 首次保存新功能建立当前水位；普通计划编辑保留原水位，避免重新回跑历史。
+      config.classification ??= previous.config?.classification ?? {
+        mode: "new_content",
+        enabledAt: new Date().toISOString(),
+      }
       const revision = previous.revision + 1
       this.db
         .prepare("INSERT OR REPLACE INTO processing_schedule VALUES(1,?,?,?,?)")

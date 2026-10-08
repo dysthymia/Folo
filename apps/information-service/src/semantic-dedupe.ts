@@ -21,12 +21,17 @@ import {
  */
 export const SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD = 0.85
 // 精确证据和未知结果语义变化后，旧关系失效；只按现行范围处理未读，不重算全部历史。
-export const SEMANTIC_DUPLICATE_PROMPT_VERSION = 7
+export const SEMANTIC_DUPLICATE_PROMPT_VERSION = 8
 export const MAX_SEMANTIC_DUPLICATE_CANDIDATES = 8
 
 const CANDIDATE_TIME_WINDOW = 48 * 60 * 60 * 1000
 const MAX_DESCRIPTION_LENGTH = 400
 export const MAX_DEDUPE_CONTENT_LENGTH = 4000
+// 廉价路径保留4000字；完整通道每批最多两对，单篇与整批均有硬上限。
+export const MAX_FULL_DEDUPE_CONTENT_LENGTH = 60_000
+const MAX_FULL_DEDUPE_PAIRS_PER_BATCH = 2
+const MAX_FULL_DEDUPE_BATCH_CHARACTERS = 120_000
+const MIN_FULL_DEDUPE_SIMILARITY = 0.72
 const MIN_TITLE_SIMILARITY = 0.42
 const MIN_CONTEXT_SIMILARITY = 0.32
 
@@ -44,6 +49,10 @@ export type SemanticDuplicateEntry = {
   urlHost: string
   content?: string
   contentComplete?: boolean
+  /** 有界缓存原文仅供候选择优升级，不能随廉价请求发送或替代附件覆盖。 */
+  fullContent?: string
+  fullContentComplete?: boolean
+  contentLength?: number
   /** 召回依据只扩展候选，不替代完整正文事实比较。 */
   recall?: EventRecallMetadata
 }
@@ -145,6 +154,14 @@ export function dedupeContentEvidence(value: string | null | undefined) {
   return {
     content: content.slice(0, MAX_DEDUPE_CONTENT_LENGTH),
     contentComplete: content.length > 0 && content.length <= MAX_DEDUPE_CONTENT_LENGTH,
+    contentLength: content.length,
+    fullContent:
+      content.length > MAX_DEDUPE_CONTENT_LENGTH && content.length <= MAX_FULL_DEDUPE_CONTENT_LENGTH
+        ? content
+        : undefined,
+    fullContentComplete:
+      content.length > MAX_DEDUPE_CONTENT_LENGTH &&
+      content.length <= MAX_FULL_DEDUPE_CONTENT_LENGTH,
   }
 }
 const completeContent = (candidate: SemanticDuplicateCandidate) =>
@@ -332,7 +349,7 @@ export function getSemanticDuplicateCandidates(
   const text = getTextDuplicateCandidates(entries, options)
   // 旧结果没有事件/实体登记时直接沿用文本倒排，避免增加正文解析或第二次排序。
   if (!entries.some((entry) => entry.recall?.eventIds.length || entry.recall?.identities.length))
-    return text
+    return upgradeFullDedupeCandidates(text)
   const ordered = entries
     .map((entry) => ({
       entry,
@@ -341,10 +358,12 @@ export function getSemanticDuplicateCandidates(
     }))
     .filter((item) => Number.isFinite(item.at))
     .sort((a, b) => b.at - a.at)
+  // 显式别名映射只来自当前合资格材料，每组及倒排扩展都有固定上限。
+  const aliasGroups = ordered.flatMap((item) => item.metadata.aliasGroups ?? [])
   const postings = new Map<string, number[]>()
   const targetPostings = new Map<string, number[]>()
   for (const [index, item] of ordered.entries())
-    for (const key of new Set(eventRecallPostingKeys(item.metadata))) {
+    for (const key of new Set(eventRecallPostingKeys(item.metadata, aliasGroups))) {
       const values = postings.get(key) ?? []
       values.push(index)
       postings.set(key, values)
@@ -361,7 +380,7 @@ export function getSemanticDuplicateCandidates(
       options.targetItemIds && !options.targetItemIds.has(left.entry.itemId)
         ? targetPostings
         : postings
-    for (const key of eventRecallPostingKeys(left.metadata))
+    for (const key of eventRecallPostingKeys(left.metadata, aliasGroups))
       for (const rightIndex of indexPostings.get(key) ?? []) {
         if (rightIndex > index) possible.add(rightIndex)
       }
@@ -387,7 +406,7 @@ export function getSemanticDuplicateCandidates(
         options.settledItemIds.has(right.entry.itemId)
       )
         continue
-      const recallReasons = eventRecallReasons(left.metadata, right.metadata)
+      const recallReasons = eventRecallReasons(left.metadata, right.metadata, aliasGroups)
       if (!recallReasons.length) continue
       yield {
         pairKey,
@@ -416,7 +435,7 @@ export function getSemanticDuplicateCandidates(
     }
     queues = remaining
   }
-  if (!recalled.length) return text
+  if (!recalled.length) return upgradeFullDedupeCandidates(text)
   const selected = new Map<string, SemanticDuplicateCandidate>()
   let textIndex = 0,
     recallIndex = 0
@@ -446,23 +465,101 @@ export function getSemanticDuplicateCandidates(
       append(candidate, false)
     }
   }
-  return [...selected.values()]
+  return upgradeFullDedupeCandidates([...selected.values()])
+}
+
+/** 仅升级值得核对的候选；固定配对顺序与批次预算，未升级仍明确证据不足。 */
+export function upgradeFullDedupeCandidates(candidates: SemanticDuplicateCandidate[]) {
+  const upgraded = new Map<string, SemanticDuplicateCandidate>()
+  for (let offset = 0; offset < candidates.length; offset += MAX_SEMANTIC_DUPLICATE_CANDIDATES) {
+    const batch = candidates.slice(offset, offset + MAX_SEMANTIC_DUPLICATE_CANDIDATES)
+    const documents = new Map(
+      batch
+        .filter(completeContent)
+        .flatMap((pair) =>
+          pair.entries.map((entry) => [entry.itemId, entry.content ?? ""] as const),
+        ),
+    )
+    const eligible = batch
+      .filter(eligibleFullComparison)
+      .sort(
+        (left, right) =>
+          Number(Boolean(right.recallReasons?.some((reason) => reason.type !== "text"))) -
+            Number(Boolean(left.recallReasons?.some((reason) => reason.type !== "text"))) ||
+          right.similarity - left.similarity,
+      )
+    const selectedTargets = new Set<string>()
+    let selected = 0
+    for (const candidate of eligible) {
+      if (selected >= MAX_FULL_DEDUPE_PAIRS_PER_BATCH) break
+      if (selectedTargets.has(candidate.testEntryId)) continue
+      const expanded = new Map(documents)
+      for (const entry of candidate.entries)
+        expanded.set(entry.itemId, entry.fullContent ?? entry.content ?? "")
+      if (
+        [...expanded.values()].reduce((sum, content) => sum + content.length, 0) >
+        MAX_FULL_DEDUPE_BATCH_CHARACTERS
+      )
+        continue
+      for (const [id, content] of expanded) documents.set(id, content)
+      upgraded.set(candidate.pairKey, {
+        ...candidate,
+        entries: candidate.entries.map((entry) =>
+          entry.fullContentComplete && entry.fullContent
+            ? { ...entry, content: entry.fullContent, contentComplete: true }
+            : entry,
+        ) as SemanticDuplicateCandidate["entries"],
+      })
+      selectedTargets.add(candidate.testEntryId)
+      selected++
+    }
+  }
+  return candidates.map((candidate) => upgraded.get(candidate.pairKey) ?? candidate)
+}
+
+function eligibleFullComparison(candidate: SemanticDuplicateCandidate) {
+  return (
+    candidate.entries.some((entry) => entry.fullContent) &&
+    candidate.entries.every(
+      (entry) => entry.contentComplete || (entry.fullContentComplete && entry.fullContent),
+    ) &&
+    (candidate.similarity >= MIN_FULL_DEDUPE_SIMILARITY ||
+      candidate.recallReasons?.some((reason) => reason.type !== "text"))
+  )
 }
 
 export function createSemanticDuplicatePrompt(candidates: SemanticDuplicateCandidate[]) {
   // 同批正文按 itemId 去重，配对仅保留身份引用；不截断事实，也不改变模型输出协议。
-  const documents = [
-    ...new Map(
-      candidates
-        .flatMap((candidate) => candidate.entries)
-        .map(({ recall: _recall, ...entry }) => [entry.itemId, entry]),
-    ).values(),
-  ]
+  const byId = new Map<string, SemanticDuplicateEntry>()
+  for (const candidate of candidates)
+    for (const {
+      recall: _recall,
+      fullContent: _fullContent,
+      fullContentComplete: _fullComplete,
+      ...entry
+    } of candidate.entries) {
+      const previous = byId.get(entry.itemId)
+      // 同一材料在另一对仍走廉价路径时，不能覆盖已经选择的完整正文证据。
+      if (
+        !previous ||
+        Number(entry.contentComplete) > Number(previous.contentComplete) ||
+        (entry.contentComplete === previous.contentComplete &&
+          (entry.content?.length ?? 0) > (previous.content?.length ?? 0))
+      )
+        byId.set(entry.itemId, entry)
+    }
+  const documents = [...byId.values()]
   // 召回线索只用于解释候选来源，不改变已验证的全文比较证据或暗示模型判重。
   const pairs = candidates.map(({ recallReasons: _recallReasons, ...candidate }) => ({
     ...candidate,
     entries: candidate.entries.map(
-      ({ content: _content, recall: _recall, ...metadata }) => metadata,
+      ({
+        content: _content,
+        recall: _recall,
+        fullContent: _fullContent,
+        fullContentComplete: _fullComplete,
+        ...metadata
+      }) => metadata,
     ),
   }))
   return `你是严格的重复新闻分类器。判断每一对候选是否为同一组事实的转载，或一篇完整覆盖另一篇的重复报道。
@@ -635,7 +732,13 @@ export function normalizeSemanticDuplicateOutput(
       return fallbackEvaluation(
         candidate,
         "incomplete",
-        "缺少完整正文或正文超出判重预算，保留原文。",
+        candidate.entries.some(
+          (entry) => (entry.contentLength ?? 0) > MAX_FULL_DEDUPE_CONTENT_LENGTH,
+        )
+          ? "原文超过60000字完整比较上限，全文证据未覆盖，保留原文。"
+          : candidate.entries.some((entry) => entry.fullContentComplete)
+            ? "完整正文尚未进入本批有界比较预算，全文证据未覆盖，保留原文。"
+            : "缺少完整正文或附件/引用证据，保留原文。",
       )
     const count = counts.get(candidate.pairKey) ?? 0
     if (count === 0) return fallbackEvaluation(candidate)

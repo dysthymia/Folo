@@ -6,6 +6,7 @@ import { compileInstructions } from "@follow/information-core"
 import type { CodexUsage } from "./codex"
 import type { EntryModelOutput, ProcessingDecision } from "./processing-decision"
 import { entryModelOutputSchema } from "./processing-decision"
+import { validateFactEventAssignments } from "./processing-event-mentions"
 import type { Store } from "./store"
 
 type Instructions = ReturnType<typeof compileInstructions>
@@ -57,7 +58,8 @@ export async function applySemanticTransforms(
         version: "semantic-transform-v1",
         // 基础指纹绑定原文、模型和真实分析指令；阅读策略、展示长度不进入次级身份。
         baseFingerprint: decision.analysisFingerprint ?? decision.fingerprint,
-        global: instructions.global,
+        // 阅读注意力和配置版本不改变实际摘要指令，不能制造新的变换缓存身份。
+        global: { markdown: instructions.global.markdown },
         prompts,
         assessments: options.assessments,
         definitionDigest: decision.semanticProfile?.definitionDigest,
@@ -109,10 +111,13 @@ function transformedDecision(
     ...output,
     entryId: base.semantic.entryId,
     tagAssessments: base.semantic.tagAssessments,
+    // 摘要变换不能重写已验证的基础贡献判断。
+    substantiveContribution: base.semantic.substantiveContribution,
     // 专用摘要提示不改变基础事件归属；两种表示保持同一不可变身份和提及。
     event: base.semantic.event,
     eventMentions: base.semantic.eventMentions,
   }
+  if (!validateFactEventAssignments(semantic)) throw new Error("invalid_fact_event_assignment")
   return {
     ...base,
     fingerprint,

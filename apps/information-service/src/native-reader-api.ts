@@ -3,6 +3,7 @@ import type { FoloReader, SourceEntry } from "./folo"
 import { FoloReadError } from "./folo"
 import { generatedFeedQuerySchema } from "./generated-feeds"
 import { readModelCatalog } from "./model-catalog"
+import { generatedPageWithAttention } from "./processing-api"
 import type { Store } from "./store"
 
 // 原生收藏首次打开时采集完整官方清单，再与私人 Story 组成单一冻结分页。
@@ -79,7 +80,7 @@ export function nativeReaderApi(options: {
         }
       }
       return {
-        ...options.store.reading.generatedPage(query),
+        ...generatedPageWithAttention(options.store, query),
         collectionSync: {
           status: failure ? "stale" : "complete",
           syncedAt: options.store.reading.officialCollectionsSyncedAt(),

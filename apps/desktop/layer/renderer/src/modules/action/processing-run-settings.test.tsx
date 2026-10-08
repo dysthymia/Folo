@@ -182,6 +182,26 @@ describe("ProcessingRunSettings", () => {
     return callbacks
   }
 
+  it("高级计划与原生设置共用分类模式控件并保留水位", async () => {
+    const value = {
+      ...schedule,
+      classification: { mode: "new_content" as const, enabledAt: "2026-10-08T01:02:03Z" },
+    }
+    const callbacks = await render({ value })
+    const label = [...container!.querySelectorAll("label")].find((item) =>
+      item.textContent?.includes("processing.run.classification_mode"),
+    )!
+    const select = label.querySelector("select")!
+    await act(async () => {
+      select.value = "list_loaded"
+      select.dispatchEvent(new Event("change", { bubbles: true }))
+    })
+    expect(callbacks.onChange).toHaveBeenCalledWith({
+      ...value,
+      classification: { ...value.classification, mode: "list_loaded" },
+    })
+  })
+
   it("默认计划使用服务端约定的五个时点", () => {
     expect(defaultProcessingSchedule().times).toEqual(["08:00", "12:00", "15:00", "20:00", "23:00"])
   })

@@ -4,6 +4,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { applyPresetToAction, createSameEventAggregateAction } from "./processing-action-preset"
+import { ProcessingAttentionAction } from "./processing-attention-action"
 import type { ProcessingEditor } from "./processing-client"
 import {
   processingButtonClass,
@@ -69,6 +70,9 @@ export function ProcessingActionEditor({
                 onChange={(tagIds) => update(index, { ...action, tagIds })}
               />
             </>
+          )}
+          {action.type === "attention" && (
+            <ProcessingAttentionAction action={action} onChange={(next) => update(index, next)} />
           )}
           {action.type === "ai_transform" && (
             <>
@@ -334,6 +338,19 @@ export function ProcessingActionEditor({
         </div>
       ))}
       <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={actions.some((action) => action.type === "attention")}
+          onClick={() =>
+            onChange([
+              ...actions,
+              { type: "attention", level: "important", reason: "关注本规则匹配的有据实质变化" },
+            ])
+          }
+        >
+          {t("processing.attention.title")}
+        </button>
         <button
           type="button"
           className={processingButtonClass}

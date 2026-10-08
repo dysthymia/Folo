@@ -1,4 +1,4 @@
-import { presentationPolicySchema } from "@follow/information-core"
+import { entryAttentionSchema, presentationPolicySchema } from "@follow/information-core"
 import { z } from "zod"
 
 import { oneTimeToken } from "~/lib/auth"
@@ -341,6 +341,37 @@ const storyDigestSentenceSchema = z
     citations: z.array(storyDigestCitationSchema),
   })
   .strict()
+const storyDigestDeltaFactSchema = z
+  .object({
+    id: z.string(),
+    kind: z.enum(["fact", "source_claim", "inference"]),
+    text: z.string(),
+    dependencies: z.array(z.string()),
+    citations: z.array(storyDigestCitationSchema),
+  })
+  .strict()
+const storyReadDeltaSchema = z
+  .object({
+    scope: z.enum([
+      "first_read",
+      "since_read",
+      "up_to_date",
+      "older_version",
+      "baseline_unavailable",
+    ]),
+    fromRevision: z.number().int().positive().nullable(),
+    toRevision: z.number().int().positive(),
+    currentRevision: z.number().int().positive(),
+    fromSubstantiveRevision: z.number().int().nonnegative(),
+    toSubstantiveRevision: z.number().int().nonnegative(),
+    substantiveUpdateCount: z.number().int().nonnegative(),
+    added: z.array(storyDigestDeltaFactSchema),
+    removed: z.array(storyDigestDeltaFactSchema),
+    revised: z.array(
+      z.object({ before: storyDigestDeltaFactSchema, after: storyDigestDeltaFactSchema }).strict(),
+    ),
+  })
+  .strict()
 export const storyDigestSchema = z.discriminatedUnion("status", [
   z
     .object({
@@ -354,6 +385,9 @@ export const storyDigestSchema = z.discriminatedUnion("status", [
       sources: z.array(storyDigestSourceSchema),
       sentences: z.array(storyDigestSentenceSchema),
       uncitedSentenceCount: z.number().int().nonnegative(),
+      // 旧服务仍能读取正文；没有差异投影时不伪造“无更新”的结论。
+      readDelta: storyReadDeltaSchema.optional(),
+      attention: entryAttentionSchema.optional(),
     })
     .strict(),
   z

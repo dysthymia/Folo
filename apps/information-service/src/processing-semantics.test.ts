@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { RuleSet, TagAssessment } from "@follow/information-core"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
@@ -99,6 +99,13 @@ function output(entryId: string, tag: TagAssessment) {
     labels: [],
     facts: [],
     tagAssessments: [tag],
+    materialCoverage: "complete",
+    substantiveContribution: {
+      state: "absent",
+      confidence: 0.98,
+      reason: "全文只有问候。",
+      evidenceIds: [],
+    },
     eventMentions: [],
     entities: [],
   }
@@ -116,7 +123,7 @@ function executor(tag = assessment) {
               }),
             ),
           }
-        : output(ids[0] ?? "e1", tag)
+        : output(ids[0] ?? /entryId=(e\d+)/u.exec(request.prompt)?.[1] ?? "e1", tag)
     expect(request.validate(result)).toBe(true)
     return { result: result as T, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
   }
@@ -334,8 +341,9 @@ describe("语义分类正式发布链路", () => {
         failures: [],
       })
       expect(store.processingState.published()[0]!.decision).toMatchObject({
-        status: "needs_context",
+        status: "keep",
         policy: { standalone: "always" },
+        pendingPolicyFields: ["standalone", "aggregation"],
       })
     } finally {
       store.close()
@@ -456,4 +464,104 @@ describe("语义分类正式发布链路", () => {
       store.close()
     }
   })
+})
+
+// 验证最早入库水位，而非换代后 seq 或文章发布时间，防止水合回跑旧历史。
+it("后台主动分类仅消费水位后的新文，旧文水合不越界且entry_tag依赖继续运行", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-10-01T00:00:00Z"))
+  const { store, options } = fixture()
+  try {
+    const classification = {
+      ...config,
+      rules: [
+        {
+          ...config.rules[0]!,
+          when: { all: true } as const,
+          actions: [{ type: "ai_classify" as const, tagIds: [assessment.tagId] }],
+        },
+      ],
+    }
+    store.automation.saveDraft(classification, 1)
+    store.automation.publish(
+      2,
+      { mode: "selected", inputIds: store.automation.inputs().map((item) => item.seq) },
+      randomUUID(),
+    )
+    vi.setSystemTime(new Date("2026-10-08T00:00:00Z"))
+    store.saveEntry({ ...store.entry("feed/1", "e1")!, content: "大家早上好！补齐正文" })
+    store.saveEntry({ ...store.entry("feed/1", "e1")!, id: "e2", content: "大家早上好！" })
+    for (const input of store.automation.inputs().filter((item) => item.current))
+      store.processingState.setMaterial(input, "complete")
+    const execute = executor()
+    expect(
+      await runEntryProcessing({
+        ...options,
+        classificationSince: "2026-10-07T00:00:00Z",
+        execute,
+      }),
+    ).toMatchObject({ completed: 1, failures: [] })
+    expect(store.processingState.published().map((item) => item.input.itemId)).toEqual(["e2"])
+    // 旧文虽不主动分类，显式阅读规则的entry_tag依赖仍获准分析。
+    store.automation.saveDraft(config, 2)
+    const old = store.automation.inputs().find((item) => item.current && item.itemId === "e1")!
+    store.automation.publish(3, { mode: "selected", inputIds: [old.seq] }, randomUUID())
+    expect(
+      await runEntryProcessing({
+        ...options,
+        classificationSince: "2026-10-07T00:00:00Z",
+        execute,
+      }),
+    ).toMatchObject({ completed: 1, failures: [] })
+    expect(
+      store.processingState.published().find((item) => item.input.itemId === "e1")?.decision.status,
+    ).toBe("hide")
+  } finally {
+    store.close()
+    vi.useRealTimers()
+  }
+})
+
+it("单篇贡献冲突的有效标签、索引与阅读解释一致且原始档案不变", async () => {
+  const { store, options } = fixture()
+  try {
+    store.saveEntry({
+      ...store.entry("feed/1", "e1")!,
+      content: "邀请码。先安装工具，再配置参数并验证输出。",
+    })
+    for (const input of store.automation.inputs())
+      store.processingState.setMaterial(input, "complete")
+    const execute = async <T>(request: CodexJsonOptions<T>) => {
+      const result = {
+        ...output("e1", assessment),
+        substantiveContribution: {
+          state: "present",
+          confidence: 0.98,
+          reason: "完整配置方法。",
+          evidenceIds: ["E000002"],
+        },
+      }
+      expect(request.validate(result)).toBe(true)
+      return { result: result as T, model: request.model, durationMs: 1, usage: null, toolCalls: 0 }
+    }
+    expect(await runEntryProcessing({ ...options, execute })).toMatchObject({
+      completed: 1,
+      failures: [],
+    })
+    const published = store.processingState.published()[0]!
+    expect(published.decision).toMatchObject({
+      status: "keep",
+      pendingPolicyFields: ["standalone", "aggregation"],
+    })
+    expect(published.decision.reason).toContain("实质贡献冲突")
+    expect(store.semantics.view(published.input)).toMatchObject({
+      profile: { assessments: [{ state: "present" }] },
+      assessments: [{ state: "unknown", reason: expect.stringContaining("实质贡献冲突") }],
+    })
+    expect(store.semantics.tagAssessmentsByInput().get(published.input.seq)?.[0]?.state).toBe(
+      "unknown",
+    )
+  } finally {
+    store.close()
+  }
 })

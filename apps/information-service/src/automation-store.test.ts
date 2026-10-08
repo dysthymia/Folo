@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 
-import type { RuleSet } from "@follow/information-core"
+import type { AttentionSettings, RuleSet } from "@follow/information-core"
+import { compileInstructions } from "@follow/information-core"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { automationApi } from "./automation-api"
 import { AutomationStore } from "./automation-store"
 import type { SourceEntry } from "./folo"
 import type { ProcessingDecision } from "./processing-decision"
+import { semanticAnalysisInstructions, semanticDigest } from "./processing-semantic-decision"
 import { ProcessingStateStore } from "./processing-state"
 import { Store } from "./store"
 
@@ -787,4 +789,126 @@ describe("规则编辑接口", () => {
     )
     expect(store.automation.draft().config.global.markdown).toBe("后来修改的草稿")
   })
+})
+
+it("纯关注对象或注意力规则发布保存版本但不重排既有内容，语义指令变化仍换代", () => {
+  const { repository } = fixture()
+  repository.saveDraft(config, 0)
+  repository.publish(1, { mode: "future" }, randomUUID())
+  const seq = repository.capture(entry)
+  repository.complete(repository.assign(seq), decision("attention-base"))
+  const before = repository.inputs()[0]!
+  const attentionConfig: RuleSet = {
+    ...config,
+    global: {
+      ...config.global,
+      attention: {
+        enabled: true,
+        watchlist: [{ id: "watch", name: "OpenAI", aliases: ["Open AI"] }],
+      },
+    },
+    rules: [
+      {
+        id: "attention",
+        ownerId: "owner",
+        name: "重要更新",
+        order: 0,
+        enabled: true,
+        version: 1,
+        executionLocation: "processing_service",
+        when: { all: true },
+        actions: [{ type: "attention", level: "important", reason: "关注对象更新。" }],
+      },
+    ],
+  }
+  repository.saveDraft(attentionConfig, 1)
+  const scope = { mode: "selected" as const, inputIds: [seq] }
+  expect(repository.previewPublication(scope)).toMatchObject({
+    targetInputIds: [],
+    impact: { recalculated: 0 },
+  })
+  expect(repository.publish(2, scope, randomUUID()).version).toBe(2)
+  expect(repository.inputs()[0]).toEqual(before)
+  const actualChange: RuleSet = {
+    ...attentionConfig,
+    global: { ...attentionConfig.global, markdown: "新增真实语义指令" },
+  }
+  repository.saveDraft(actualChange, 2)
+  expect(repository.publish(3, scope, randomUUID()).targetInputIds).toEqual([seq])
+  expect(repository.inputs()[0]?.generation).toBe(before.generation + 1)
+})
+
+it("公共设置激活关注配置保留输入绑定与客观指纹，旧正文客户端保留关注配置", () => {
+  const store = new Store(":memory:")
+  close.push(() => store.close())
+  store.bindOwner("owner")
+  const repository = store.automation
+  repository.saveDraft(config, 0)
+  repository.publish(1, { mode: "future" }, randomUUID())
+  const completed = repository.capture(entry)
+  repository.complete(repository.assign(completed), decision("attention-activated-base"))
+  repository.assign(repository.capture({ ...entry, id: "queued" }))
+  repository.capture({ ...entry, id: "unassigned" })
+  const before = repository.inputs()
+  const schedule = store.schedule.snapshot()
+  const objectiveFingerprint = (ruleSet: RuleSet) =>
+    semanticDigest(
+      semanticAnalysisInstructions(
+        compileInstructions(ruleSet, { source_id: "feed/1", contextId: "feed/1" }),
+      ),
+    )
+  const fingerprint = objectiveFingerprint(repository.effective().config!)
+  const globalVersion = repository.effective().config!.global.version
+  const attention: AttentionSettings = {
+    enabled: true,
+    watchlist: [{ id: "watch", name: "OpenAI", aliases: ["Open AI"] }],
+    nearDeadlineHours: 24,
+  }
+  const body = {
+    expectedRevision: 1,
+    markdown: config.global.markdown,
+    requestId: randomUUID(),
+    attention,
+  }
+  const activated = automationApi(store, "PUT", "/global-instructions/activate", body)
+  expect(activated).toMatchObject({
+    revision: 2,
+    config: { global: { version: globalVersion, attention } },
+    effectiveConfig: { global: { version: globalVersion, attention } },
+    release: { version: 2, scope: { mode: "future" }, targetInputIds: [] },
+    schedule,
+  })
+  // 从真实接口检查全部持久化输入，包含已完成、已绑定和待绑定内容。
+  expect(repository.inputs()).toEqual(before)
+  expect(objectiveFingerprint(repository.effective().config!)).toBe(fingerprint)
+  expect(automationApi(store, "PUT", "/global-instructions/activate", body)).toEqual(activated)
+  expect(repository.releases()).toHaveLength(2)
+  expect(repository.inputs()).toEqual(before)
+
+  expect(
+    automationApi(store, "PUT", "/global-instructions/activate", {
+      expectedRevision: 2,
+      markdown: "旧客户端修改正文",
+      requestId: randomUUID(),
+    }),
+  ).toMatchObject({
+    revision: 3,
+    config: { global: { version: globalVersion + 1, markdown: "旧客户端修改正文", attention } },
+    effectiveConfig: {
+      global: { version: globalVersion + 1, markdown: "旧客户端修改正文", attention },
+    },
+  })
+  expect(repository.inputs()).toEqual(before)
+  expect(objectiveFingerprint(repository.effective().config!)).not.toBe(fingerprint)
+  // 越界设置在写入前拒绝，避免草稿和生效版本部分更新。
+  expect(() =>
+    automationApi(store, "PUT", "/global-instructions/activate", {
+      expectedRevision: 3,
+      markdown: "旧客户端修改正文",
+      requestId: randomUUID(),
+      attention: { ...attention, nearDeadlineHours: 169 },
+    }),
+  ).toThrow()
+  expect(repository.draft().revision).toBe(3)
+  expect(repository.releases()).toHaveLength(3)
 })

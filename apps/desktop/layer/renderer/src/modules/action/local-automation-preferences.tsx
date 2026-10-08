@@ -1,3 +1,5 @@
+import type { AttentionSettings } from "@follow/information-core"
+import { attentionSettingsSchema } from "@follow/information-core"
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -5,10 +7,13 @@ import { useSettingModal } from "~/modules/settings/modal/use-setting-modal-hack
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import { notifyLocalAutomationChanged } from "./local-automation-events"
+import { ProcessingAttentionSettings } from "./processing-attention-settings"
+import { ProcessingClassificationSettings } from "./processing-classification-settings"
 import type {
   EffectiveProcessing,
   ProcessingEditor,
   ProcessingSchedule,
+  ProcessingScheduleConfig,
   RuleActivation,
 } from "./processing-client"
 import { createProcessingClient } from "./processing-client"
@@ -41,6 +46,20 @@ export function LocalAutomationPreferences({
   const [markdown, setMarkdown] = useState(initial)
   const [baseline, setBaseline] = useState(initial)
   const [activeMarkdown, setActiveMarkdown] = useState(effective?.config?.global.markdown ?? null)
+  const [attention, setAttention] = useState<AttentionSettings | undefined>(
+    editor.config.global.attention,
+  )
+  const [attentionBaseline, setAttentionBaseline] = useState(
+    JSON.stringify(editor.config.global.attention),
+  )
+  const [activeAttention, setActiveAttention] = useState(
+    JSON.stringify(effective?.config?.global.attention),
+  )
+  const attentionValue = JSON.stringify(attention)
+  const attentionValid =
+    attention === undefined || attentionSettingsSchema.safeParse(attention).success
+  const [classification, setClassification] =
+    useState<ProcessingScheduleConfig["classification"]>(undefined)
   const [schedule, setSchedule] = useState<ProcessingSchedule | null>(null)
   const [times, setTimes] = useState("")
   const [timeZone, setTimeZone] = useState("")
@@ -55,12 +74,13 @@ export function LocalAutomationPreferences({
     (times !== schedule.config.times.join(", ") ||
       timeZone !== schedule.config.timeZone ||
       enabled !== schedule.config.enabled ||
-      runOnListLoad !== (schedule.config.runOnListLoad !== false))
+      runOnListLoad !== (schedule.config.runOnListLoad !== false) ||
+      JSON.stringify(classification) !== JSON.stringify(schedule.config.classification))
   // 同页切换公共设置也必须保护草稿，由父编辑器统一管理离开提示。
   useEffect(() => {
-    onDirty(markdown !== baseline || scheduleDirty)
+    onDirty(markdown !== baseline || attentionValue !== attentionBaseline || scheduleDirty)
     return () => onDirty(false)
-  }, [markdown, baseline, scheduleDirty, onDirty])
+  }, [markdown, baseline, attentionValue, attentionBaseline, scheduleDirty, onDirty])
   useEffect(() => {
     onBusy(busy)
     return () => onBusy(false)
@@ -72,6 +92,7 @@ export function LocalAutomationPreferences({
       .then((value) => {
         if (controller.signal.aborted) return
         setSchedule(value)
+        setClassification(value.config?.classification)
         setTimes(value.config?.times.join(", ") ?? "")
         setTimeZone(value.config?.timeZone ?? "")
         setRunOnListLoad(value.config?.runOnListLoad !== false)
@@ -98,10 +119,14 @@ export function LocalAutomationPreferences({
         editor.revision,
         crypto.randomUUID(),
         controller.signal,
+        attention,
       )
       if (controller.signal.aborted) return
       onSaved(result)
       setBaseline(markdown)
+      setAttentionBaseline(JSON.stringify(result.config.global.attention))
+      setAttention(result.config.global.attention)
+      setActiveAttention(JSON.stringify(result.effectiveConfig.global.attention))
       setActiveMarkdown(result.effectiveConfig.global.markdown)
       setSaved(true)
     } catch {
@@ -111,7 +136,7 @@ export function LocalAutomationPreferences({
     }
   }
   const saveTiming = async () => {
-    // 先保留旧计划范围，再允许把调度切换到按规则选源。
+    // 迁移确认前禁止保存，避免公共设置改变尚未确认的旧计划。
     if (!schedule?.config || migrationRequired) return
     const controller = new AbortController()
     controllerRef.current = controller
@@ -119,11 +144,11 @@ export function LocalAutomationPreferences({
     setError(false)
     setSaved(false)
     try {
-      // 此处只管何时运行，来源自动跟随规则，用户无需重复选择分类和订阅。
+      // 仅替换当前控件字段，保留计划范围、历史起点以及主动分类首次启用水位。
       const value = await client.saveSchedule(
         {
           ...schedule.config,
-          scope: { mode: "rules" },
+          ...(classification === undefined ? {} : { classification }),
           times: times.split(/[,，\s]+/).filter(Boolean),
           timeZone,
           enabled,
@@ -134,6 +159,7 @@ export function LocalAutomationPreferences({
       )
       if (controller.signal.aborted) return
       setSchedule(value)
+      setClassification(value.config?.classification)
       setTimes(value.config?.times.join(", ") ?? "")
       setRunOnListLoad(value.config?.runOnListLoad !== false)
       setSaved(true)
@@ -169,9 +195,12 @@ export function LocalAutomationPreferences({
           />
         </label>
         <p className="text-xs text-text-secondary">{t("automation.editor.global_hint")}</p>
+        <ProcessingAttentionSettings value={attention} onChange={setAttention} />
         <button
           type="button"
-          disabled={markdown === activeMarkdown}
+          disabled={
+            !attentionValid || (markdown === activeMarkdown && attentionValue === activeAttention)
+          }
           className={processingButtonClass}
           onClick={() => void saveGlobal()}
         >
@@ -201,6 +230,7 @@ export function LocalAutomationPreferences({
               {t("processing.run.on_list_load")}
             </label>
             <p className="text-xs text-text-secondary">{t("processing.run.on_list_load_hint")}</p>
+            <ProcessingClassificationSettings value={classification} onChange={setClassification} />
             <label className="block space-y-2 text-sm">
               <span>{t("automation.editor.times")}</span>
               <input

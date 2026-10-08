@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
 import type { RuleInput } from "@follow/information-core"
@@ -19,6 +20,15 @@ export type TargetSnapshot = {
   sourceRole: string
   metadataVersion: number
 }
+export type DecisionQuarantine = {
+  inputSeq: number
+  contentVersion: string
+  decisionId: string
+  reason: string
+  status: "keep" | "needs_context"
+  // 修复正文由已核验原文提供，不能复用错误的模型摘要。
+  summary: string
+}
 export class ProcessingStateStore {
   constructor(
     private readonly db: DatabaseSync,
@@ -32,6 +42,8 @@ export class ProcessingStateStore {
       CREATE TABLE IF NOT EXISTS processing_trigger_reports(trigger_id TEXT PRIMARY KEY,body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS processing_material_state(source_key TEXT NOT NULL,item_id TEXT NOT NULL,content_version TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(source_key,item_id));
       CREATE TABLE IF NOT EXISTS processing_input_retries(input_seq INTEGER NOT NULL,generation INTEGER NOT NULL,last_failed_at TEXT NOT NULL,automatic_retries INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL,PRIMARY KEY(input_seq,generation));
+      CREATE TABLE IF NOT EXISTS processing_decision_quarantine(decision_id TEXT PRIMARY KEY,input_seq INTEGER NOT NULL,content_version TEXT NOT NULL,fingerprint TEXT NOT NULL,reason TEXT NOT NULL,replacement_id TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS processing_quarantine_fingerprint ON processing_decision_quarantine(fingerprint);
     `)
   }
 
@@ -194,6 +206,13 @@ export class ProcessingStateStore {
   }
 
   cache(fingerprint: string): ProcessingDecision | null {
+    // 已确认材料错配的缓存永久隔离；保留原始记录用于审计，不靠删除掩盖事故。
+    if (
+      this.db
+        .prepare("SELECT 1 FROM processing_decision_quarantine WHERE fingerprint=?")
+        .get(fingerprint)
+    )
+      return null
     const row = this.db
       .prepare("SELECT body FROM processing_model_cache WHERE fingerprint=?")
       .get(fingerprint)
@@ -201,9 +220,87 @@ export class ProcessingStateStore {
   }
 
   saveCache(decision: ProcessingDecision) {
+    if (
+      this.db
+        .prepare("SELECT 1 FROM processing_decision_quarantine WHERE fingerprint=?")
+        .get(decision.fingerprint)
+    )
+      return
     this.db
       .prepare("INSERT OR IGNORE INTO processing_model_cache VALUES(?,?,?)")
       .run(decision.fingerprint, JSON.stringify(decision), decision.generatedAt)
+  }
+
+  quarantine(manifest: readonly DecisionQuarantine[]) {
+    this.db.exec("SAVEPOINT quarantine_decisions")
+    try {
+      const results: Array<{ inputSeq: number; decisionId: string; repeated: boolean }> = []
+      // 先核验整份清单，任一正文或发布指针已变更都不能半提交修复。
+      const targets = manifest.map((item) => {
+        const previous = this.db
+          .prepare(
+            "SELECT replacement_id FROM processing_decision_quarantine WHERE decision_id=? AND input_seq=? AND content_version=?",
+          )
+          .get(item.decisionId, item.inputSeq, item.contentVersion)
+        if (previous) return { item, previous: String(previous.replacement_id), published: null }
+        const published = this.published([item.inputSeq]).find(
+          (value) =>
+            value.input.current &&
+            value.input.contentVersion === item.contentVersion &&
+            value.decisionId === item.decisionId,
+        )
+        if (!published || !item.reason.trim()) throw new AutomationError("revision_conflict")
+        return { item, previous: null, published }
+      })
+      for (const { item, previous, published } of targets) {
+        if (previous) {
+          results.push({ inputSeq: item.inputSeq, decisionId: previous, repeated: true })
+          continue
+        }
+        const { input, decision } = published!
+        const replacement: ProcessingDecision = {
+          ...decision,
+          fingerprint: createHash("sha256")
+            .update(JSON.stringify(["audited-repair-v1", item]))
+            .digest("hex"),
+          generatedAt: new Date().toISOString(),
+          durationMs: 0,
+          usage: null,
+          status: item.status,
+          title: input.body.title ?? "",
+          summary: item.summary,
+          reason: item.reason,
+          labels: [],
+          facts: [],
+          semantic: null,
+          semanticProfile: undefined,
+          analysisFingerprint: undefined,
+          pendingPolicyFields: undefined,
+          policy: { standalone: "always", aggregation: "deny", rewrite: "deny" },
+          repair: { sourceDecisionId: item.decisionId, reason: item.reason },
+          reused: false,
+        }
+        // 发布新代际，旧决定保持不可变；不改已读、收藏及用户已有人工覆盖。
+        const completed = this.automation.recalculate(input, replacement)
+        this.db
+          .prepare("INSERT INTO processing_decision_quarantine VALUES(?,?,?,?,?,?,?)")
+          .run(
+            item.decisionId,
+            input.seq,
+            input.contentVersion,
+            decision.fingerprint,
+            item.reason,
+            completed.id,
+            replacement.generatedAt,
+          )
+        results.push({ inputSeq: input.seq, decisionId: completed.id, repeated: false })
+      }
+      this.db.exec("RELEASE quarantine_decisions")
+      return results
+    } catch (error) {
+      this.db.exec("ROLLBACK TO quarantine_decisions; RELEASE quarantine_decisions")
+      throw error
+    }
   }
 
   published(inputSeqs?: readonly number[]): PublishedDecision[] {

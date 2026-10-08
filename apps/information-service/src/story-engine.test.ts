@@ -2029,3 +2029,198 @@ it.each(unresolvedStoryMaterials)("正文相同但%s不能用有限证据判零�
   expect(stories.currentSnapshot(created.created[0]!.storyId)?.revision).toBe(1)
   expect(update.decision.status).toBe("keep")
 })
+
+// 并列周报的序号绑定不可变单篇决定；两段都有独立原文范围，不能以主题代替事实归属。
+function weeklyPublished(db: DatabaseSync, seq: number, first: string, second: string) {
+  const primary = caseEvent(first, "Acme", "product_release", "Widget", { version: "2.0" })
+  const other = caseEvent(second, "Beta", "product_release", "Tool", { version: "3.0" })
+  const item = casePublished(db, seq, `${first}\n${second}`, primary)
+  item.decision.semantic!.event = null
+  item.decision.semantic!.eventMentions = [
+    { identity: primary, role: "reports", isPrimary: false },
+    { identity: other, role: "reports", isPrimary: false },
+  ]
+  item.decision.facts = [first, second].map((quote, eventMentionIndex) => ({
+    text: quote,
+    quote,
+    kind: "fact",
+    eventMentionIndex,
+  }))
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(item.decision),
+    item.decisionId,
+  )
+  return item
+}
+
+it("无主事件的两篇周报分别向两个Story贡献，发布边界拒绝交叉引用并保留原文", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const a = [
+    "Acme released Widget 2.0 with faster sync.",
+    "Beta released Tool 3.0 with offline support.",
+  ]
+  const b = [
+    "Acme released Widget 2.0 with encryption.",
+    "Beta released Tool 3.0 with regional storage.",
+  ]
+  const decisions = [weeklyPublished(db, 1, a[0]!, a[1]!), weeklyPublished(db, 2, b[0]!, b[1]!)]
+  const prompts: string[] = []
+  const output = await runStoryAggregation({
+    decisions,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute: executeWith([modelOutput(), modelOutput()], prompts),
+    alreadyClaimedInputSeqs: [1, 2],
+    sameEventEligible: (_, eventMentionIndex) => eventMentionIndex === 0 || eventMentionIndex === 1,
+    registeredEventId: (members) =>
+      new Set(members.map((member) => member.eventMentionIndex)).size === 1
+        ? `event-${members[0]!.eventMentionIndex}`
+        : null,
+  })
+  expect(output.created).toHaveLength(2)
+  expect(prompts).toHaveLength(2)
+  expect(prompts[0]).toContain(a[0]!)
+  expect(prompts[0]).not.toContain(a[1]!)
+  expect(prompts[1]).toContain(a[1]!)
+  expect(prompts[1]).not.toContain(a[0]!)
+  const revisions = output.created.map((created) => stories.currentSnapshot(created.storyId)!)
+  expect(
+    revisions.map((revision) => revision.members.map((member) => member.eventMentionIndex)),
+  ).toEqual([
+    [0, 0],
+    [1, 1],
+  ])
+  expect(revisions.map((revision) => revision.sourceSpans.map((span) => span.quote))).toEqual([
+    [a[0], b[0]],
+    [a[1], b[1]],
+  ])
+  const contaminated = {
+    ...revisions[0]!,
+    sourceSpans: revisions[0]!.sourceSpans.map((span) =>
+      span.inputSeq === 1
+        ? {
+            ...span,
+            quote: a[1]!,
+            fragmentId: sourceSpanFragmentId(
+              decisions[0]!.input.itemId,
+              decisions[0]!.input.contentVersion,
+              a[1]!,
+            ),
+          }
+        : span,
+    ),
+  }
+  expect(() => stories.appendRevision(revisions[0]!.storyId, 1, contaminated)).toThrow(
+    "invalid_reference",
+  )
+  expect(
+    decisions.every(
+      (published) => published.decision.status === "keep" && published.decision.facts.length === 2,
+    ),
+  ).toBe(true)
+})
+
+it("事件片段被人工禁用、没有归属或跨片段证据时不会借其他事实发布", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const decisions = [
+    weeklyPublished(
+      db,
+      1,
+      "Acme released Widget 2.0 with sync.",
+      "Beta released Tool 3.0 with offline support.",
+    ),
+    weeklyPublished(
+      db,
+      2,
+      "Acme released Widget 2.0 with encryption.",
+      "Beta released Tool 3.0 with storage.",
+    ),
+  ]
+  const prompts: string[] = []
+  const output = await runStoryAggregation({
+    decisions,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute: executeWith([modelOutput()], prompts),
+    sameEventEligible: (_, eventMentionIndex) => eventMentionIndex === 1,
+  })
+  expect(output.created).toHaveLength(1)
+  expect(
+    stories
+      .currentSnapshot(output.created[0]!.storyId)!
+      .members.every((member) => member.eventMentionIndex === 1),
+  ).toBe(true)
+  expect(prompts[0]).not.toContain("Acme")
+  const invalid = decisions[0]!.decision.facts[0]!
+  invalid.eventMentionIndex = 1
+  decisions[0]!.decision.facts[1]!.eventMentionIndex = null
+  expect(
+    await runStoryAggregation({
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sameEventEligible: (_, index) => index === 1,
+      execute: async () => {
+        throw new Error("无许可证不应调用模型")
+      },
+    }),
+  ).toMatchObject({ created: [], updated: [], failures: [] })
+})
+
+it("有显式事件事实许可证的分析可贡献独有解释，旧无归属观点仍独立", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const report = "Acme released Widget 2.0 with encryption."
+  const analysis =
+    "Acme released Widget 2.0; analysis finds encryption reduces synchronization risk."
+  const first = casePublished(
+    db,
+    1,
+    report,
+    caseEvent(report, "Acme", "product_release", "Widget", { version: "2.0" }),
+  )
+  const second = casePublished(
+    db,
+    2,
+    analysis,
+    caseEvent(analysis, "Acme", "product_release", "Widget", { version: "2.0" }),
+  )
+  const identity = { ...second.decision.semantic!.event!, kind: "analysis" as const }
+  second.decision.semantic!.event = identity
+  second.decision.semantic!.eventMentions = [{ identity, role: "analysis_of", isPrimary: true }]
+  second.decision.facts = [
+    {
+      text: "Encryption reduces synchronization risk",
+      quote: analysis,
+      kind: "source_claim",
+      eventMentionIndex: 0,
+    },
+  ]
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(second.decision),
+    second.decisionId,
+  )
+  const result = await runStoryAggregation({
+    decisions: [first, second],
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+    execute: executeWith([modelOutput()]),
+    sameEventEligible: () => true,
+  })
+  expect(result.created).toHaveLength(1)
+  expect(
+    stories.currentSnapshot(result.created[0]!.storyId)!.sourceSpans.map((span) => span.quote),
+  ).toContain(analysis)
+  expect(second.decision.status).toBe("keep")
+})

@@ -1,4 +1,5 @@
 import {
+  entryProcessingSignalsSchema,
   semanticEntitySchema,
   semanticTagIdSchema,
   tagAssessmentSchema,
@@ -29,6 +30,7 @@ const resultIndexSchema = z.object({
     .optional(),
   results: z.array(
     z.object({
+      ...entryProcessingSignalsSchema.shape,
       itemId: z.string(),
       sourceKey: z.string(),
       sourceId: z.string().nullable(),

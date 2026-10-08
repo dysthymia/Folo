@@ -11,7 +11,7 @@ import {
 
 describe("内置语义定义", () => {
   it("每个稳定 ID 有独立定义、正反例及版本，名称和用户偏好不参与身份", () => {
-    expect(semanticTagDefinitions).toHaveLength(22)
+    expect(semanticTagDefinitions).toHaveLength(30)
     expect(new Set(semanticTagDefinitions.map((item) => item.id)).size).toBe(semanticTagIds.length)
     for (const definition of semanticTagDefinitions) {
       expect(semanticTagDefinitionSchema.safeParse(definition).success).toBe(true)
@@ -29,7 +29,7 @@ describe("内置语义定义", () => {
       "融资、机构设立子公司、交易和持仓",
     )
     expect(semanticTagDefinitions.filter((definition) => definition.kind === "event")).toHaveLength(
-      7,
+      13,
     )
   })
   it("判断不能提交自由标签、非法版本或越界置信度，明确 absent 不需伪造引文", () => {

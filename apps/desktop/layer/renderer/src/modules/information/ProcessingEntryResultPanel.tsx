@@ -1,3 +1,4 @@
+import { entryProcessingSignalsSchema } from "@follow/information-core"
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { z } from "zod"
@@ -6,9 +7,11 @@ import { EntryEventsPanel } from "./EntryEventsPanel"
 import { EntrySemanticPanel } from "./EntrySemanticPanel"
 import { readingRequest } from "./processing-reader-client"
 import { entrySemanticProfileSchema } from "./processing-semantic-client"
+import { ProcessingSignals } from "./ProcessingSignals"
 
 const resultSchema = z.object({
   entry: z.object({
+    ...entryProcessingSignalsSchema.shape,
     seq: z.number().int().positive(),
     sourceKey: z.string(),
     itemId: z.string(),
@@ -81,6 +84,7 @@ export function ProcessingEntryResultPanel({
   return (
     <div className="space-y-3 text-sm">
       <p className="text-text-secondary">{t("processing.result.note")}</p>
+      <ProcessingSignals signals={result} />
       <h3 className="font-medium">{result.decision.title}</h3>
       <p className="whitespace-pre-wrap">{result.decision.summary}</p>
       <EntryEventsPanel

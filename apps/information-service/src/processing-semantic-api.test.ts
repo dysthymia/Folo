@@ -478,7 +478,7 @@ describe("semantic processing API", () => {
     expect(store.processingState.published([previous.input.seq])[0]!.decision.summary).toBe("Orig")
   })
 
-  it("无模型重算继续保留未知条件为待上下文，不推断不存在", () => {
+  it("无模型重算保留策略待定且原文可读，不推断材料缺失", () => {
     const { store, config } = fixture()
     const previous = complete(store, entry, "unknown")
     const next = structuredClone(config)
@@ -489,7 +489,8 @@ describe("semantic processing API", () => {
       targets: [target(previous)],
     })
     const current = store.processingState.published([previous.input.seq])[0]!
-    expect(current.decision.status).toBe("needs_context")
+    expect(current.decision.status).toBe("keep")
+    expect(current.decision.pendingPolicyFields).toContain("standalone")
     expect(current.decision.semanticProfile?.assessments[0]!.state).toBe("unknown")
   })
 

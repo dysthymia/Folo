@@ -47,6 +47,28 @@ const rules = (...items: AutomationRule[]): RuleSet => ({
   rules: items,
 })
 
+describe("重点关注契约", () => {
+  it("关注清单默认为空且可选，不影响AI及presentation；非法重复身份不能保存", () => {
+    const config = rules(
+      rule("focus", 0, [{ type: "attention", level: "important", reason: "关注有据变化" }]),
+    )
+    config.global.attention = { enabled: true, watchlist: [] }
+    expect(ruleSetSchema.safeParse(config).success).toBe(true)
+    expect(ruleUsesAI(config.rules[0]!)).toBe(false)
+    expect(compileInstructions(config, input)).toMatchObject({
+      policy: {},
+      transformations: [],
+      aggregates: [],
+      dedupes: [],
+    })
+    config.global.attention.watchlist = [
+      { id: "acme", name: "Acme", aliases: [] },
+      { id: "acme", name: "Other", aliases: [] },
+    ]
+    expect(ruleSetSchema.safeParse(config).success).toBe(false)
+  })
+})
+
 describe("三值条件与原文身份", () => {
   const states: MatchState[] = ["match", "no_match", "unknown"]
   it("AND/OR 全部真值组合符合 unknown 传播规则", () => {

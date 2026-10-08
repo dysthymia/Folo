@@ -137,3 +137,128 @@ describe("事件及实体证据召回", () => {
     ).toHaveLength(1)
   })
 })
+
+function temporalIdentity(text: string, day: string, extra: Partial<EventIdentity> = {}) {
+  return identity(
+    {
+      version: null,
+      round: null,
+      anchor: { kind: "event_date", value: day, quote: text, timeZone: "UTC" },
+      ...extra,
+    },
+    text,
+  )
+}
+
+describe("有证据的发生时间与显式别名", () => {
+  it("同一天中英报道可召回，另一发生日和不同主体动作对象不召回", () => {
+    const zh = "OpenAI 于2026年10月5日 UTC 发布 GPT。"
+    const en = "OpenAI released GPT on October 5, 2026 UTC."
+    const a = entry("a", "新成果", temporalIdentity(zh, "2026-10-05"), 1)
+    const b = entry("b", "A launch report", temporalIdentity(en, "2026-10-05"))
+    expect(getSemanticDuplicateCandidates([a, b])).toHaveLength(1)
+    const other = "OpenAI 于2026年10月6日 UTC 发布 GPT。"
+    expect(
+      getSemanticDuplicateCandidates([
+        a,
+        entry("c", "Another update", temporalIdentity(other, "2026-10-06")),
+      ]),
+    ).toEqual([])
+    for (const changed of [
+      { subject: { value: "Acme", quote: "Acme 于2026年10月5日 UTC 发布 GPT。" } },
+      { action: { value: "announcement" as const, quote: zh } },
+      { object: { value: "Other", quote: "OpenAI 于2026年10月5日 UTC 发布 Other。" } },
+    ]) {
+      const text = changed.subject?.quote ?? changed.object?.quote ?? zh
+      expect(
+        eventRecallReasons(
+          validatedEventRecall(a),
+          validatedEventRecall(entry("c", "另一条", temporalIdentity(text, "2026-10-05", changed))),
+        ),
+      ).toEqual([])
+    }
+  })
+
+  it("日期与明确时区的同日时间可召回，非重叠时刻及报道元日期拒绝", () => {
+    const day = "OpenAI 于2026年10月5日 UTC 发布 GPT。"
+    const moment = "OpenAI 于2026-10-05T13:20:00Z 发布 GPT。"
+    const a = entry("a", "新成果", temporalIdentity(day, "2026-10-05"), 1)
+    const b = entry(
+      "b",
+      "A launch report",
+      temporalIdentity(moment, "2026-10-05", {
+        anchor: {
+          kind: "event_time",
+          value: "2026-10-05T13:20:00Z",
+          quote: moment,
+          timeZone: "Z",
+        },
+      }),
+    )
+    expect(getSemanticDuplicateCandidates([a, b])).toHaveLength(1)
+    for (const text of [
+      "Published on October 5, 2026 UTC. OpenAI released GPT.",
+      "2026年10月5日消息，OpenAI 发布 GPT。",
+      "报道时间2026年10月5日 UTC；OpenAI 发布 GPT。",
+    ])
+      expect(
+        validatedEventRecall(entry("c", "Another update", temporalIdentity(text, "2026-10-05")))
+          .identities,
+      ).toEqual([])
+  })
+
+  it("同资产同统计区间跨语言召回，不同日周的统计期不混合", () => {
+    const make = (id: string, start: string, end: string, title: string) => {
+      const text = `OpenAI GPT 统计期间 ${start} 至 ${end} UTC 流入100美元。`
+      return entry(
+        id,
+        title,
+        temporalIdentity(text, end, { action: { value: "market_event", quote: text } }),
+      )
+    }
+    const a = make("a", "2026-09-29", "2026-10-05", "资产统计")
+    const en = "OpenAI GPT inflow period 2026-09-29 through 2026-10-05 UTC: 100 USD."
+    const b = entry(
+      "b",
+      "Market observation",
+      temporalIdentity(en, "2026-10-05", { action: { value: "market_event", quote: en } }),
+    )
+    expect(getSemanticDuplicateCandidates([a, b])).toHaveLength(1)
+    for (const c of [
+      make("c", "2026-09-30", "2026-10-05", "Weekly observation"),
+      make("d", "2026-09-28", "2026-10-04", "Other interval"),
+    ])
+      expect(eventRecallReasons(validatedEventRecall(a), validatedEventRecall(c))).toEqual([])
+  })
+
+  it("只用原文明示别名召回，伪造、共现猜测与缩写碰撞不扩大身份", () => {
+    const chinese = "开放人工智能（OpenAI）发布 GPT 5.2，轮次 R1；公告 https://official.test/gpt 。"
+    const a = entry(
+      "a",
+      "新成果",
+      identity({ subject: { value: "开放人工智能", quote: chinese } }, chinese),
+      1,
+    )
+    const b = entry("b", "Launch observation", identity())
+    const group = {
+      name: "OpenAI",
+      aliases: ["开放人工智能"],
+      kind: "organization" as const,
+      parentName: null,
+      quotes: [chinese],
+    }
+    a.recall = { ...a.recall!, aliasGroups: [group] }
+    expect(getSemanticDuplicateCandidates([a, b])).toHaveLength(1)
+    expect(eventRecallReasons(validatedEventRecall(a), validatedEventRecall(b))[0]).toMatchObject({
+      type: "evidence_identity",
+    })
+    for (const quotes of [["伪造中文别名OpenAI"], ["开放人工智能 与 OpenAI 各自发布 GPT。"]]) {
+      const invalid = { ...a, recall: { ...a.recall, aliasGroups: [{ ...group, quotes }] } }
+      expect(validatedEventRecall(invalid).aliasGroups).toBeUndefined()
+    }
+    const collision = { ...group, name: "Another project", kind: "project" as const }
+    expect(
+      eventRecallReasons(validatedEventRecall(a), validatedEventRecall(b), [group, collision]),
+    ).toEqual([])
+  })
+})

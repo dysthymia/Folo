@@ -251,7 +251,13 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         runtimeDir: options.runtimeDir,
         sourceKeys: trigger.sourceKeys,
         inputSeqs: hydrated.inputSeqs,
-        allowClassification: trigger.kind === "list_loaded",
+        allowClassification:
+          trigger.kind === "list_loaded" ||
+          store.schedule.snapshot().config?.classification?.mode === "new_content",
+        // 列表显式目标允许处理旧文；后台主动分类严格遵守首次入库水位。
+        ...(trigger.kind === "list_loaded"
+          ? {}
+          : { classificationSince: store.schedule.snapshot().config?.classification?.enabledAt }),
         sharedAnalysis,
         historySince: trigger.historySince,
         cutoffAt: trigger.cutoffAt,
@@ -379,12 +385,16 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
           runtimeDir: options.runtimeDir,
           signal,
           targets: trigger.targets,
-          sameEventEligible: (published) => {
+          sameEventEligible: (published, eventMentionIndex) => {
             const memberships = store.events.entryEvents(published.input)
             return (
-              !memberships.length ||
+              (eventMentionIndex === undefined && !memberships.length) ||
               store.events.confirmedEventIdsForMembers([
-                { inputSeq: published.input.seq, decisionId: published.decisionId },
+                {
+                  inputSeq: published.input.seq,
+                  decisionId: published.decisionId,
+                  ...(eventMentionIndex === undefined ? {} : { eventMentionIndex }),
+                },
               ]).length > 0
             )
           },

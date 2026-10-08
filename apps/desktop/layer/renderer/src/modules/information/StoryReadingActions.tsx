@@ -2,6 +2,7 @@ import { useWhoami } from "@follow/store/user/hooks"
 import { useSetAtom } from "jotai"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
+import type { To } from "react-router"
 import { Link } from "react-router"
 import { z } from "zod"
 
@@ -49,9 +50,13 @@ function materialHref(url: string | null) {
 export function StoryReadingActions({
   storyId,
   unavailable = false,
+  resolution,
+  storyPath,
 }: {
   storyId: string
   unavailable?: boolean
+  resolution?: Resolution
+  storyPath?: (id: string) => To
 }) {
   const { t } = useTranslation("app")
   const owner = useWhoami()?.id ?? null
@@ -60,7 +65,7 @@ export function StoryReadingActions({
   const currentKeyRef = useRef(key)
   currentKeyRef.current = key
   const requestRef = useRef<AbortController | null>(null)
-  const [state, setState] = useState<State>({ key })
+  const [state, setState] = useState<State>({ key, link: resolution })
   const visible = state.key === key ? state : { key }
   const valid = useCallback(
     (request: AbortController, captured: string) =>
@@ -72,8 +77,9 @@ export function StoryReadingActions({
     const request = new AbortController()
     requestRef.current?.abort()
     requestRef.current = request
-    setState({ key })
-    if (unavailable && owner)
+    // 原生深链已取得纠错去向时直接复用，避免独立拆回场景空白或重复读取。
+    setState({ key, link: resolution })
+    if (unavailable && owner && !resolution)
       void readingRequest(
         `stories/${encodeURIComponent(storyId)}`,
         readingStorySchema,
@@ -89,7 +95,7 @@ export function StoryReadingActions({
       request.abort()
       requestRef.current?.abort()
     }
-  }, [key, owner, storyId, unavailable, valid])
+  }, [key, owner, storyId, unavailable, valid, resolution])
 
   const execute = async (confirm: boolean) => {
     if (!owner || (confirm && !visible.preview)) return
@@ -149,7 +155,10 @@ export function StoryReadingActions({
           {t("processing.digest.merged_notice")}{" "}
           <Link
             className="underline"
-            to={`/events?story=${encodeURIComponent(visible.link.mergedInto)}`}
+            to={
+              storyPath?.(visible.link.mergedInto) ??
+              `/events?story=${encodeURIComponent(visible.link.mergedInto)}`
+            }
           >
             {t("processing.digest.open_current")}
           </Link>
@@ -166,7 +175,7 @@ export function StoryReadingActions({
             <Link
               key={id}
               className="mr-3 underline"
-              to={`/events?story=${encodeURIComponent(id)}`}
+              to={storyPath?.(id) ?? `/events?story=${encodeURIComponent(id)}`}
             >
               {t("processing.digest.open_current")}
             </Link>

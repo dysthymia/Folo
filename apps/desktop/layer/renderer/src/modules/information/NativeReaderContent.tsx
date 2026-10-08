@@ -3,7 +3,7 @@ import { useIsEntryStarred } from "@follow/store/collection/hooks"
 import { useEntry } from "@follow/store/entry/hooks"
 import { cn } from "@follow/utils/utils"
 import type { ComponentProps } from "react"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Link, useLocation, useSearchParams } from "react-router"
 
@@ -21,6 +21,7 @@ import { useNativeReader } from "./native-reader-context"
 import { storyReaderLocation } from "./reader-target"
 import { ResearchPanel } from "./ResearchPanel"
 import { StoryDigestPanel } from "./StoryDigestPanel"
+import { StoryReadingActions } from "./StoryReadingActions"
 
 /** 原文仍由原生内容布局渲染，Story 使用同一阅读焦点和滚动命令。 */
 export function NativeReaderContent({
@@ -84,6 +85,15 @@ function NativeStoryContent({ className }: { className?: string }) {
     >(null)
   const renderStyle = useRenderStyle()
   const [tools, setTools] = useState(false)
+  const confirmRead = useCallback(
+    (revision: number) => {
+      const target = reader?.mutationTarget
+      if (target?.kind === "story" && !reader?.selectedRead)
+        // 深链当前版本与列表冻结版本可以不同，回执只能对应实际展示的正文。
+        void reader?.mutateItem({ ...target, revision }, { read: true })
+    },
+    [reader],
+  )
   if (!reader?.storyId) return null
   const link = reader.deepState?.link
   return (
@@ -116,21 +126,20 @@ function NativeStoryContent({ className }: { className?: string }) {
                 {t("processing.generated.choose")}
               </Link>
             ) : link?.kind === "split" ? (
-              link.splitInto.map((id) => (
-                <Link
-                  key={id}
-                  className="mr-3 text-accent underline"
-                  to={storyReaderLocation(pathname, params, id)}
-                >
-                  {t("processing.generated.choose")}
-                </Link>
-              ))
+              // 完全拆回原文时没有子综述，也必须展示明确的材料去向。
+              <StoryReadingActions
+                storyId={reader.storyId}
+                unavailable
+                resolution={link}
+                storyPath={(id) => storyReaderLocation(pathname, params, id)}
+              />
             ) : (
               <StoryDigestPanel
                 storyId={reader.storyId}
                 storyTitle={reader.selected?.title}
                 revision={reader.selected?.kind === "story" ? reader.selected.revision : undefined}
                 embedded
+                onReady={confirmRead}
               />
             )}
             <button

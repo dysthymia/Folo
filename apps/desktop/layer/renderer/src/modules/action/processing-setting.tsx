@@ -8,6 +8,7 @@ import { useDialog } from "~/components/ui/modal/stacked/hooks"
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
 import { ProcessingActionEditor } from "./processing-action-editor"
+import { ProcessingAttentionSettings } from "./processing-attention-settings"
 import type {
   ProcessingEditor,
   ProcessingInput,
@@ -601,6 +602,12 @@ export function ProcessingSetting({
                   }
                 />
               </label>
+              <ProcessingAttentionSettings
+                value={draft.global.attention}
+                onChange={(attention) =>
+                  change({ ...draft, global: { ...draft.global, attention } })
+                }
+              />
               <div className="flex items-center justify-between">
                 <h3 className="font-medium">{t("processing.rules")}</h3>
                 <button

@@ -934,3 +934,97 @@ describe("同账号事件登记与关系纠错", () => {
     expect(separate.registry.queryEvent(first.eventId!, scope)).toBeNull()
   })
 })
+
+it("指定周报事件片段分别获得确认资格，人工移出一个片段不授权另一事件或旧主归属", () => {
+  const f = fixture()
+  const otherQuote = quote.replaceAll("5.2", "5.3").replaceAll("gpt-5-2", "gpt-5-3")
+  const identities = [
+    identity(),
+    identity(
+      {
+        version: { value: "5.3", quote: otherQuote },
+        anchor: {
+          kind: "official_reference",
+          value: "https://official.test/releases/gpt-5-3",
+          quote: otherQuote,
+        },
+      },
+      otherQuote,
+    ),
+  ]
+  const seq = f.automation.capture({
+    id: "weekly",
+    sourceKey: "feed/1",
+    title: "并列周报",
+    content: `${quote}\n${otherQuote}`,
+    description: null,
+    read: false,
+    url: null,
+    publishedAt: "2026-10-06T00:00:00Z",
+  })
+  const input = f.automation.assign(seq)
+  const decision = output(
+    input,
+    null,
+    identities.map((identity) => ({ identity, role: "reports", isPrimary: false })),
+  )
+  decision.facts = [quote, otherQuote].map((quote, eventMentionIndex) => ({
+    text: quote,
+    quote,
+    kind: "fact",
+    eventMentionIndex,
+  }))
+  const completion = f.automation.complete(input, decision)
+  f.registry.publish(input, decision, completion.id)
+  const members = f.registry.entryEvents(input)
+  const refs = [0, 1].map((eventMentionIndex) => ({
+    inputSeq: seq,
+    decisionId: completion.id,
+    eventMentionIndex,
+  }))
+  expect(f.registry.confirmedEventIdsForMembers([refs[0]!])).toEqual([members[0]!.event.id])
+  expect(f.registry.confirmedEventIdsForMembers([refs[1]!])).toEqual([members[1]!.event.id])
+  expect(f.registry.confirmedEventIdsForMembers(refs)).toEqual([])
+  expect(
+    f.registry.confirmedEventIdsForMembers([{ inputSeq: seq, decisionId: completion.id }]),
+  ).toEqual([])
+  expect(f.registry.confirmedEventIdsForMembers([{ ...refs[0]!, eventMentionIndex: 3 }])).toEqual(
+    [],
+  )
+  correct(
+    f,
+    {
+      type: "remove",
+      eventId: members[0]!.event.id,
+      inputSeq: seq,
+      mentionId: members[0]!.membership.mentionId,
+    },
+    [members[0]!.event.id],
+  )
+  expect(f.registry.confirmedEventIdsForMembers([refs[0]!])).toEqual([])
+  expect(f.registry.confirmedEventIdsForMembers([refs[1]!])).toEqual([members[1]!.event.id])
+})
+
+it("分析教程只有指定已确认片段才可贡献，旧全篇角色和背景mentions不获许可", () => {
+  const f = fixture()
+  const report = save(f, "report")
+  const analysis = save(f, "analysis-explicit", identity({ kind: "analysis" }))
+  expect(
+    f.registry.confirmedEventIdsForMembers([
+      { inputSeq: analysis.input.seq, decisionId: analysis.decisionId, eventMentionIndex: 0 },
+    ]),
+  ).toEqual([report.eventId])
+  expect(
+    f.registry.confirmedEventIdsForMembers([
+      { inputSeq: analysis.input.seq, decisionId: analysis.decisionId },
+    ]),
+  ).toEqual([])
+  const background = save(f, "background", identity(), {
+    mentions: [{ identity: identity(), role: "mentions", isPrimary: false }],
+  })
+  expect(
+    f.registry.confirmedEventIdsForMembers([
+      { inputSeq: background.input.seq, decisionId: background.decisionId, eventMentionIndex: 0 },
+    ]),
+  ).toEqual([])
+})

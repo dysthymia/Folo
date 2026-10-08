@@ -1670,6 +1670,104 @@ describe("私人事件综述投影", () => {
     expect(generatedPage(store, { snapshotId: stories.snapshotId }).items).toEqual([])
   })
 
+  it("摘要从账号已读版本累计三次事实更新，旧引用迁移不制造第四次变化", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const id = createAggregateStory(store, [first, second], "事件")
+    processingApi(store, "POST", `/processing/stories/${id}/reader-state`, {
+      read: true,
+      revision: 1,
+    })
+    const initial = store.stories.currentSnapshot(id)!
+    store.stories.appendRevision(id, 1, {
+      ...initial,
+      facts: initial.facts.map((fact) => ({ ...fact, text: "修正后的事实" })),
+    })
+    const corrected = store.stories.currentSnapshot(id)!
+    const counter = {
+      id: "counter",
+      kind: "source_claim" as const,
+      text: "来源提出相反说法，仍待核实",
+      citationIds: [initial.citations[0]!.id],
+      dependsOnFactIds: [],
+    }
+    store.stories.appendRevision(id, 2, { ...corrected, facts: [...corrected.facts, counter] })
+    store.stories.appendRevision(id, 3, { ...corrected, facts: [counter] })
+    const final = store.stories.currentSnapshot(id)!
+    store.stories.appendRevision(id, 4, { ...final, body: "仅调整展示" })
+    const digest = store.reading.storyDigest(id)
+    expect(digest.status).toBe("ready")
+    if (digest.status !== "ready") throw new Error("digest missing")
+    expect(digest.readDelta).toMatchObject({
+      scope: "since_read",
+      fromRevision: 1,
+      toRevision: 5,
+      substantiveUpdateCount: 3,
+    })
+    expect(digest.readDelta.added).toEqual([
+      expect.objectContaining({
+        text: counter.text,
+        kind: "source_claim",
+        citations: [
+          expect.objectContaining({ quote: expect.any(String), sourceUrl: expect.any(String) }),
+        ],
+      }),
+    ])
+    expect(digest.readDelta.removed).toHaveLength(initial.facts.length)
+    expect(store.stories.readStatus(id, store.ownerId!).unread).toBe(true)
+    expect(store.reading.storyDigest(id, 1)).toMatchObject({
+      readDelta: {
+        scope: "up_to_date",
+        toRevision: 1,
+        currentRevision: 5,
+        substantiveUpdateCount: 0,
+      },
+    })
+  })
+
+  it("累计变化保留历史移除事实，但不会重新展示已撤回材料的引用", () => {
+    const store = fixture()
+    publishRelease(store)
+    const materials = ["one", "two", "three"].map((name) =>
+      publishInput(store, entry(name, "2026-01-01T00:00:00.000Z")),
+    )
+    const id = createAggregateStory(store, materials, "事件")
+    processingApi(store, "POST", `/processing/stories/${id}/reader-state`, {
+      read: true,
+      revision: 1,
+    })
+    const initial = store.stories.currentSnapshot(id)!
+    const sourceSpans = initial.sourceSpans.filter((span) => span.inputSeq !== materials[0]!.seq)
+    const citations = initial.citations.filter((citation) =>
+      sourceSpans.some((span) => span.id === citation.sourceSpanId),
+    )
+    store.stories.appendRevision(id, 1, {
+      ...initial,
+      members: initial.members.filter((member) => member.inputSeq !== materials[0]!.seq),
+      sourceSpans,
+      citations,
+      sentences: initial.sentences.filter((sentence) =>
+        citations.some((citation) => citation.sentenceId === sentence.id),
+      ),
+      facts: initial.facts.map((fact) => ({
+        ...fact,
+        text: "来源已修正事实",
+        citationIds: citations.map((citation) => citation.id),
+      })),
+    })
+    store.stories.withdrawMaterial(materials[0]!.seq, "旧材料撤回")
+    const digest = store.reading.storyDigest(id)
+    expect(digest.status).toBe("ready")
+    if (digest.status !== "ready") throw new Error("digest missing")
+    expect(digest.readDelta.revised[0]!.before.citations).toHaveLength(2)
+    expect(
+      digest.readDelta.revised[0]!.before.citations.map((citation) => citation.id),
+    ).not.toContain(initial.citations[0]!.id)
+    expect(digest.readDelta.revised[0]!.before.text).toBe("来源支持的事实")
+  })
+
   it("综述读态收藏独立，纯引用版本不制造未读，事实改变提示重要更新", () => {
     const store = fixture()
     publishRelease(store)
@@ -1724,4 +1822,69 @@ describe("私人事件综述投影", () => {
       collected: false,
     })
   })
+})
+
+it("周报分事件贡献不代表全篇覆盖，原文在时间线、智能阅读和去重输入中仍独立", () => {
+  const store = fixture()
+  publishRelease(store)
+  const original = {
+    ...entry("weekly", "2026-01-01T00:00:00Z"),
+    content: "Acme released Widget 2.0.\nBeta released Tool 3.0.",
+  }
+  store.saveEntry(original)
+  const first = store.automation.assign(store.automation.inputs().at(-1)!.seq)
+  const event = (quote: string, subject: string, object: string, version: string) => ({
+    kind: "event" as const,
+    subject: { value: subject, quote },
+    action: { value: "product_release" as const, quote },
+    object: { value: object, quote },
+    version: { value: version, quote },
+    round: null,
+    anchor: null,
+  })
+  const texts = original.content.split("\n")
+  const semantic = {
+    entryId: original.id,
+    title: original.title,
+    summary: "并列周报",
+    disposition: "keep" as const,
+    reason: "两个事件",
+    aggregation: true,
+    rewrite: true,
+    labels: [],
+    event: null,
+    facts: [],
+    eventMentions: [
+      {
+        identity: event(texts[0]!, "Acme", "Widget", "2.0"),
+        role: "reports" as const,
+        isPrimary: false,
+      },
+      {
+        identity: event(texts[1]!, "Beta", "Tool", "3.0"),
+        role: "reports" as const,
+        isPrimary: false,
+      },
+    ],
+  }
+  store.automation.complete(first, {
+    ...decision(original, first.seq),
+    semantic,
+    facts: texts.map((quote, eventMentionIndex) => ({
+      text: quote,
+      quote,
+      kind: "fact" as const,
+      eventMentionIndex,
+    })),
+  })
+  const second = publishInput(store, entry("other", "2026-01-02T00:00:00Z"))
+  const storyId = createAggregateStory(store, [first, second], "部分事实综述")
+  expect(store.reading.representedInputSeqs()).toEqual(new Set([second.seq]))
+  expect(rolesOf(store).some((role) => role.itemId === "weekly")).toBe(false)
+  const generated = store.reading.generatedPage(generatedFeedQuerySchema.parse({ mode: "smart" }))
+  expect(generated.items).toContainEqual(expect.objectContaining({ kind: "entry", id: "weekly" }))
+  expect(generated.items).toContainEqual(expect.objectContaining({ kind: "story", id: storyId }))
+  const page = store.reading.page({ snapshotId: store.reading.snapshot().id, view: "smart" })
+  expect(page.items).toContainEqual(expect.objectContaining({ kind: "entry", inputSeq: first.seq }))
+  expect(store.entry(original.sourceKey, original.id)?.read).toBe(false)
 })

@@ -5,6 +5,7 @@ import { cn } from "@follow/utils/utils"
 import { useTranslation } from "react-i18next"
 
 import { useProcessingEntryResult } from "~/modules/information/processing-entry-result-client"
+import { ProcessingSignals } from "~/modules/information/ProcessingSignals"
 
 const tagClass =
   "min-w-0 max-w-full whitespace-normal break-words rounded bg-fill-secondary px-1.5 py-0.5 text-[10px] font-normal leading-3 text-text-secondary"
@@ -31,13 +32,16 @@ export function EntrySemanticTags({
 }) {
   const result = useProcessingEntryResult(entryId)
   return (
-    <EntrySemanticTagList
-      tags={result?.semanticTags}
-      entities={result?.semanticEntities}
-      className={className}
-      compact={compact}
-      showAll={showAll}
-    />
+    <span className={cn("inline-flex min-w-0 max-w-full flex-wrap items-center gap-1", className)}>
+      {result && <ProcessingSignals signals={result} compact />}
+      <EntrySemanticTagList
+        tags={result?.semanticTags}
+        entities={result?.semanticEntities}
+        className={className}
+        compact={compact}
+        showAll={showAll}
+      />
+    </span>
   )
 }
 

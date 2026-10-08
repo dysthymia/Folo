@@ -4,8 +4,12 @@ import type { DatabaseSync } from "node:sqlite"
 import type { SourceEntry } from "./folo"
 import type { ProcessingDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
-import { compatibleEvents, traceableEvent } from "./processing-event"
-import { factsForPrimaryEvent } from "./processing-event-mentions"
+import { compatibleEvents, traceableEvent, traceableRelatedEvent } from "./processing-event"
+import {
+  factsForEvent,
+  factsForPrimaryEvent,
+  normalizeEventMentions,
+} from "./processing-event-mentions"
 import { unchangedStoryMaterial } from "./story-material"
 
 export type StoryStatus = "active" | "merged" | "split" | "repairing"
@@ -16,6 +20,8 @@ export type StoryCorrectionKind =
 export type StoryMemberReference = {
   inputSeq: number
   decisionId: string
+  /** 对应不可变决定中的事件片段；不指定时保留旧主事件兼容。 */
+  eventMentionIndex?: number
 }
 export type StorySourceSpan = {
   id: string
@@ -65,6 +71,20 @@ export type StoryRevision = StoryRevisionDraft & {
   substantiveContentFingerprint: string
   displayFingerprint: string
   createdAt: string
+}
+// 差异只投影不可变事实和引用，不为展示再次请求模型或修改阅读回执。
+export type StoryReadDeltaFact = StoryFact & { revision: number }
+export type StoryReadDelta = {
+  scope: "first_read" | "since_read" | "up_to_date" | "older_version" | "baseline_unavailable"
+  fromRevision: number | null
+  toRevision: number
+  currentRevision: number
+  fromSubstantiveRevision: number
+  toSubstantiveRevision: number
+  substantiveUpdateCount: number
+  added: StoryReadDeltaFact[]
+  removed: StoryReadDeltaFact[]
+  revised: Array<{ before: StoryReadDeltaFact; after: StoryReadDeltaFact }>
 }
 export type Story = {
   id: string
@@ -437,7 +457,15 @@ export class StoryStore {
       aggregationScopeVersion: target.revision.aggregationScopeVersion,
       appliedRuleSetVersion,
       instructionFingerprint,
-      members,
+      // 许可证和提及数组逐字未变时才沿用事件序号，修复发布指针不能丢掉片段边界。
+      members: members.map((member) => {
+        const previous = target.revision.members.find(
+          (old) => replacements.get(old.inputSeq)?.member.inputSeq === member.inputSeq,
+        )
+        return previous?.eventMentionIndex === undefined
+          ? member
+          : { ...member, eventMentionIndex: previous.eventMentionIndex }
+      }),
       sourceSpans: target.revision.sourceSpans.map((span) => {
         const replacement = replacements.get(span.inputSeq)
         return replacement
@@ -638,6 +666,89 @@ export class StoryStore {
       readSubstantiveRevision,
       unread: readSubstantiveRevision < story.currentSubstantiveRevision,
     }
+  }
+
+  readDelta(storyId: string, readerId: string, requestedRevision?: number): StoryReadDelta {
+    const story = this.requireStory(storyId)
+    const target = this.requireRevision(storyId, requestedRevision ?? story.currentRevision)
+    const { readSubstantiveRevision } = this.readStatus(storyId, readerId)
+    // 选择实际读过的最新实质版本；后来打开旧链接不能把比较起点倒退。
+    const row = this.db
+      .prepare(
+        `
+      SELECT revisions.* FROM story_read_receipts receipts
+      JOIN story_revisions revisions ON revisions.story_id=receipts.story_id AND revisions.revision=receipts.revision
+      WHERE receipts.story_id=? AND receipts.reader_id=? AND revisions.substantive_revision=?
+      ORDER BY revisions.revision DESC LIMIT 1
+    `,
+      )
+      .get(storyId, readerId, readSubstantiveRevision) as StoryRow | undefined
+    const baseline = row ? this.revisionFromRow(row) : null
+    const result: StoryReadDelta = {
+      scope: "first_read",
+      fromRevision: baseline?.revision ?? null,
+      toRevision: target.revision,
+      currentRevision: story.currentRevision,
+      fromSubstantiveRevision: readSubstantiveRevision,
+      toSubstantiveRevision: target.substantiveRevision,
+      substantiveUpdateCount: 0,
+      added: [],
+      removed: [],
+      revised: [],
+    }
+    if (!readSubstantiveRevision) {
+      // 有回执但对应历史版本丢失时，不能把它谎报为首次阅读。
+      if (
+        this.db
+          .prepare("SELECT 1 FROM story_read_receipts WHERE story_id=? AND reader_id=? LIMIT 1")
+          .get(storyId, readerId)
+      )
+        result.scope = "baseline_unavailable"
+      return result
+    }
+    if (!baseline || !Array.isArray(baseline.facts) || !Array.isArray(target.facts)) {
+      result.scope = "baseline_unavailable"
+      return result
+    }
+    if (target.revision < baseline.revision) {
+      result.scope = "older_version"
+      return result
+    }
+    if (target.substantiveRevision <= readSubstantiveRevision) {
+      result.scope = "up_to_date"
+      return result
+    }
+    result.scope = "since_read"
+    result.substantiveUpdateCount = Number(
+      this.db
+        .prepare(
+          `
+      SELECT COUNT(DISTINCT substantive_revision) AS count FROM story_revisions
+      WHERE story_id=? AND substantive_revision>? AND substantive_revision<=?
+    `,
+        )
+        .get(storyId, readSubstantiveRevision, target.substantiveRevision)?.count ?? 0,
+    )
+    // 使用与实质指纹完全相同的语义身份，换引用、事实编号和措辞展示不重复提示。
+    const keyed = (revision: StoryRevision) =>
+      new Map(
+        revision.facts.map((fact) => [
+          JSON.stringify(factSemantics(fact, revision.facts)),
+          { ...fact, revision: revision.revision },
+        ]),
+      )
+    const previous = keyed(baseline)
+    const current = keyed(target)
+    const removed = [...previous].filter(([key]) => !current.has(key)).map(([, fact]) => fact)
+    const added = [...current].filter(([key]) => !previous.has(key)).map(([, fact]) => fact)
+    for (const before of removed) {
+      // 仅相同事实身份可以标成修订；没有稳定对应关系时保留新增/移除，不猜测反证语义。
+      const after = added.find((fact) => fact.id === before.id)
+      if (after) result.revised.push({ before, after })
+      else result.removed.push(before)
+    }
+    result.added = added.filter((fact) => !result.revised.some(({ after }) => after === fact))
+    return result
   }
 
   removeMember(storyId: string, expectedCurrentRevision: number, inputSeq: number) {
@@ -881,10 +992,34 @@ export class StoryStore {
       if (!row) return null
       const decision = JSON.parse(String(row.decision)) as ProcessingDecision
       const original = sourceTextFromInputBody(String(row.input))
-      const event = original === null ? null : traceableEvent(decision.semantic?.event, original)
+      const mention =
+        member.eventMentionIndex === undefined
+          ? null
+          : normalizeEventMentions(decision.semantic ?? {})[member.eventMentionIndex]
+      const selected =
+        member.eventMentionIndex === undefined ? decision.semantic?.event : mention?.identity
+      const verified =
+        original === null
+          ? null
+          : member.eventMentionIndex === undefined
+            ? traceableEvent(selected, original)
+            : traceableRelatedEvent(selected, original)
+      const event = verified ? { ...verified, kind: "event" as const } : null
       if (!event || events.some((previous) => !compatibleEvents(previous, event))) return null
-      // 有背景提及的报道仍需至少一条可隔离主事实，不能把整篇周报身份当成许可证。
-      if (
+      if (member.eventMentionIndex !== undefined) {
+        if (
+          !mention ||
+          !["reports", "analysis_of", "tutorial_for"].includes(mention.role) ||
+          !original ||
+          !factsForEvent(
+            decision.facts,
+            decision.semantic ?? {},
+            original,
+            member.eventMentionIndex,
+          ).length
+        )
+          return null
+      } else if (
         (decision.semantic?.eventMentions?.length ?? 0) > 1 &&
         !factsForPrimaryEvent(decision.facts, decision.semantic!, original!).length
       )
@@ -1142,6 +1277,12 @@ export class StoryStore {
       input.members.length < 2
     )
       throw new StoryStoreError("invalid_story")
+    // 显式事件成员不能省略Story身份来绕过逐事实许可证核验。
+    if (
+      !input.eventIdentity &&
+      input.members.some((member) => member.eventMentionIndex !== undefined)
+    )
+      throw new StoryStoreError("invalid_reference")
     if (input.eventIdentity) {
       const verified = this.eventIdentityForMembers(input.members)
       if (!verified || !compatibleEvents(verified, input.eventIdentity))
@@ -1194,11 +1335,20 @@ export class StoryStore {
           const decision = JSON.parse(String(row.decision)) as ProcessingDecision
           const original = sourceTextFromInputBody(String(row.input))
           const facts =
-            (decision.semantic?.eventMentions?.length ?? 0) > 1
+            member.eventMentionIndex !== undefined
               ? original === null
                 ? []
-                : factsForPrimaryEvent(decision.facts, decision.semantic!, original)
-              : null
+                : factsForEvent(
+                    decision.facts,
+                    decision.semantic ?? {},
+                    original,
+                    member.eventMentionIndex,
+                  )
+              : (decision.semantic?.eventMentions?.length ?? 0) > 1
+                ? original === null
+                  ? []
+                  : factsForPrimaryEvent(decision.facts, decision.semantic!, original)
+                : null
           scopedQuotes.set(
             span.inputSeq,
             facts === null ? null : new Set(facts.map((fact) => normalizeQuote(fact.quote))),
@@ -1255,7 +1405,14 @@ export class StoryStore {
   }
 
   private validateMember(member: StoryMemberReference) {
-    if (!positiveInteger(member.inputSeq)) throw new StoryStoreError("invalid_reference")
+    if (
+      !positiveInteger(member.inputSeq) ||
+      (member.eventMentionIndex !== undefined &&
+        (!Number.isInteger(member.eventMentionIndex) ||
+          member.eventMentionIndex < 0 ||
+          member.eventMentionIndex > 3))
+    )
+      throw new StoryStoreError("invalid_reference")
     if (!this.memberIsCurrent(member)) throw new StoryStoreError("invalid_reference")
     const withdrawn = this.db
       .prepare("SELECT 1 FROM story_material_withdrawals WHERE input_seq=?")
@@ -1358,17 +1515,7 @@ export class StoryStore {
 
   private substantiveFingerprint(input: StoryRevisionDraft) {
     // 实质身份只比较事实及依赖语义；增加转载成员、引用、措辞或规则版本不制造未读。
-    const factById = new Map(input.facts.map((fact) => [fact.id, fact]))
-    const facts = input.facts.map((fact) => ({
-      kind: fact.kind,
-      text: normalized(fact.text),
-      dependencies: fact.dependsOnFactIds
-        .map((id) => {
-          const dependency = factById.get(id)
-          return dependency ? `${dependency.kind}:${normalized(dependency.text)}` : id
-        })
-        .sort(),
-    }))
+    const facts = input.facts.map((fact) => factSemantics(fact, input.facts))
     return fingerprint(
       [...new Map(facts.map((fact) => [JSON.stringify(fact), fact])).values()].sort((left, right) =>
         JSON.stringify(left).localeCompare(JSON.stringify(right)),
@@ -1630,4 +1777,19 @@ function positiveInteger(value: unknown): value is number {
 }
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+// 事实内容与依赖按语义归一，供读态指纹和累积变化共用，避免两套口径。
+function factSemantics(fact: StoryFact, facts: StoryFact[]) {
+  const factById = new Map(facts.map((item) => [item.id, item]))
+  return {
+    kind: fact.kind,
+    text: normalized(fact.text),
+    dependencies: fact.dependsOnFactIds
+      .map((id) => {
+        const dependency = factById.get(id)
+        return dependency ? `${dependency.kind}:${normalized(dependency.text)}` : id
+      })
+      .sort(),
+  }
 }

@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest"
 import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
 import { CodexRunError } from "./codex"
+import type { ProcessingDecision } from "./processing-decision"
 import type { EntryProcessingResult, ProcessingEngineStore } from "./processing-engine"
 import {
   resolvedPolicy,
@@ -285,7 +286,7 @@ describe("单篇处理 engine", () => {
       facts: [],
       disposition: "hide" as const,
     }
-    expect(resolvedStatus(instructions, output)).toBe("needs_context")
+    expect(resolvedStatus(instructions, output)).toBe("keep")
     expect(resolvedPolicy(instructions, output)).toEqual({
       standalone: "always",
       aggregation: "deny",
@@ -551,42 +552,49 @@ describe("单篇处理 engine", () => {
     expect(calls).toBe(1)
   })
 
-  it.each([true, false])("模型隐藏与综合独立：aggregation=%s", async (aggregation) => {
-    const fixture = storeFixture()
-    fixture.setMaterial("complete")
-    // 即使命中安全事件调度线索，也不能强迫模型保留或允许综合。
-    fixture.store.automation.inputs()[0]!.body.title = "协议遭攻击，请立即撤销授权"
-    const result = await runEntryProcessing({
-      store: fixture.store,
-      aiConfig: aiConfig as never,
-      runtimeDir: "/tmp",
-      sourceKeys: ["feed/1"],
-      historySince: "2026-09-01T00:00:00.000Z",
-      signal: new AbortController().signal,
-      execute: executeWith({
-        ...batchSelection("entry-1", "E000001"),
-        disposition: "hide",
-        event: {
-          kind: "event",
-          subject: { value: "OpenAI", evidenceId: "E000001" },
-          action: { value: "product_release", evidenceId: "E000001" },
-          object: { value: "GPT", evidenceId: "E000001" },
-          version: { value: "5.2", evidenceId: "E000001" },
-          round: null,
-          anchor: null,
+  it.each([true, false])(
+    "模型建议隐藏保持原文可读且综合资格独立：aggregation=%s",
+    async (aggregation) => {
+      const fixture = storeFixture()
+      fixture.setMaterial("complete")
+      // 即使命中安全事件调度线索，也不能强迫模型保留或允许综合。
+      fixture.store.automation.inputs()[0]!.body.title = "协议遭攻击，请立即撤销授权"
+      const result = await runEntryProcessing({
+        store: fixture.store,
+        aiConfig: aiConfig as never,
+        runtimeDir: "/tmp",
+        sourceKeys: ["feed/1"],
+        historySince: "2026-09-01T00:00:00.000Z",
+        signal: new AbortController().signal,
+        execute: executeWith({
+          ...batchSelection("entry-1", "E000001"),
+          disposition: "hide",
+          event: {
+            kind: "event",
+            subject: { value: "OpenAI", evidenceId: "E000001" },
+            action: { value: "product_release", evidenceId: "E000001" },
+            object: { value: "GPT", evidenceId: "E000001" },
+            version: { value: "5.2", evidenceId: "E000001" },
+            round: null,
+            anchor: null,
+          },
+          aggregation,
+        }),
+      })
+      // 模型不能自由隐藏：综合资格继续独立判断，建议隐藏时仍不改写原文。
+      expect(fixture.completed()).toMatchObject({
+        status: "keep",
+        policy: {
+          standalone: "always",
+          aggregation: aggregation ? "allow" : "deny",
+          rewrite: "deny",
         },
-        aggregation,
-      }),
-    })
-    // 同样隐藏：有效重复可参与综合，纯噪声不可；二者均不能改写成替代正文。
-    expect(fixture.completed()).toMatchObject({
-      status: "hide",
-      policy: { standalone: "never", aggregation: aggregation ? "allow" : "deny", rewrite: "deny" },
-    })
-    expect(result.metrics).toMatchObject({ modelCalls: 1, cacheHits: 0, modelFailures: 0 })
-  })
+      })
+      expect(result.metrics).toMatchObject({ modelCalls: 1, cacheHits: 0, modelFailures: 0 })
+    },
+  )
 
-  it("拟折叠综合但身份无法确认时保留独立入口，纯噪声仍隐藏", async () => {
+  it("模型拟隐藏但未获显式策略授权时保留独立入口", async () => {
     const fixture = storeFixture()
     fixture.setMaterial("complete")
     await runEntryProcessing({
@@ -1609,4 +1617,55 @@ it("推理强度冻结并隔离单篇缓存，同强度重算仍可复用", asyn
     store.close()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+it("旧缓存自由隐藏重新投影为可读，缓存越界证据被拒绝且不发布", async () => {
+  const fixture = storeFixture()
+  fixture.setMaterial("complete")
+  const options = {
+    store: fixture.store,
+    aiConfig: aiConfig as never,
+    runtimeDir: "/tmp",
+    sourceKeys: ["feed/1"],
+    historySince: "2026-09-01T00:00:00.000Z",
+    signal: new AbortController().signal,
+  }
+  await runEntryProcessing({
+    ...options,
+    execute: executeWith({
+      ...batchSelection("entry-1", "E000001"),
+      disposition: "hide",
+      aggregation: false,
+    }),
+  })
+  const old = fixture.completed() as ProcessingDecision
+  fixture.store.processingState.saveCache({
+    ...old,
+    status: "hide",
+    policy: { ...old.policy, standalone: "never" },
+  })
+  expect(
+    await runEntryProcessing({
+      ...options,
+      execute: async () => {
+        throw new Error("cache_must_not_pay")
+      },
+    }),
+  ).toMatchObject({ completed: 1, failures: [], metrics: { modelCalls: 0, cacheHits: 1 } })
+  expect(fixture.completed()).toMatchObject({ status: "keep", policy: { standalone: "always" } })
+  fixture.store.processingState.saveCache({
+    ...old,
+    facts: [{ text: "编造的引用", kind: "fact", quote: "原文不存在的内容。" }],
+  })
+  expect(
+    await runEntryProcessing({
+      ...options,
+      execute: async () => {
+        throw new Error("cache_must_not_pay")
+      },
+    }),
+  ).toMatchObject({
+    completed: 0,
+    failures: [{ inputSeq: input.seq, code: "invalid_model_reference" }],
+  })
 })

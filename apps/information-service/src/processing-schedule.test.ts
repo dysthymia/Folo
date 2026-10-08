@@ -234,3 +234,20 @@ describe("列表批次持久化与范围", () => {
     })
   })
 })
+
+it("新内容分类水位在普通计划编辑时保持，旧JSON缺失时不扩展分类", () => {
+  const { db, schedule } = fixture()
+  const first = configure(schedule)
+  expect(first.config?.classification?.mode).toBe("new_content")
+  const enabledAt = first.config!.classification!.enabledAt
+  const { classification: _classification, ...edited } = first.config!
+  expect(schedule.save({ ...edited, times: ["12:00"] }, 1).config?.classification?.enabledAt).toBe(
+    enabledAt,
+  )
+  // 旧计划没有该字段，读取不能暗中授权全历史标签回跑。
+  db.prepare("UPDATE processing_schedule SET body=? WHERE id=1").run(JSON.stringify(edited))
+  expect(schedule.snapshot().config?.classification).toBeUndefined()
+  expect(() =>
+    schedule.save({ ...edited, classification: { mode: "new_content", enabledAt: "invalid" } }, 2),
+  ).toThrow("invalid_schedule")
+})

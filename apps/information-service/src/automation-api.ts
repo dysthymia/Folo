@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import {
+  attentionSettingsSchema,
   compileInstructions,
   createRuleSchema,
   ruleSchema,
@@ -226,13 +227,21 @@ export function automationApi(store: Store, method: string, path: string, body: 
   }
   if (path === "/global-instructions/activate" && method === "PUT") {
     const input = z
-      .object({ expectedRevision: revision, markdown: z.string().max(60000), requestId: z.uuid() })
+      .object({
+        expectedRevision: revision,
+        markdown: z.string().max(60000),
+        requestId: z.uuid(),
+        // 关注配置是独立阅读设置；省略字段兼容旧的仅正文客户端。
+        attention: attentionSettingsSchema.optional(),
+      })
       .strict()
       .parse(body)
     const result = repository.activateGlobal(
       input.markdown,
       input.expectedRevision,
       input.requestId,
+      undefined,
+      input.attention,
     )
     return { ...result, schedule: store.schedule.snapshot() }
   }

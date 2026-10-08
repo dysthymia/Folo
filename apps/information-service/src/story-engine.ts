@@ -14,13 +14,20 @@ import type { CodexUsage } from "./codex"
 import { runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
 import type { PublishedDecision } from "./processing-decision"
-import { compatibleEvents, traceableEvent } from "./processing-event"
-import { factsForPrimaryEvent } from "./processing-event-mentions"
+import type { EventIdentity } from "./processing-event"
+import { compatibleEvents, traceableEvent, traceableRelatedEvent } from "./processing-event"
+import { factsForEvent, normalizeEventMentions } from "./processing-event-mentions"
 import type { EvidenceFragment } from "./processing-evidence"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
 import { independentStoryContributors, storyCandidatesWithDelta } from "./story-delta"
-import type { ActiveStory, StoryFactKind, StoryRevisionDraft, StoryStore } from "./story-store"
+import type {
+  ActiveStory,
+  StoryFactKind,
+  StoryMemberReference,
+  StoryRevisionDraft,
+  StoryStore,
+} from "./story-store"
 import { sourceSpanFragmentId } from "./story-store"
 
 const MAX_CANDIDATES_PER_BATCH = 20
@@ -75,7 +82,11 @@ type AggregateAction = Extract<
   RuleSet["rules"][number]["actions"][number],
   { type: "ai_aggregate" }
 >
-type Candidate = PublishedDecision & { text: string }
+type Candidate = PublishedDecision & {
+  text: string
+  eventMentionIndex?: number
+  selectedEvent?: EventIdentity
+}
 type PendingReason =
   | "aggregation_denied"
   | "rewrite_denied"
@@ -140,11 +151,9 @@ export type StoryAggregationOptions = {
   /** 已被去重代表覆盖的材料不再提供新综述来源。 */
   hiddenInputSeqs?: readonly number[]
   // 登记层的人工移出与拆分约束只用于同事件综述，主题综述继续使用原规则。
-  sameEventEligible?: (published: PublishedDecision) => boolean
+  sameEventEligible?: (published: PublishedDecision, eventMentionIndex?: number) => boolean
   // 稳定事件 ID 同时约束候选分组和旧 Story 召回，人工拆分不能靠相同原始身份重新归并。
-  registeredEventId?: (
-    members: readonly { inputSeq: number; decisionId: string }[],
-  ) => string | null
+  registeredEventId?: (members: readonly StoryMemberReference[]) => string | null
 }
 
 // 进程内缓存只避免同一材料与指令的重复付费；持久化 revision 仍由 StoryStore 的 CAS 和资格校验保护。
@@ -169,6 +178,9 @@ export async function runStoryAggregation(
     ...(options.alreadyClaimedInputSeqs ?? []),
     ...(options.hiddenInputSeqs ?? []),
   ])
+  const blocked = new Set(options.hiddenInputSeqs ?? [])
+  const claimedContributions = new Set<string>()
+  const claimedThemeInputs = new Set<number>()
   const actions = options.ruleSet.rules
     .filter((rule) => rule.enabled)
     .sort((left, right) => left.order - right.order)
@@ -191,11 +203,20 @@ export async function runStoryAggregation(
       rule.when,
       options.currentEntry,
       options.sameEventEligible,
+      blocked,
+      claimedContributions,
+      claimedThemeInputs,
     )
     result.pending.push(...pending)
     if (candidates.length === 0) continue
-    // 第一个命中聚合规则拥有主时间线归属；后续重叠规则不会依遍历顺序重复创建 Story。
-    for (const candidate of candidates) claimed.add(candidate.input.seq)
+    // 同事件只占有本片段事实，周报的另一事件仍可独立贡献；主题聚合保留整篇首规则归属。
+    for (const candidate of candidates) {
+      if (action.mode === "same_event") {
+        for (const key of contributionKeys(candidate)) claimedContributions.add(key)
+      } else claimedThemeInputs.add(candidate.input.seq)
+      // 部分事件许可不阻断后续另一事件，但后续主题规则不得重复占有同一篇材料。
+      claimed.add(candidate.input.seq)
+    }
     const scopeVersion = fingerprint({ mode: action.mode, scope: action.scope })
     if (
       candidates.length < 2 &&
@@ -243,14 +264,12 @@ export async function runStoryAggregation(
         if (
           options.registeredEventId &&
           options.registeredEventId(story.revision.members) !==
-            options.registeredEventId(
-              batch.map((item) => ({ inputSeq: item.input.seq, decisionId: item.decisionId })),
-            )
+            options.registeredEventId(batch.map(candidateMember))
         )
           return false
         const event = options.stories.eventIdentityForMembers(story.revision.members)
         const candidateEvent = traceableEvent(
-          batch[0]?.decision.semantic?.event,
+          batch[0]?.selectedEvent ?? batch[0]?.decision.semantic?.event,
           batch[0]?.text ?? "",
         )
         return !!event && !!candidateEvent && compatibleEvents(event, candidateEvent)
@@ -316,7 +335,7 @@ export async function runStoryAggregation(
         model: config.model,
         endpointFingerprint: aiEndpointFingerprint(config),
         reasoningEffort: reasoningFingerprint(aiReasoningEffort(config)),
-        promptVersion: 8,
+        promptVersion: 9,
         runtimeDir: options.runtimeDir,
         ruleId: rule.id,
         ruleVersion: rule.version,
@@ -339,7 +358,8 @@ export async function runStoryAggregation(
           summary: candidate.decision.summary,
           facts: candidate.decision.facts,
           policy: candidate.decision.policy,
-          event: candidate.decision.semantic?.event,
+          event: candidate.selectedEvent ?? candidate.decision.semantic?.event,
+          eventMentionIndex: candidate.eventMentionIndex,
         })),
       })
       let output = modelCache.get(cacheKey) ?? (await readStoryCache(options.runtimeDir, cacheKey))
@@ -476,12 +496,20 @@ function candidatesForAction(
   claimed: Set<number>,
   when: RuleSet["rules"][number]["when"],
   currentEntry?: ProcessingReadStateLookup,
-  sameEventEligible?: (published: PublishedDecision) => boolean,
+  sameEventEligible?: (published: PublishedDecision, eventMentionIndex?: number) => boolean,
+  blocked = new Set<number>(),
+  claimedContributions = new Set<string>(),
+  claimedThemeInputs = new Set<number>(),
 ) {
   const pending: PendingStory[] = []
   const grouped = new Map<string, Candidate[]>()
   for (const published of decisions) {
-    if (claimed.has(published.input.seq)) continue
+    if (
+      blocked.has(published.input.seq) ||
+      claimedThemeInputs.has(published.input.seq) ||
+      (action.mode !== "same_event" && claimed.has(published.input.seq))
+    )
+      continue
     // 已成功单篇不代表仍未读；综述资格必须查当前读态，保留既有结果但不重复付费。
     if (inputReadState(published.input, currentEntry) !== false) continue
     const reason = ineligibleReason(published)
@@ -507,36 +535,71 @@ function candidatesForAction(
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason: "needs_context" })
       continue
     }
-    const eventKind = published.decision.semantic?.event?.kind
-    if (action.mode === "same_event" && sameEventEligible && !sameEventEligible(published)) continue
-    // 已识别的观点/教程保持独立，并非身份待补；只有未知真实事件才进入待核对队列。
-    if (action.mode === "same_event" && (eventKind === "analysis" || eventKind === "tutorial"))
+    const semantic = published.decision.semantic
+    const mentions = action.mode === "same_event" ? normalizeEventMentions(semantic ?? {}) : []
+    const add = (candidate: Candidate) => {
+      const identity = JSON.stringify([
+        contentIdentity(published.input.body),
+        text,
+        candidate.selectedEvent ?? null,
+      ])
+      grouped.set(identity, [...(grouped.get(identity) ?? []), candidate])
+    }
+    if (action.mode !== "same_event") {
+      add({ ...published, text })
       continue
-    if (action.mode === "same_event" && !traceableEvent(published.decision.semantic?.event, text)) {
+    }
+    if (!mentions.length) {
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason: "event_identity_unknown" })
       continue
     }
-    // 主事件材料只携带隔离后的事实，后续贡献判断、共享草稿和模型引用均不能引用背景事件。
-    const facts =
-      action.mode === "same_event"
-        ? factsForPrimaryEvent(published.decision.facts, published.decision.semantic ?? {}, text)
-        : published.decision.facts
-    if (action.mode === "same_event" && !facts.length) continue
-    const scoped =
-      facts.length === published.decision.facts.length &&
-      (published.decision.semantic?.eventMentions?.length ?? 0) <= 1
-        ? published
-        : {
-            ...published,
-            decision: {
-              ...published.decision,
-              facts,
-              summary: facts.map((fact) => fact.text).join("\n"),
-            },
-          }
-    // 同一原文通过多个订阅上下文到达，只能贡献一次材料，不能冒充多个来源。
-    const identity = JSON.stringify([contentIdentity(published.input.body), text])
-    grouped.set(identity, [...(grouped.get(identity) ?? []), { ...scoped, text }])
+    for (const [mentionIndex, mention] of mentions.entries()) {
+      const explicit = semantic?.eventMentions !== undefined
+      const eventMentionIndex = explicit ? mentionIndex : undefined
+      if (!["reports", "analysis_of", "tutorial_for"].includes(mention.role)) continue
+      if (sameEventEligible && !sameEventEligible(published, eventMentionIndex)) continue
+      // 分析/教程必须有显式逐事实许可证；旧主事件兼容不能把整篇观点自动归入。
+      if (mention.identity.kind !== "event" && !explicit) continue
+      const verified = explicit
+        ? traceableRelatedEvent(mention.identity, text)
+        : traceableEvent(mention.identity, text)
+      if (!verified) {
+        if (mention.role === "reports")
+          pending.push({
+            ruleId,
+            inputSeqs: [published.input.seq],
+            reason: "event_identity_unknown",
+          })
+        continue
+      }
+      const selectedEvent = { ...verified, kind: "event" as const }
+      const scoped: Candidate = {
+        ...published,
+        text,
+        selectedEvent,
+        ...(explicit ? { eventMentionIndex: mentionIndex } : {}),
+        decision: {
+          ...published.decision,
+          facts: factsForEvent(published.decision.facts, semantic ?? {}, text, mentionIndex),
+        },
+      }
+      scoped.decision.facts = scoped.decision.facts.filter(
+        (fact) => !claimedContributions.has(contributionKey(scoped, fact)),
+      )
+      if (!scoped.decision.facts.length) continue
+      // 每批摘要也只由许可事实构成，不能把周报其他事件或独立结论透露给当前Story。
+      scoped.decision.summary = scoped.decision.facts.map((fact) => fact.text).join("\n")
+      if (explicit)
+        scoped.decision.title = [
+          selectedEvent.subject.value,
+          selectedEvent.object.value,
+          selectedEvent.version?.value,
+          selectedEvent.round?.value,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      add(scoped)
+    }
   }
   const candidates = [...grouped.values()]
     .map(
@@ -550,6 +613,27 @@ function candidatesForAction(
     )
     .sort((left, right) => left.input.seq - right.input.seq)
   return { candidates, pending }
+}
+
+function candidateMember(candidate: Candidate): StoryMemberReference {
+  return {
+    inputSeq: candidate.input.seq,
+    decisionId: candidate.decisionId,
+    ...(candidate.eventMentionIndex === undefined
+      ? {}
+      : { eventMentionIndex: candidate.eventMentionIndex }),
+  }
+}
+function contributionKey(candidate: Candidate, fact: Candidate["decision"]["facts"][number]) {
+  return JSON.stringify([
+    candidate.input.seq,
+    candidate.eventMentionIndex ?? "primary",
+    fact.text,
+    fact.quote,
+  ])
+}
+function contributionKeys(candidate: Candidate) {
+  return candidate.decision.facts.map((fact) => contributionKey(candidate, fact))
 }
 
 function ineligibleReason(published: PublishedDecision): PendingReason | null {
@@ -570,16 +654,18 @@ function sameEventCandidates(
 ) {
   const groups: Candidate[][] = []
   for (const candidate of candidates) {
-    const event = traceableEvent(candidate.decision.semantic?.event, candidate.text)!
+    const event =
+      candidate.selectedEvent ?? traceableEvent(candidate.decision.semantic?.event, candidate.text)!
     const group = groups.find((items) =>
       items.every(
         (item) =>
           (!registeredEventId ||
-            registeredEventId([
-              { inputSeq: candidate.input.seq, decisionId: candidate.decisionId },
-            ]) ===
-              registeredEventId([{ inputSeq: item.input.seq, decisionId: item.decisionId }])) &&
-          compatibleEvents(event, traceableEvent(item.decision.semantic?.event, item.text)!),
+            registeredEventId([candidateMember(candidate)]) ===
+              registeredEventId([candidateMember(item)])) &&
+          compatibleEvents(
+            event,
+            item.selectedEvent ?? traceableEvent(item.decision.semantic?.event, item.text)!,
+          ),
       ),
     )
     if (group) group.push(candidate)
@@ -764,7 +850,7 @@ function draftFromGroup(
   )
   for (const inputSeq of newMemberSeqs) {
     const candidate = candidateBySeq.get(inputSeq)!
-    memberByInput.set(inputSeq, { inputSeq, decisionId: candidate.decisionId })
+    memberByInput.set(inputSeq, candidateMember(candidate))
   }
   const memberSeqs = [...memberByInput.keys()].sort((left, right) => left - right)
   // 不信任模型指定existingStoryId或缓存分组：创建/更新在正式发布前再次核验所有成员。
@@ -772,7 +858,7 @@ function draftFromGroup(
   if (input.action.mode === "same_event") {
     const events = newMemberSeqs.map((seq) =>
       traceableEvent(
-        candidateBySeq.get(seq)!.decision.semantic?.event,
+        candidateBySeq.get(seq)!.selectedEvent ?? candidateBySeq.get(seq)!.decision.semantic?.event,
         candidateBySeq.get(seq)!.text,
       ),
     )
@@ -1021,10 +1107,14 @@ sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId�
     input.candidates.map((candidate) => ({
       inputSeq: candidate.input.seq,
       itemId: candidate.input.itemId,
-      title: candidate.input.body.title,
+      title:
+        candidate.eventMentionIndex === undefined
+          ? candidate.input.body.title
+          : candidate.decision.title,
       sourceRole: candidate.decision.sourceRole,
       summary: candidate.decision.summary,
-      eventIdentity: candidate.decision.semantic?.event,
+      eventIdentity: candidate.selectedEvent ?? candidate.decision.semantic?.event,
+      eventMentionIndex: candidate.eventMentionIndex,
       quoteOnly: candidate.decision.policy.rewrite !== "allow",
       // 已经由单篇处理验证过的事实和原文摘引，聚合模型不接收整篇正文以避免容量淘汰。
       // 编号稳定由 inputSeq 与 factIndex 组成；模型只能选择编号，不能回传自由摘引。

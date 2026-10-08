@@ -14,6 +14,7 @@ import { CompactListItemFrame } from "~/modules/entry-column/templates/compact-l
 
 import type { GeneratedReaderItem } from "./generated-feed-client"
 import { useNativeReader } from "./native-reader-context"
+import { ProcessingSignals } from "./ProcessingSignals"
 import { readerItemMatchesTarget } from "./reader-target"
 
 /** 同一列表沿用当前视图的布局偏好；私有 Story 永远不进入 entry store。 */
@@ -134,6 +135,9 @@ function StoryReaderRow({
             </span>
           </div>
           <div className="ml-4 flex shrink-0 items-center gap-1 text-xs text-text-secondary">
+            {item.attention && (
+              <ProcessingSignals signals={{ attention: item.attention }} compact />
+            )}
             {item.hasImportantUpdate && (
               <i
                 className="i-mgc-sparkles-cute-re text-accent"

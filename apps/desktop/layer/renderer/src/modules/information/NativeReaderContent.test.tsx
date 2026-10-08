@@ -15,13 +15,21 @@ const mocks = vi.hoisted(() => ({
     storyId: null as string | null,
     selected: undefined,
     entryState: null,
-    deepState: null as { link: { kind: "merged"; mergedInto: string } } | null,
+    deepState: null as {
+      link:
+        | { kind: "merged"; mergedInto: string }
+        | { kind: "split"; splitInto: string[]; independentInputSeqs: number[] }
+    } | null,
     syncOriginalState: vi.fn(),
+    mutationTarget: null as { kind: "story"; storyId: string; revision: number } | null,
+    selectedRead: false,
+    mutateItem: vi.fn(),
   },
   original: vi.fn(),
   sdkEntry: vi.fn(),
   entry: null as { read: boolean } | null,
   starred: false,
+  digestReady: null as ((revision: number) => void) | null,
 }))
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock("./native-reader-context", () => ({ useNativeReader: () => mocks.reader }))
@@ -53,9 +61,23 @@ vi.mock("~/providers/wrapped-element-provider", () => ({
   WrappedElementProvider: ({ children }: PropsWithChildren) => <div>{children}</div>,
 }))
 vi.mock("./StoryDigestPanel", () => ({
-  StoryDigestPanel: ({ storyId }: { storyId: string }) => <div data-story={storyId} />,
+  StoryDigestPanel: ({
+    storyId,
+    onReady,
+  }: {
+    storyId: string
+    onReady?: (revision: number) => void
+  }) => {
+    mocks.digestReady = onReady ?? null
+    return <div data-story={storyId} />
+  },
 }))
 vi.mock("./GeneratedEntryControls", () => ({ GeneratedEntryControls: () => null }))
+vi.mock("./StoryReadingActions", () => ({
+  StoryReadingActions: ({ resolution }: { resolution: { independentInputSeqs: number[] } }) => (
+    <div data-independent-materials={resolution.independentInputSeqs.length} />
+  ),
+}))
 vi.mock("./InformationIntegration", () => ({ InformationIntegration: () => null }))
 vi.mock("./ResearchPanel", () => ({ ResearchPanel: () => null }))
 const host = document.createElement("div")
@@ -65,10 +87,47 @@ afterEach(async () => {
   await act(() => root.render(null))
   vi.clearAllMocks()
   mocks.reader.deepState = null
+  mocks.reader.mutationTarget = null
+  mocks.digestReady = null
 })
 
 // 验证正文边界实际传递的身份；深链可读不能只靠第一页有匹配项。
 describe("统一原生正文", () => {
+  // 旧深链完全拆回原文后没有子综述，仍须显示纠错结果，不能留下空白正文。
+  it("完全拆回原文的旧链接交给已有纠错提示组件", async () => {
+    mocks.reader.target = { kind: "story", storyId: "split-story" }
+    mocks.reader.storyId = "split-story"
+    mocks.reader.deepState = {
+      link: { kind: "split", splitInto: [], independentInputSeqs: [11, 19, 23] },
+    }
+    await act(() =>
+      root.render(
+        <MemoryRouter>
+          <NativeReaderContent entryId="" />
+        </MemoryRouter>,
+      ),
+    )
+    expect(host.querySelector('[data-independent-materials="3"]')).not.toBeNull()
+    expect(mocks.digestReady).toBeNull()
+  })
+  it("成功正文回调只标记实际冻结版本，不能提前确认深链的较新版本", async () => {
+    mocks.reader.target = { kind: "story", storyId: "private-story" }
+    mocks.reader.storyId = "private-story"
+    mocks.reader.mutationTarget = { kind: "story", storyId: "private-story", revision: 5 }
+    await act(() =>
+      root.render(
+        <MemoryRouter>
+          <NativeReaderContent entryId="" />
+        </MemoryRouter>,
+      ),
+    )
+    expect(mocks.reader.mutateItem).not.toHaveBeenCalled()
+    await act(() => mocks.digestReady?.(3))
+    expect(mocks.reader.mutateItem).toHaveBeenCalledWith(
+      { kind: "story", storyId: "private-story", revision: 3 },
+      { read: true },
+    )
+  })
   // 合并后的综述继续沿用当前全部列表，阅读过程中不跳回独立事件页面。
   it("合并综述的后继链接保留当前普通时间线", async () => {
     mocks.reader.target = { kind: "story", storyId: "old-story" }

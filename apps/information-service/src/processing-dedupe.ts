@@ -75,7 +75,14 @@ export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate)
       .update(
         JSON.stringify([
           SEMANTIC_DUPLICATE_PROMPT_VERSION,
-          candidate.entries.map(({ recall: _recall, ...entry }) => entry),
+          candidate.entries.map(
+            ({
+              recall: _recall,
+              fullContent: _fullContent,
+              fullContentComplete: _fullComplete,
+              ...entry
+            }) => entry,
+          ),
         ]),
       )
       .digest("hex")
@@ -753,8 +760,26 @@ export function prepareSemanticDedupe(
         continue
       const evidence = dedupeContentEvidence(input.body.content)
       // 正文完整不代表整个条目完整，附件/引用未核验时保持待补，不允许语义隐藏。
-      evidence.contentComplete &&= !incompleteDedupeContext(input.body)
-      if (readReference && !evidence.contentComplete) continue
+      const contextComplete = !incompleteDedupeContext(input.body)
+      evidence.contentComplete &&= contextComplete
+      if (evidence.fullContentComplete) evidence.fullContentComplete &&= contextComplete
+      if (readReference && !evidence.contentComplete && !evidence.fullContentComplete) continue
+      const profile = decision?.semanticProfile
+      const aliasGroups =
+        profile?.contentVersion === input.contentVersion
+          ? (profile.entities ?? [])
+              .filter((entity) => entity.confidence >= 0.9)
+              .map((entity) => ({
+                name: entity.name,
+                aliases: entity.aliases,
+                kind: entity.kind,
+                parentName: entity.parentName,
+                quotes: entity.evidenceIds.flatMap((id) =>
+                  profile.evidence[id] ? [profile.evidence[id]!] : [],
+                ),
+              }))
+          : []
+      const recall = options.store.eventRecall?.(input, decision)
       participants.push({
         entry: {
           ...evidence,
@@ -766,8 +791,15 @@ export function prepareSemanticDedupe(
           sourceTitle: source.title,
           title: input.body.title,
           urlHost: dedupeUrlHost(input.body.url),
-          ...(options.store.eventRecall
-            ? { recall: options.store.eventRecall(input, decision) }
+          ...(recall || aliasGroups.length
+            ? {
+                recall: {
+                  eventIds: [],
+                  identities: [],
+                  ...recall,
+                  ...(aliasGroups.length ? { aliasGroups } : {}),
+                },
+              }
             : {}),
         },
         input,
@@ -798,7 +830,7 @@ export function prepareSemanticDedupe(
       .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
     const recallWatermark = recallRows.length
       ? createHash("sha256")
-          .update(JSON.stringify(["event-recall-v1", recallRows]))
+          .update(JSON.stringify(["event-recall-v2", recallRows]))
           .digest("hex")
       : "text-v1"
     const targetItemIds = new Set(

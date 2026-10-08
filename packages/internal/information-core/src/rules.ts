@@ -1,6 +1,7 @@
 import { RE2JS } from "re2js"
 import { z } from "zod"
 
+import { attentionSettingsSchema } from "./attention"
 import type { SemanticTagId, TagAssessment } from "./semantic-tags"
 import {
   semanticTagDefinition,
@@ -119,6 +120,14 @@ export const presetRefSchema = z
   .object({ id: identifier, version: z.number().int().positive() })
   .strict()
 export const actionSchema = z.discriminatedUnion("type", [
+  // 重点关注独立于独立展示、去重和模型动作，原因由用户明确配置。
+  z
+    .object({
+      type: z.literal("attention"),
+      level: z.enum(["important", "urgent"]),
+      reason: z.string().trim().min(1).max(2000),
+    })
+    .strict(),
   // 标签分类只申请客观判断，不改变阅读可见性或自动创建综述。
   z
     .object({
@@ -209,7 +218,8 @@ export const ruleSchema = z
               ? Object.keys(action).filter((key) => key !== "type")
               : action.type === "ai_aggregate" ||
                   action.type === "ai_dedupe" ||
-                  action.type === "ai_classify"
+                  action.type === "ai_classify" ||
+                  action.type === "attention"
                 ? [action.type]
                 : []
       // 空的显式动作属于未完成编辑，不能发布为貌似有效的规则。
@@ -243,6 +253,7 @@ export const ruleSetSchema = z
     global: z
       .object({
         markdown: z.string().max(60000),
+        attention: attentionSettingsSchema.optional(),
         version: z.number().int().positive(),
         preset: presetRefSchema.optional(),
       })

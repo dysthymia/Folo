@@ -308,6 +308,33 @@ describe("共享原生阅读查询与异步归属", () => {
     })
   }
 
+  it("点击Story仅导航，正文取得累积比较基线前不提前写已读回执", async () => {
+    const story: Extract<GeneratedReaderItem, { kind: "story" }> = {
+      kind: "story",
+      origin: "generated",
+      id: "deep",
+      storyId: "deep",
+      generatedFeedId: "generated:events",
+      revision: 4,
+      title: "更新后的综述",
+      summary: "正文",
+      publishedAt: "2026-10-03T00:00:00Z",
+      read: false,
+      collected: false,
+      materialCount: 2,
+      topics: [],
+      sourceKeys: ["feed/1"],
+      hasImportantUpdate: true,
+      substantiveRevision: 4,
+      updatedAt: "2026-10-03T00:00:00Z",
+    }
+    mocks.page.mockResolvedValue(page([story]))
+    await render()
+    await act(async () => reader.selectItem(story))
+    expect(mocks.mutate).not.toHaveBeenCalled()
+    expect(location.search).toContain("story=deep")
+  })
+
   it("关闭 AI 不发投影请求，重新开启复用分页与滚动会话", async () => {
     await render(false)
     expect(mocks.page).not.toHaveBeenCalled()

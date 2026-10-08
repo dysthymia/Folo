@@ -15,7 +15,10 @@ import type {
 } from "./processing-decision"
 import { applyEntryDisplay } from "./processing-decision"
 import { entitiesHaveEvidence } from "./processing-semantic-entities"
-import { semanticDefinitionsForIds } from "./processing-semantic-prompt"
+import {
+  protectWholeContentAssessments,
+  semanticDefinitionsForIds,
+} from "./processing-semantic-prompt"
 
 export function semanticDigest(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")
@@ -23,9 +26,14 @@ export function semanticDigest(value: unknown) {
 
 // 模型只消费真正影响内容理解的指令，展示长度和隐藏动作由发布时重新求值。
 export function semanticAnalysisInstructions(instructions: ReturnType<typeof compileInstructions>) {
-  if (!instructions.semanticTagIds.length) return instructions
-  return {
+  // 关注对象和注意力等级属于阅读投影，永远不进入模型指令与客观分析身份。
+  const objective = {
     ...instructions,
+    global: { version: 1, markdown: instructions.global.markdown },
+  }
+  if (!instructions.semanticTagIds.length) return objective
+  return {
+    ...objective,
     display: instructions.display.language ? { language: instructions.display.language } : {},
     policy: {},
     blocksFinalPresentation: false,
@@ -48,6 +56,8 @@ export function createSemanticProfile(input: {
       : semanticEntitiesSchema.parse(input.output.entities)
   if (entities && !entitiesHaveEvidence(entities, (id) => input.evidence[id] ?? null))
     throw new Error("invalid_semantic_entity_evidence")
+  if (input.output.substantiveContribution?.evidenceIds.some((id) => !input.evidence[id]))
+    throw new Error("invalid_contribution_evidence")
   // 请求级校验已绑定定义/证据；不可变档案保存原文片段，后续缓存和纠错仍可追溯。
   return {
     schemaVersion: 2,
@@ -60,8 +70,14 @@ export function createSemanticProfile(input: {
     assessments,
     ...(entities === undefined ? {} : { entityVersion: SEMANTIC_ENTITY_VERSION, entities }),
     evidence: input.evidence,
+    materialCoverage: input.coverage ?? input.output.materialCoverage ?? "complete",
+    semanticAssessmentCoverage: assessments.some((item) => item.state === "unknown")
+      ? "partial"
+      : "complete",
+    substantiveContribution: input.output.substantiveContribution,
     coverage:
-      input.coverage === "partial" || assessments.some((item) => item.state === "unknown")
+      (input.coverage ?? input.output.materialCoverage) === "partial" ||
+      assessments.some((item) => item.state === "unknown")
         ? "partial"
         : "complete",
   }
@@ -75,7 +91,11 @@ export function projectSemanticDecision(
   assessments = decision.semanticProfile?.assessments ?? decision.semantic?.tagAssessments,
 ): ProcessingDecision {
   if (!decision.semantic || !assessments?.length) return decision
-  const effectiveContext = { ...context, entry_tag: assessments }
+  const protectedAssessments = protectWholeContentAssessments(
+    assessments,
+    decision.semanticProfile?.substantiveContribution ?? decision.semantic.substantiveContribution,
+  )
+  const effectiveContext = { ...context, entry_tag: protectedAssessments }
   const instructions = compileInstructions(config, effectiveContext)
   const output = decision.semantic
   const pending = new Set(instructions.pendingPolicyFields)
@@ -98,7 +118,7 @@ export function projectSemanticDecision(
           (output.rewrite ? ("allow" as const) : ("deny" as const))),
   }
   const status =
-    output.disposition === "needs_context" || pending.has("standalone")
+    output.disposition === "needs_context"
       ? ("needs_context" as const)
       : policy.standalone === "always"
         ? ("keep" as const)
@@ -115,10 +135,18 @@ export function projectSemanticDecision(
     context: effectiveContext,
     status,
     policy,
+    pendingPolicyFields: [...pending],
     summary: display.summary,
-    reason: winner
-      ? `命中规则「${winner.name}」${reasons.length ? `：${reasons.join("；")}` : ""}`
-      : output.reason,
+    reason: pending.size
+      ? `阅读策略待定（${[...pending].join("、")}），原文保持可读：${
+          protectedAssessments
+            .filter((item) => item.state === "unknown" || (item.confidence ?? 0) < 0.8)
+            .map((item) => item.reason)
+            .join("；") || "标签置信度不足或条件尚未确认。"
+        }`
+      : winner
+        ? `命中规则「${winner.name}」${reasons.length ? `：${reasons.join("；")}` : ""}`
+        : output.reason,
     labels: [
       ...new Set([
         ...output.labels,
@@ -133,6 +161,7 @@ export function projectSemanticDecision(
 export function effectiveSemanticAssessments(
   original: readonly TagAssessment[],
   changes: readonly { tagId: string; state: "present" | "absent" }[],
+  contribution?: EntryModelOutput["substantiveContribution"],
 ): TagAssessment[] {
   // 定义变更后旧判断保留在原始档案中，但不能继续参与现行筛选或展示。
   const result = new Map(
@@ -163,7 +192,8 @@ export function effectiveSemanticAssessments(
       evidenceIds: [],
     })
   }
-  return [...result.values()]
+  // 有效展示/索引与阅读策略共用冲突保护，原始模型档案仍保持不可变。
+  return protectWholeContentAssessments([...result.values()], contribution)
 }
 
 // 仅新加载且获准处理的未读条目补齐缺失字段；空实体数组也是已完成提取。

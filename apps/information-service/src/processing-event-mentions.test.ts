@@ -7,11 +7,13 @@ import { materializeEvent, traceableEvent, traceableRelatedEvent } from "./proce
 import {
   eventMentionEvidenceIds,
   eventMentionsSelectionForCatalog,
+  factsForEvent,
   factsForPrimaryEvent,
   materializeEventMentions,
   normalizeEventMentions,
   remapEventMentionEvidence,
   validateEventMentionRelationship,
+  validateFactEventAssignments,
 } from "./processing-event-mentions"
 import { createEvidenceCatalog } from "./processing-evidence"
 
@@ -48,6 +50,16 @@ const assessment = {
   evidenceIds: ["E000001"],
 }
 
+const semanticFields = {
+  materialCoverage: "complete",
+  substantiveContribution: {
+    state: "unknown",
+    confidence: null,
+    reason: "独立贡献待确认。",
+    evidenceIds: [],
+  },
+}
+
 function v5() {
   return createEntryModelSelectionSchema("entry", catalog, ["topic:ai"])
 }
@@ -55,13 +67,16 @@ function v5() {
 describe("可追溯的少量事件提及", () => {
   it("legacy v4保留原请求，新v5必须显式提供数组且空数组合法", () => {
     expect(createEntryModelSelectionSchema("entry", catalog).safeParse(base).success).toBe(true)
-    expect(v5().safeParse({ ...base, entities: [], tagAssessments: [assessment] }).success).toBe(
-      false,
-    )
+    expect(
+      v5().safeParse({ ...base, ...semanticFields, entities: [], tagAssessments: [assessment] })
+        .success,
+    ).toBe(false)
     expect(
       v5().safeParse({
         ...base,
         entities: [],
+        ...semanticFields,
+        ...semanticFields,
         tagAssessments: [assessment],
         eventMentions: [mention],
       }).success,
@@ -71,6 +86,8 @@ describe("可追溯的少量事件提及", () => {
         ...base,
         entities: [],
         event: null,
+        ...semanticFields,
+        ...semanticFields,
         tagAssessments: [assessment],
         eventMentions: [],
       }).success,
@@ -79,7 +96,13 @@ describe("可追溯的少量事件提及", () => {
     expect(json.required).toContain("eventMentions")
   })
   it("主事件唯一且与legacy逐字段一致，多事件可没有主事件", () => {
-    const input = { ...base, entities: [], tagAssessments: [assessment], eventMentions: [mention] }
+    const input = {
+      ...base,
+      ...semanticFields,
+      entities: [],
+      tagAssessments: [assessment],
+      eventMentions: [mention],
+    }
     for (const eventMentions of [
       [mention, mention],
       [{ ...mention, isPrimary: false }],
@@ -147,6 +170,7 @@ describe("可追溯的少量事件提及", () => {
       ...base,
       event: candidate,
       entities: [],
+      ...semanticFields,
       tagAssessments: [assessment],
       eventMentions: [{ ...mention, identity: candidate }],
     }
@@ -294,4 +318,105 @@ it("融资金额排版不妨碍连续证据验证，数字及拉丁名称边界�
       brokenQuote,
     ),
   ).toBeNull()
+})
+
+describe("并列多事件的显式逐事实归属", () => {
+  const secondText = "Beta 发布 Tool 3.0。"
+  const text = `${original}\n${secondText}`
+  const evidence = createEvidenceCatalog(text)
+  const first = materializeEvent(evidence, identity)!
+  const secondSelection = {
+    ...identity,
+    subject: { value: "Beta", evidenceId: "E000002" },
+    action: { value: "product_release" as const, evidenceId: "E000002" },
+    object: { value: "Tool", evidenceId: "E000002" },
+    version: { value: "3.0", evidenceId: "E000002" },
+  }
+  const second = materializeEvent(evidence, secondSelection)!
+  const semantic = {
+    event: null,
+    eventMentions: [
+      { identity: first, role: "reports" as const, isPrimary: false },
+      { identity: second, role: "reports" as const, isPrimary: false },
+    ],
+  }
+  const facts = [
+    {
+      text: "GPT发布",
+      kind: "fact" as const,
+      quote: evidence.resolve("E000001")!,
+      eventMentionIndex: 0,
+    },
+    { text: "Tool发布", kind: "fact" as const, quote: secondText, eventMentionIndex: 1 },
+  ]
+  it("没有主事件的周报也能分离两组事实，null与旧未声明事实不会偷偷分给其他事件", () => {
+    expect(factsForEvent(facts, semantic, text, 0)).toEqual([facts[0]])
+    expect(factsForEvent(facts, semantic, text, 1)).toEqual([facts[1]])
+    expect(factsForPrimaryEvent(facts, semantic, text)).toEqual([])
+    expect(factsForEvent([{ ...facts[0]!, eventMentionIndex: null }], semantic, text, 0)).toEqual(
+      [],
+    )
+    const { eventMentionIndex: _index, ...legacy } = facts[0]!
+    expect(factsForEvent([legacy], semantic, text, 0)).toEqual([])
+    expect(factsForEvent(facts, semantic, `${text}\n${original}`, 0)).toEqual([])
+  })
+  it("wire绑定事实目录和提及数组，同片段混写/错序/越界拒绝，落盘保留序号", () => {
+    const mentions = [
+      { identity, role: "reports" as const, isPrimary: false },
+      { identity: secondSelection, role: "reports" as const, isPrimary: false },
+    ]
+    const selectedFacts = [
+      { text: "GPT发布", kind: "fact", evidenceId: "E000001", eventMentionIndex: 0 },
+      { text: "Tool发布", kind: "fact", evidenceId: "E000002", eventMentionIndex: 1 },
+    ]
+    const selected = {
+      ...base,
+      ...semanticFields,
+      event: null,
+      eventMentions: mentions,
+      tagAssessments: [assessment],
+      entities: [],
+      facts: selectedFacts,
+    }
+    const schema = createEntryModelSelectionSchema("entry", evidence, ["topic:ai"])
+    expect(schema.safeParse(selected).success).toBe(true)
+    expect(
+      schema.safeParse({ ...selected, facts: [{ ...selectedFacts[0], eventMentionIndex: 1 }] })
+        .success,
+    ).toBe(false)
+    expect(
+      schema.safeParse({ ...selected, facts: [{ ...selectedFacts[0], eventMentionIndex: 2 }] })
+        .success,
+    ).toBe(false)
+    expect(schema.safeParse({ ...selected, eventMentions: [...mentions].reverse() }).success).toBe(
+      false,
+    )
+    expect(validateFactEventAssignments({ ...semantic, facts })).toBe(true)
+    expect(
+      entryModelOutputSchema.safeParse({ ...base, ...semanticFields, ...semantic, facts }).success,
+    ).toBe(true)
+    expect(
+      entryModelOutputSchema.safeParse({
+        ...base,
+        ...semanticFields,
+        ...semantic,
+        facts: [{ ...facts[0], eventMentionIndex: 1 }],
+      }).success,
+    ).toBe(false)
+  })
+  it("只有经明确关联的分析和教程事实可供后续已确认会员使用，背景提及不自动获资格", () => {
+    const related = {
+      ...semantic,
+      eventMentions: [
+        {
+          ...semantic.eventMentions[0]!,
+          role: "analysis_of" as const,
+          identity: { ...first, kind: "analysis" as const },
+        },
+        semantic.eventMentions[1]!,
+      ],
+    }
+    expect(factsForEvent(facts, related, text, 0)).toEqual([facts[0]])
+    expect(factsForPrimaryEvent(facts, related, text)).toEqual([])
+  })
 })

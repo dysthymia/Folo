@@ -279,10 +279,105 @@ describe("Story 持久化与版本", () => {
     }
     const renamed = store.appendRevision(initial.storyId, 2, changed)
     expect(renamed.substantiveRevision).toBe(1)
+    expect(store.readDelta(initial.storyId, "reader")).toMatchObject({
+      scope: "up_to_date",
+      added: [],
+      removed: [],
+      revised: [],
+    })
     changed.facts[0]!.text = "截止日期提前"
     const important = store.appendRevision(initial.storyId, 3, changed)
     expect(important.substantiveRevision).toBe(4)
     expect(store.readStatus(initial.storyId, "reader").unread).toBe(true)
+  })
+
+  it("累计对照三次实质更新，保留修订、移除和来源反证，引用迁移不重复提示", () => {
+    const { store } = fixture()
+    const initial = store.create(draft([1, 2]))
+    store.markRead(initial.storyId, "reader", 1)
+    const correction = draft([1, 2])
+    correction.facts[0]!.text = "事实 1 已更正"
+    store.appendRevision(initial.storyId, 1, correction)
+    const counter: StoryRevisionDraft = structuredClone(correction)
+    counter.facts.push({
+      id: "counter",
+      kind: "source_claim",
+      text: "来源提出相反说法，尚未证实",
+      citationIds: ["citation-2"],
+      dependsOnFactIds: [],
+    })
+    store.appendRevision(initial.storyId, 2, counter)
+    const withdrawn = structuredClone(counter)
+    withdrawn.facts = withdrawn.facts.filter((fact) => fact.id !== "fact-2")
+    store.appendRevision(initial.storyId, 3, withdrawn)
+    const displayOnly = structuredClone(withdrawn)
+    displayOnly.body = "更新引用显示"
+    displayOnly.facts = displayOnly.facts.map((fact) => ({ ...fact, citationIds: ["citation-2"] }))
+    store.appendRevision(initial.storyId, 4, displayOnly)
+    const delta = store.readDelta(initial.storyId, "reader")
+    expect(delta).toMatchObject({
+      scope: "since_read",
+      fromRevision: 1,
+      toRevision: 5,
+      substantiveUpdateCount: 3,
+    })
+    expect(delta.added.map((fact) => fact.text)).toEqual(["来源提出相反说法，尚未证实"])
+    expect(delta.removed.map((fact) => fact.text)).toEqual(["事实 2"])
+    // 推断的依赖文字也已改变，不能只显示最后一次删除。
+    expect(delta.revised.map(({ before }) => before.id)).toEqual(["fact-1", "inference"])
+    expect(store.readStatus(initial.storyId, "reader").readSubstantiveRevision).toBe(1)
+    store.markRead(initial.storyId, "reader", 5)
+    expect(store.readDelta(initial.storyId, "reader")).toMatchObject({
+      scope: "up_to_date",
+      added: [],
+      removed: [],
+      revised: [],
+    })
+    store.markRead(initial.storyId, "reader", 1)
+    expect(store.readDelta(initial.storyId, "reader", 1)).toMatchObject({
+      scope: "older_version",
+      fromRevision: 5,
+      toRevision: 1,
+    })
+  })
+
+  it("首次阅读与丢失历史基线分别提示，不伪造新增事实", () => {
+    const { store, db } = fixture()
+    const initial = store.create(draft([1, 2]))
+    expect(store.readDelta(initial.storyId, "reader")).toMatchObject({
+      scope: "first_read",
+      fromRevision: null,
+      added: [],
+    })
+    store.markRead(initial.storyId, "reader", 1)
+    const next = draft([1, 2])
+    next.facts[0]!.text = "新事实"
+    store.appendRevision(initial.storyId, 1, next)
+    db.prepare("DELETE FROM story_revisions WHERE story_id=? AND revision=1").run(initial.storyId)
+    expect(store.readDelta(initial.storyId, "reader")).toMatchObject({
+      scope: "baseline_unavailable",
+      added: [],
+      removed: [],
+      revised: [],
+    })
+  })
+
+  it("事实编号迁移和临时变化回滚不伪造当前新增", () => {
+    const { store } = fixture()
+    const initial = store.create(draft([1, 2]))
+    store.markRead(initial.storyId, "reader", 1)
+    const next = draft([1, 2])
+    next.facts[0]!.text = "临时新说法"
+    store.appendRevision(initial.storyId, 1, next)
+    store.appendRevision(initial.storyId, 2, draft([1, 2]))
+    const delta = store.readDelta(initial.storyId, "reader")
+    expect(delta).toMatchObject({
+      scope: "since_read",
+      substantiveUpdateCount: 2,
+      added: [],
+      removed: [],
+      revised: [],
+    })
   })
 
   it("合并保留 ID、历史链接和独立阅读回执，且新 revision 覆盖双方材料", () => {

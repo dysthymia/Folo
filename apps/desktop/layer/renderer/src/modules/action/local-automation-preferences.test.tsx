@@ -144,6 +144,7 @@ describe("公共要求草稿独立启用", () => {
       2,
       expect.any(String),
       expect.any(AbortSignal),
+      undefined,
     )
     expect(onSaved).toHaveBeenCalledWith(result)
     expect(onSaved.mock.calls[0]?.[0]).toBe(result)
@@ -191,6 +192,100 @@ describe("公共要求草稿独立启用", () => {
       expect.any(AbortSignal),
     )
     expect(checkbox.checked).toBe(false)
+  })
+
+  it("原生公共设置复用关注清单，关注修改单独启用且保护草稿", async () => {
+    const attention = {
+      enabled: true,
+      watchlist: [{ id: "watch-1", name: "Folo", aliases: ["Follow"] }],
+      nearDeadlineHours: 48,
+    }
+    const editor = editorFor("已生效要求")
+    editor.config.global.attention = attention
+    const effective = effectiveFor("已生效要求")
+    effective.config!.global.attention = attention
+    const changedAttention = { ...attention, enabled: false }
+    const result: RuleActivation = {
+      revision: 3,
+      config: {
+        ...editor.config,
+        global: { ...editor.config.global, attention: changedAttention },
+      },
+      effectiveConfig: {
+        ...effective.config!,
+        global: { ...effective.config!.global, attention: changedAttention },
+      },
+      release: {
+        version: 2,
+        draftRevision: 3,
+        activationSeq: 10,
+        scope: { mode: "future" },
+        targetInputIds: [],
+        createdAt: "2026-10-03T10:00:00Z",
+      },
+      schedule: { revision: 0, config: null },
+    }
+    mocks.client.activateGlobal.mockResolvedValueOnce(result)
+    await render(editor, effective)
+    expect(container.textContent).toContain("processing.attention.title")
+    expect(container.querySelector<HTMLInputElement>('input[maxlength="100"]')?.value).toBe("Folo")
+    expect(saveButton().disabled).toBe(true)
+    const enabled = [...container.querySelectorAll("label")]
+      .find((item) => item.textContent === "processing.attention.enabled")!
+      .querySelector("input")!
+    await act(async () => enabled.click())
+    expect(onDirty).toHaveBeenCalledWith(true)
+    await act(async () => saveButton().click())
+    expect(mocks.client.activateGlobal).toHaveBeenCalledWith(
+      "已生效要求",
+      2,
+      expect.any(String),
+      expect.any(AbortSignal),
+      changedAttention,
+    )
+    expect(saveButton().disabled).toBe(true)
+    expect(mocks.client.saveSchedule).not.toHaveBeenCalled()
+    expect(mocks.client.publish).not.toHaveBeenCalled()
+  })
+
+  it("分类模式切换保留原计划范围、启用状态、时点与首次启用水位", async () => {
+    const config = {
+      scope: { mode: "fixed" as const, sourceKeys: ["feed/1"] },
+      sourceKeys: ["feed/1"],
+      historySince: "2026-10-01T00:00:00Z",
+      timeZone: "Asia/Shanghai",
+      enabled: false,
+      times: ["08:00"],
+      pollIntervalMinutes: 15,
+      readyBy: { leadMinutes: 30 },
+      runOnListLoad: false,
+      classification: { mode: "new_content" as const, enabledAt: "2026-10-08T01:02:03Z" },
+    }
+    mocks.client.loadSchedule.mockResolvedValueOnce({ revision: 2, config })
+    mocks.client.saveSchedule.mockResolvedValueOnce({
+      revision: 3,
+      config: { ...config, classification: { ...config.classification, mode: "list_loaded" } },
+    })
+    await render(editorFor("已保存要求"), effectiveFor("已保存要求"))
+    const select = container.querySelector("select")!
+    expect(select.value).toBe("new_content")
+    await act(async () => {
+      select.value = "list_loaded"
+      select.dispatchEvent(new Event("change", { bubbles: true }))
+    })
+    expect(onDirty).toHaveBeenCalledWith(true)
+    const save = [...container.querySelectorAll("button")].find(
+      (item) => item.textContent === "automation.editor.save_schedule",
+    )!
+    await act(async () => save.click())
+    expect(mocks.client.saveSchedule).toHaveBeenCalledWith(
+      { ...config, classification: { ...config.classification, mode: "list_loaded" } },
+      2,
+      expect.any(AbortSignal),
+    )
+    expect(select.value).toBe("list_loaded")
+    expect(save.disabled).toBe(true)
+    expect(mocks.client.activateGlobal).not.toHaveBeenCalled()
   })
 
   it("草稿等于实际生效正文时无需重复启用，未发布时仍可启用", async () => {

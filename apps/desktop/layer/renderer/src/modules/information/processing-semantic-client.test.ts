@@ -32,7 +32,7 @@ it("读取服务端标签目录，不将定义降为界面文案", async () => {
     semanticTagCatalogSchema,
     signal,
   )
-  expect(catalog.definitions).toHaveLength(22)
+  expect(catalog.definitions).toHaveLength(30)
   expect(catalog.definitions.find((item) => item.id === "topic:product")?.definitionVersion).toBe(2)
 })
 

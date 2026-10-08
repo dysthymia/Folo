@@ -34,6 +34,8 @@ const observation = (
   ],
   substantiveContribution: {
     state: substantive,
+    confidence: substantive === "unknown" ? null : 0.99,
+    reason: "独立贡献判断。",
     evidenceIds: substantive === "present" ? ["E000002"] : [],
   },
 })

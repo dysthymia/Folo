@@ -47,6 +47,13 @@ const selected = {
   event: null,
   eventMentions: [],
   tagAssessments: [tag],
+  materialCoverage: "complete",
+  substantiveContribution: {
+    state: "unknown",
+    confidence: null,
+    reason: "独立判断待定。",
+    evidenceIds: [],
+  },
   entities: [entity],
 }
 const stores: Store[] = []

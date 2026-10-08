@@ -120,7 +120,7 @@ export function normalizeEventMentions(input: {
 
 // 主报道可附带其他事件；只允许证据完全落在主身份片段且不碰次事件片段的事实进入综述。
 // 同片段混写、重复摘引或无法定位的证据保守拒绝，不能用实体关键词猜测事实归属。
-export function factsForPrimaryEvent<T extends { quote: string }>(
+function legacyFactsForPrimaryEvent<T extends { quote: string }>(
   facts: readonly T[],
   semantic: { event?: EventIdentity | null; eventMentions?: readonly EventMention[] },
   text: string,
@@ -172,6 +172,127 @@ export function factsForPrimaryEvent<T extends { quote: string }>(
       !secondaryRanges.some(([left, right]) => start < right && left < end)
     )
   })
+}
+
+// 逐事实序号只绑定同一输出中的有序提及，不把无法归属的内容塞进主事件。
+type EventFactReference = { quote?: string; evidenceId?: string; eventMentionIndex?: number | null }
+type MentionedSemantics = { event?: EventIdentity | null; eventMentions?: readonly EventMention[] }
+
+function mentionQuotes(identity: EventIdentity | EventSelection, catalog?: EvidenceCatalog) {
+  return [
+    identity.subject,
+    identity.action,
+    identity.object,
+    identity.version,
+    identity.round,
+    identity.anchor,
+  ].flatMap((field) => {
+    if (!field) return []
+    const quote = "quote" in field ? field.quote : catalog?.resolve(field.evidenceId)
+    return quote ? [quote] : []
+  })
+}
+
+// 原文位置必须唯一且完整落在目标身份证据内；其他事件的片段重叠会使归属不确定。
+function quoteBelongsToMention(
+  quote: string,
+  mentions: readonly (EventMention | EventMentionSelection)[],
+  text: string,
+  mentionIndex: number,
+  catalog?: EvidenceCatalog,
+) {
+  const normalize = (value: string) => value.replace(/\s+/gu, " ").trim()
+  const original = normalize(text)
+  const ranges = (value: string): Array<[number, number]> => {
+    const fragment = normalize(value)
+    const spans: Array<[number, number]> = []
+    if (!fragment) return spans
+    let start = original.indexOf(fragment)
+    while (start >= 0) {
+      spans.push([start, start + fragment.length])
+      start = original.indexOf(fragment, start + 1)
+    }
+    return spans
+  }
+  const selected = mentions[mentionIndex]
+  const factSpans = ranges(quote)
+  if (!selected || factSpans.length !== 1) return false
+  const [start, end] = factSpans[0]!
+  const targetRanges = mentionQuotes(selected.identity, catalog).flatMap(ranges)
+  const others = mentions.flatMap((mention, index) =>
+    index === mentionIndex ? [] : mentionQuotes(mention.identity, catalog),
+  )
+  // 别的身份证据若不在原文内同样拒绝，不能借遗漏片段证明唯一归属。
+  if (others.some((value) => ranges(value).length === 0)) return false
+  return (
+    targetRanges.some(([left, right]) => left <= start && end <= right) &&
+    !others.flatMap(ranges).some(([left, right]) => start < right && left < end)
+  )
+}
+
+export function validateFactEventAssignments(
+  input: {
+    facts?: readonly EventFactReference[]
+    eventMentions?: readonly (EventMention | EventMentionSelection)[]
+  },
+  catalog?: EvidenceCatalog,
+) {
+  const mentions = input.eventMentions ?? []
+  const text = catalog
+    ? catalog.fragments.map((item) => item.quote).join("")
+    : [
+        ...(input.facts ?? []).flatMap((fact) => (fact.quote ? [fact.quote] : [])),
+        ...mentions.flatMap((mention) => mentionQuotes(mention.identity)),
+      ]
+        .filter((quote, index, quotes) => quotes.indexOf(quote) === index)
+        .join("\n")
+  return (input.facts ?? []).every((fact) => {
+    const index = fact.eventMentionIndex
+    if (index === undefined || index === null) return true
+    if (!Number.isInteger(index) || index < 0 || index >= mentions.length) return false
+    const quote = fact.quote ?? (fact.evidenceId ? catalog?.resolve(fact.evidenceId) : null)
+    return Boolean(quote && quoteBelongsToMention(quote, mentions, text, index, catalog))
+  })
+}
+
+// 显式关联可支持并列周报及分析/教程关系；是否可进具体事件综述仍由已确认登记决定。
+export function factsForEvent<T extends { quote: string; eventMentionIndex?: number | null }>(
+  facts: readonly T[],
+  semantic: MentionedSemantics,
+  text: string,
+  mentionIndex: number,
+): T[] {
+  const mentions = normalizeEventMentions(semantic)
+  if (
+    !Number.isInteger(mentionIndex) ||
+    !mentions[mentionIndex] ||
+    !validateEventMentionRelationship(semantic)
+  )
+    return []
+  const legacy = new Set(
+    legacyFactsForPrimaryEvent(
+      facts.filter((fact) => fact.eventMentionIndex === undefined),
+      semantic,
+      text,
+    ),
+  )
+  return facts.filter((fact) =>
+    fact.eventMentionIndex === undefined
+      ? mentions[mentionIndex]!.isPrimary && legacy.has(fact)
+      : fact.eventMentionIndex === mentionIndex &&
+        quoteBelongsToMention(fact.quote, mentions, text, mentionIndex),
+  )
+}
+
+export function factsForPrimaryEvent<
+  T extends { quote: string; eventMentionIndex?: number | null },
+>(facts: readonly T[], semantic: MentionedSemantics, text: string): T[] {
+  const mentions = normalizeEventMentions(semantic)
+  const index = mentions.findIndex(
+    (mention) =>
+      mention.isPrimary && mention.role === "reports" && mention.identity.kind === "event",
+  )
+  return index < 0 ? [] : factsForEvent(facts, semantic, text, index)
 }
 
 // 长文独立保留身份字段证据，不能因 facts 上限或摘要压缩丢掉次要事件。

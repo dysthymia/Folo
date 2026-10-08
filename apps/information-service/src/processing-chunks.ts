@@ -38,16 +38,19 @@ import {
 } from "./processing-prompt"
 import { semanticEntitiesForCatalog } from "./processing-semantic-entities"
 import {
+  combineChunkContributions,
   combineChunkTagAssessments,
   createTagAssessmentsSelectionSchema,
   renderSemanticTagRequirements,
   semanticDefinitionsForIds,
+  substantiveContributionForCatalog,
+  substantiveContributionSchema,
 } from "./processing-semantic-prompt"
 
 export const ENTRY_CHUNK_MAX_CHARS = 24_000
 const CACHE_VERSION = ENTRY_PROMPT_VERSION
 // 实体提取进入语义分块协议，使用新缓存版本，避免把旧块误认为已完成实体分析。
-const SEMANTIC_CACHE_VERSION = "semantic-chunks-v3"
+const SEMANTIC_CACHE_VERSION = "semantic-chunks-v4"
 const MAX_FINAL_CONTEXT_CHARS = 120_000
 
 const chunkFactSchema = z
@@ -63,12 +66,7 @@ const semanticChunkSchema = z
     tagAssessments: z.array(tagAssessmentSchema),
     entities: semanticEntitiesSchema,
     eventMentions: eventMentionsSelectionSchema,
-    substantiveContribution: z
-      .object({
-        state: z.enum(["present", "absent", "unknown"]),
-        evidenceIds: z.array(z.string()).max(100),
-      })
-      .strict(),
+    substantiveContribution: substantiveContributionSchema,
     evidence: z.record(z.string(), z.string().min(1).max(4_000)),
   })
   .strict()
@@ -248,6 +246,29 @@ export async function processLongEntry(options: LongEntryOptions): Promise<LongE
   })
   const selected: EntryModelSelection = finalSelectionSchema.parse(response.result)
   const { eventMentions, ...selectedBase } = selected
+  // 每块引用先映射到整篇目录，贡献和标签共用同一可追溯证据。
+  const semanticChunks = semantic
+    ? outputs.map((chunk) => {
+        if (!chunk.semantic) throw new Error("missing_chunk_semantics")
+        const remap = (id: string) => {
+          const quote = chunk.semantic!.evidence[id]
+          const finalId = quote ? finalCatalog.identify(quote) : null
+          if (!finalId) throw new Error("invalid_model_reference")
+          return finalId
+        }
+        return {
+          coverage: chunk.semantic.coverage,
+          tagAssessments: chunk.semantic.tagAssessments.map((item) => ({
+            ...item,
+            evidenceIds: item.evidenceIds.map(remap),
+          })),
+          substantiveContribution: {
+            ...chunk.semantic.substantiveContribution,
+            evidenceIds: chunk.semantic.substantiveContribution.evidenceIds.map(remap),
+          },
+        }
+      })
+    : []
   const output: EntryModelOutput = {
     ...selectedBase,
     ...(eventMentions
@@ -257,30 +278,12 @@ export async function processLongEntry(options: LongEntryOptions): Promise<LongE
     facts: materializeEvidenceFacts(finalCatalog, selected.facts),
     ...(semantic
       ? {
+          substantiveContribution: combineChunkContributions(semanticChunks),
+          materialCoverage: semanticChunks.every((chunk) => chunk.coverage === "complete")
+            ? "complete"
+            : "partial",
           // 整篇判断由所有分块覆盖归并，不允许综合器把摘要中省略的有用章节判为不存在。
-          tagAssessments: combineChunkTagAssessments(
-            outputs.map((chunk) => {
-              if (!chunk.semantic) throw new Error("missing_chunk_semantics")
-              const remap = (id: string) => {
-                const quote = chunk.semantic!.evidence[id]
-                const finalId = quote ? finalCatalog.identify(quote) : null
-                if (!finalId) throw new Error("invalid_model_reference")
-                return finalId
-              }
-              return {
-                coverage: chunk.semantic.coverage,
-                tagAssessments: chunk.semantic.tagAssessments.map((item) => ({
-                  ...item,
-                  evidenceIds: item.evidenceIds.map(remap),
-                })),
-                substantiveContribution: {
-                  ...chunk.semantic.substantiveContribution,
-                  evidenceIds: chunk.semantic.substantiveContribution.evidenceIds.map(remap),
-                },
-              }
-            }),
-            tagIds,
-          ),
+          tagAssessments: combineChunkTagAssessments(semanticChunks, tagIds),
         }
       : {}),
   }
@@ -313,7 +316,8 @@ function chunkFingerprint(options: LongEntryOptions, source: string, chunkId: st
     model: options.model,
     endpointFingerprint: options.endpointFingerprint,
     reasoningEffort: reasoningFingerprint(options.reasoningEffort),
-    global: options.instructions.global,
+    // 客观分块只依赖真实文字指令，不依赖注意力偏好或全局配置版本。
+    global: { markdown: options.instructions.global.markdown },
     transformations: options.instructions.transformations,
     // v4 保留既有身份；v5 仅冻结影响语义分析的定义和指令，策略变更复用分析。
     ...(semantic
@@ -344,7 +348,7 @@ function chunkPrompt(input: {
 ${SOURCE_FIDELITY_REQUIREMENTS}
 ${renderSemanticTagRequirements(input.instructions.semanticTagIds ?? [])}
 ${(input.instructions.semanticTagIds?.length ?? 0) > 0 ? "分块事件提及：semantic.eventMentions 返回最多4个具体事件（可为空），角色只取reports/analysis_of/tutorial_for/mentions。每个身份字段只能选择本块evidenceId；主体、对象、版本、轮次和官方URL必须由各自片段明确支持。没有发生锚点的次要事件保留候选，不编造。周报主题不是真实事件，实体不能按相似拼写归并。" : ""}
-${(input.instructions.semanticTagIds?.length ?? 0) > 0 ? "返回 semantic：coverage=complete 仅指本分块全部材料已读且不存在影响判断的未读链接/图片/引用；否则 partial。tagAssessments 逐一评估本分块标签。substantiveContribution 记录是否有任何可用事实、方法、论据或经验，present 必须附证据，未知填 unknown。以上证据独立于 facts 上限，推广开头不能覆盖有用后文。" : ""}
+${(input.instructions.semanticTagIds?.length ?? 0) > 0 ? "返回 semantic：无需返回顶层 materialCoverage 和 substantiveContribution，这些字段在 semantic 内；semantic.coverage=complete 仅指本分块全部材料已读且不存在影响判断的未读链接/图片/引用；否则 partial。tagAssessments 逐一评估本分块标签。substantiveContribution 记录是否有任何可用事实、方法、论据或经验，present 必须附证据，未知填 unknown。以上证据独立于 facts 上限，推广开头不能覆盖有用后文。" : ""}
 来源角色元数据：${input.sourceRole}\n全局指令：\n${input.instructions.global.markdown}\n命中处理指令：\n${input.instructions.transformations.map((item) => item.prompt).join("\n")}
 ${(input.instructions.semanticTagIds?.length ?? 0) > 0 ? "semantic.eventMentions 必须返回数组（可为空），提取本块可追溯的具体事件，字段证据独立于 facts 上限。每块最多一个局部主提及，最终主事件由全篇综合决定。" : ""}
 本分块证据目录：\n${input.evidence}`
@@ -427,37 +431,20 @@ function chunkSelectionSchema(
   catalog: ReturnType<typeof createEvidenceCatalog>,
   tagIds: readonly string[],
 ) {
-  const evidenceIds = catalog.fragments.map((item) => item.evidenceId)
-  const evidenceSchema = evidenceIds.length
-    ? z.array(z.enum(evidenceIds as [string, ...string[]])).max(100)
-    : z.array(z.string()).max(0)
   const semantic = z
     .object({
       coverage: z.enum(["complete", "partial"]),
       tagAssessments: createTagAssessmentsSelectionSchema(catalog, tagIds),
       entities: semanticEntitiesForCatalog(catalog),
       eventMentions: eventMentionsSelectionForCatalog(catalog),
-      substantiveContribution: z
-        .object({
-          state: z.enum(["present", "absent", "unknown"]),
-          evidenceIds: evidenceSchema,
-        })
-        .strict()
-        .superRefine((value, context) => {
-          if (value.state === "present" && !value.evidenceIds.length)
-            context.addIssue({
-              code: "custom",
-              path: ["evidenceIds"],
-              message: "missing_contribution_evidence",
-            })
-        }),
+      substantiveContribution: substantiveContributionForCatalog(catalog),
     })
     .strict()
   const base = z
     .object({
       chunkId: z.enum([chunkId]),
       summary: z.string().min(1).max(8_000),
-      facts: evidenceFactsSelectionSchema(catalog, 20),
+      facts: evidenceFactsSelectionSchema(catalog, 20, false),
     })
     .strict()
   return tagIds.length ? base.extend({ semantic }) : base.extend({ semantic: z.never().optional() })

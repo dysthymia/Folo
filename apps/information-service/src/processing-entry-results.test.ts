@@ -108,6 +108,7 @@ describe("时间线 AI 结果轻量索引", () => {
       contentVersion: input.contentVersion,
       releaseVersion: input.releaseVersion,
       decisionId: expect.any(String),
+      attention: { level: "none", reasons: [], matchedWatchIds: [], deadlines: [] },
     })
     expect(processingApi(store, "GET", `/processing/entries/${input.seq}`, null)).toMatchObject({
       entry: {

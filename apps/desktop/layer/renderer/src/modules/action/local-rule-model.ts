@@ -29,5 +29,8 @@ export function newLocalRule(
   }
 }
 
+// 这里只描述卡片包含的处理动作；分类标签不改变后台生成内容的资格判断。
 export const localRuleUsesAI = (rule: AutomationRule) =>
-  rule.actions.some((action) => ["ai_transform", "ai_aggregate", "ai_dedupe"].includes(action.type))
+  rule.actions.some((action) =>
+    ["ai_transform", "ai_aggregate", "ai_dedupe", "ai_classify"].includes(action.type),
+  )
