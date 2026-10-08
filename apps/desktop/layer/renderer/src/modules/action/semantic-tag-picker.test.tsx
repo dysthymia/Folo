@@ -159,7 +159,7 @@ describe("Notion 式语义标签多选", () => {
     const changed = vi.fn()
     const actions: AutomationRule["actions"] = [
       { type: "ai_classify", tagIds: ["topic:ai"] },
-      { type: "local_filter", mode: "silence" },
+      { type: "local_filter", mode: "dim" },
     ]
     const container = await show(
       <LocalRuleActions
@@ -175,7 +175,7 @@ describe("Notion 式语义标签多选", () => {
     await click(option("topic:product"))
     expect(changed).toHaveBeenLastCalledWith([
       { type: "ai_classify", tagIds: ["topic:ai", "topic:product"] },
-      { type: "local_filter", mode: "silence" },
+      { type: "local_filter", mode: "dim" },
     ])
   })
 })

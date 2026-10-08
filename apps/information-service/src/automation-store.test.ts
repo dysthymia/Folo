@@ -61,6 +61,62 @@ afterEach(() => {
 })
 
 describe("发布范围与输入版本", () => {
+  it("按语义标签虚化的新规则可经统一接口发布并完整读回", () => {
+    const store = new Store(":memory:")
+    close.push(() => store.close())
+    store.bindOwner("owner")
+    store.replaceSources([
+      { key: "feed/1", kind: "feed", id: "1", title: "X 来源", view: 1, category: "X" },
+    ])
+    const rule = {
+      id: "noise-dim",
+      ownerId: "owner",
+      name: "无价值内容",
+      enabled: true,
+      order: 0,
+      version: 1,
+      executionLocation: "processing_service",
+      when: {
+        anyOf: [
+          {
+            allOf: [
+              { field: "category_ref", operator: "eq", value: { view: 1, name: "X" } },
+              {
+                field: "entry_tag",
+                operator: "contains_any",
+                value: [
+                  "form:pure_entertainment",
+                  "signal:social_chatter",
+                  "signal:pure_promotion",
+                ],
+                minConfidence: 0.8,
+              },
+            ],
+          },
+        ],
+      },
+      actions: [{ type: "local_filter", mode: "dim" }],
+    }
+    // 走真实发布与读取边界，避免前端接受新动作而后台契约仍拒绝它。
+    expect(
+      automationApi(store, "PUT", "/rules/noise-dim/activate", {
+        rule,
+        expectedRevision: 0,
+        requestId: randomUUID(),
+      }),
+    ).toMatchObject({
+      revision: 1,
+      config: { formatVersion: 5, rules: [rule] },
+      effectiveConfig: { formatVersion: 5, rules: [rule] },
+      release: { version: 1, scope: { mode: "future" } },
+    })
+    expect(automationApi(store, "GET", "/automation/editor", undefined)).toMatchObject({
+      editor: { revision: 1, config: { rules: [rule] } },
+      effective: { releaseVersion: 1, config: { rules: [rule] } },
+    })
+    expect(store.automation.inputs()).toEqual([])
+  })
+
   it("编辑器汇总同步复用独立只读接口，保留草稿与生效配置的区别", () => {
     const store = new Store(":memory:")
     close.push(() => store.close())
