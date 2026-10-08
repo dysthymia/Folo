@@ -15,9 +15,11 @@ import { runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
 import type { PublishedDecision } from "./processing-decision"
 import { compatibleEvents, traceableEvent } from "./processing-event"
+import { factsForPrimaryEvent } from "./processing-event-mentions"
 import type { EvidenceFragment } from "./processing-evidence"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
+import { independentStoryContributors, storyCandidatesWithDelta } from "./story-delta"
 import type { ActiveStory, StoryFactKind, StoryRevisionDraft, StoryStore } from "./story-store"
 import { sourceSpanFragmentId } from "./story-store"
 
@@ -137,6 +139,12 @@ export type StoryAggregationOptions = {
   sharedGroups?: readonly SharedStoryGroup[]
   /** 已被去重代表覆盖的材料不再提供新综述来源。 */
   hiddenInputSeqs?: readonly number[]
+  // 登记层的人工移出与拆分约束只用于同事件综述，主题综述继续使用原规则。
+  sameEventEligible?: (published: PublishedDecision) => boolean
+  // 稳定事件 ID 同时约束候选分组和旧 Story 召回，人工拆分不能靠相同原始身份重新归并。
+  registeredEventId?: (
+    members: readonly { inputSeq: number; decisionId: string }[],
+  ) => string | null
 }
 
 // 进程内缓存只避免同一材料与指令的重复付费；持久化 revision 仍由 StoryStore 的 CAS 和资格校验保护。
@@ -182,6 +190,7 @@ export async function runStoryAggregation(
       claimed,
       rule.when,
       options.currentEntry,
+      options.sameEventEligible,
     )
     result.pending.push(...pending)
     if (candidates.length === 0) continue
@@ -201,7 +210,7 @@ export async function runStoryAggregation(
     }
     const batches =
       action.mode === "same_event"
-        ? sameEventCandidates(candidates).flatMap(chunkCandidates)
+        ? sameEventCandidates(candidates, options.registeredEventId).flatMap(chunkCandidates)
         : chunkCandidates(candidates)
     const selectedBatches = options.targets
       ? batches.filter((batch) =>
@@ -217,7 +226,7 @@ export async function runStoryAggregation(
     if (!selectedBatches.length) continue
     const config = await options.aiConfig.read()
     for (let batchIndex = 0; batchIndex < selectedBatches.length; batchIndex++) {
-      const batch = selectedBatches[batchIndex]!
+      let batch = selectedBatches[batchIndex]!
       if (options.signal.aborted) {
         result.pending.push({
           ruleId: rule.id,
@@ -231,6 +240,14 @@ export async function runStoryAggregation(
       // 每批重新读取 Story，使同一事件或主题能跨批连续更新，而非把批次误作聚类边界。
       const existing = options.stories.activeStories(rule.id, scopeVersion).filter((story) => {
         if (action.mode !== "same_event") return true
+        if (
+          options.registeredEventId &&
+          options.registeredEventId(story.revision.members) !==
+            options.registeredEventId(
+              batch.map((item) => ({ inputSeq: item.input.seq, decisionId: item.decisionId })),
+            )
+        )
+          return false
         const event = options.stories.eventIdentityForMembers(story.revision.members)
         const candidateEvent = traceableEvent(
           batch[0]?.decision.semantic?.event,
@@ -238,6 +255,18 @@ export async function runStoryAggregation(
         )
         return !!event && !!candidateEvent && compatibleEvents(event, candidateEvent)
       })
+      // 先比对完整材料，再决定是否支付综述模型；跳过生成不隐藏任何原文。
+      batch = existing.length
+        ? storyCandidatesWithDelta(
+            batch,
+            existing,
+            options.decisions.flatMap((published) => {
+              const text = visibleSourceText(published.input)
+              return text ? [{ ...published, text }] : []
+            }),
+          )
+        : independentStoryContributors(batch)
+      if (!batch.length) continue
       if (batch.length < 2 && existing.length === 0) {
         result.pending.push({
           ruleId: rule.id,
@@ -287,7 +316,7 @@ export async function runStoryAggregation(
         model: config.model,
         endpointFingerprint: aiEndpointFingerprint(config),
         reasoningEffort: reasoningFingerprint(aiReasoningEffort(config)),
-        promptVersion: 7,
+        promptVersion: 8,
         runtimeDir: options.runtimeDir,
         ruleId: rule.id,
         ruleVersion: rule.version,
@@ -295,6 +324,12 @@ export async function runStoryAggregation(
         global: options.ruleSet.global,
         createPrompt: action.createPrompt,
         updatePrompt: action.updatePrompt,
+        // 更新草稿必须绑定当前 revision 和完整派生证据，不能跨不同旧 Story 复用。
+        existing: existing.map((item) => ({
+          storyId: item.story.id,
+          revision: item.story.currentRevision,
+          payload: draftPayload(item.revision),
+        })),
         candidates: batch.map((candidate) => ({
           inputSeq: candidate.input.seq,
           itemId: candidate.input.itemId,
@@ -441,6 +476,7 @@ function candidatesForAction(
   claimed: Set<number>,
   when: RuleSet["rules"][number]["when"],
   currentEntry?: ProcessingReadStateLookup,
+  sameEventEligible?: (published: PublishedDecision) => boolean,
 ) {
   const pending: PendingStory[] = []
   const grouped = new Map<string, Candidate[]>()
@@ -472,6 +508,7 @@ function candidatesForAction(
       continue
     }
     const eventKind = published.decision.semantic?.event?.kind
+    if (action.mode === "same_event" && sameEventEligible && !sameEventEligible(published)) continue
     // 已识别的观点/教程保持独立，并非身份待补；只有未知真实事件才进入待核对队列。
     if (action.mode === "same_event" && (eventKind === "analysis" || eventKind === "tutorial"))
       continue
@@ -479,9 +516,27 @@ function candidatesForAction(
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason: "event_identity_unknown" })
       continue
     }
+    // 主事件材料只携带隔离后的事实，后续贡献判断、共享草稿和模型引用均不能引用背景事件。
+    const facts =
+      action.mode === "same_event"
+        ? factsForPrimaryEvent(published.decision.facts, published.decision.semantic ?? {}, text)
+        : published.decision.facts
+    if (action.mode === "same_event" && !facts.length) continue
+    const scoped =
+      facts.length === published.decision.facts.length &&
+      (published.decision.semantic?.eventMentions?.length ?? 0) <= 1
+        ? published
+        : {
+            ...published,
+            decision: {
+              ...published.decision,
+              facts,
+              summary: facts.map((fact) => fact.text).join("\n"),
+            },
+          }
     // 同一原文通过多个订阅上下文到达，只能贡献一次材料，不能冒充多个来源。
     const identity = JSON.stringify([contentIdentity(published.input.body), text])
-    grouped.set(identity, [...(grouped.get(identity) ?? []), { ...published, text }])
+    grouped.set(identity, [...(grouped.get(identity) ?? []), { ...scoped, text }])
   }
   const candidates = [...grouped.values()]
     .map(
@@ -509,13 +564,22 @@ function ineligibleReason(published: PublishedDecision): PendingReason | null {
 }
 
 // 先建立两两兼容的真实事件候选组，防止缺字段材料把两个不同版本/轮次串联起来。
-function sameEventCandidates(candidates: Candidate[]) {
+function sameEventCandidates(
+  candidates: Candidate[],
+  registeredEventId?: StoryAggregationOptions["registeredEventId"],
+) {
   const groups: Candidate[][] = []
   for (const candidate of candidates) {
     const event = traceableEvent(candidate.decision.semantic?.event, candidate.text)!
     const group = groups.find((items) =>
-      items.every((item) =>
-        compatibleEvents(event, traceableEvent(item.decision.semantic?.event, item.text)!),
+      items.every(
+        (item) =>
+          (!registeredEventId ||
+            registeredEventId([
+              { inputSeq: candidate.input.seq, decisionId: candidate.decisionId },
+            ]) ===
+              registeredEventId([{ inputSeq: item.input.seq, decisionId: item.decisionId }])) &&
+          compatibleEvents(event, traceableEvent(item.decision.semantic?.event, item.text)!),
       ),
     )
     if (group) group.push(candidate)
@@ -672,6 +736,29 @@ function draftFromGroup(
     ...new Set(sentenceRefs.flat().map((reference) => reference.candidate.input.seq)),
   ].sort((left, right) => left - right)
   if (!existing && newMemberSeqs.length < 2) throw new Error("single_source_story")
+  if (!existing) {
+    // 不仅核对请求候选，发布时还核对模型实际引用的贡献，避免只挑公共转载事实创建 Story。
+    const contributors = newMemberSeqs.map((inputSeq) => {
+      const candidate = candidateBySeq.get(inputSeq)!
+      const selectedQuotes = new Set(
+        sentenceRefs
+          .flat()
+          .filter((reference) => reference.candidate.input.seq === inputSeq)
+          .map((reference) => normalize(reference.quote)),
+      )
+      return {
+        ...candidate,
+        decision: {
+          ...candidate.decision,
+          facts: candidate.decision.facts.filter((fact) =>
+            selectedQuotes.has(normalize(fact.quote)),
+          ),
+        },
+      }
+    })
+    if (independentStoryContributors(contributors).length < 2)
+      throw new Error("no_independent_story_contribution")
+  }
   const memberByInput = new Map(
     existing?.revision.members.map((member) => [member.inputSeq, member]) ?? [],
   )
@@ -927,7 +1014,7 @@ function modelPrompt(input: {
 聚合规则 ID：${input.ruleId}；模式：${input.mode}。
 ${input.mode === "same_event" ? "只把确实同一事件的多来源材料分组；同主题不同事件必须分开。" : "按明确主题与时间窗口组织多个事件；不要声称它们是同一事件。"}
 新建 Story 指令：\n${input.action.createPrompt}\n更新既有 Story 指令：\n${input.action.updatePrompt || input.action.createPrompt}
-新建 group 至少引用两个不同候选 inputSeq，且 retainedSentenceIds、retainedFactIds 必须为空。更新既有 Story 时，group 描述目标 current revision：retainedSentenceIds 和 retainedFactIds 只列仍然有效、需要逐字保留的既有对象；被反驳、修正或不再成立的旧对象不要列入。保留 fact 时必须同时保留其引用句段和全部依赖 fact。新增 fact 的 dependsOnFactIndexes 指向本组新增 facts，dependsOnRetainedFactIds 指向本组明确保留的既有 facts；inference 至少依赖其中一种 fact。既有成员和原文证据目录仍由服务端保留，因此 group 可以只引用一条新增候选材料。
+新建 group 至少引用两份仍有独立信息贡献的候选，不能用不同URL的同源事实转载冒充独立来源；至少两个不同 inputSeq，且 retainedSentenceIds、retainedFactIds 必须为空。更新既有 Story 时，group 描述目标 current revision：retainedSentenceIds 和 retainedFactIds 只列仍然有效、需要逐字保留的既有对象；被反驳、修正或不再成立的旧对象不要列入。没有明确新增更正、限制或反证时，逐字保留仍有效的旧句段和事实及原有来源。保留 fact 时必须同时保留其引用句段和全部依赖 fact。新增 fact 的 dependsOnFactIndexes 指向本组新增 facts，dependsOnRetainedFactIds 指向本组明确保留的既有 facts；inference 至少依赖其中一种 fact。既有成员和原文证据目录仍由服务端保留，因此 group 可以只引用一条新增候选材料。
 sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId，绝不能输出 quote、citationId、fragmentId 或 sourceSpanId。服务端会从该 inputSeq 的 evidenceId 精确还原原文并验证它们。facts 的 sentenceIndexes 指向本组新增 sentences，下标从 0 开始。
 候选的 quoteOnly=true 表示该材料禁止改写：引用它的 sentence.text 必须逐字等于该 sentence 的每个 evidenceId 对应原文；对应 fact.text 也必须逐字等于引用 sentence，且不得使用 inference。无法满足时不要输出该 group。
 候选材料：\n${JSON.stringify(

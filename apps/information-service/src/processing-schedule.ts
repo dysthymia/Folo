@@ -551,6 +551,7 @@ export class ProcessingScheduleStore {
     targets: readonly ProcessingTarget[],
     now: Date | string,
     signatures?: ReadonlyMap<string, string>,
+    allowedSourceKeys?: ReadonlySet<string>,
   ): ProcessingTrigger | null {
     const cutoffAt = instant(now)
     return this.transaction(() => {
@@ -561,7 +562,8 @@ export class ProcessingScheduleStore {
         JSON.stringify([target.sourceKey, target.itemId])
       const uniqueTargets = [
         ...new Map(targets.map((target) => [identity(target), target])).values(),
-      ].filter((target) => config.sourceKeys.includes(target.sourceKey))
+        // 列表入口可提供当前已授权的分类来源；定时计划的来源集合不随之扩张。
+      ].filter((target) => (allowedSourceKeys ?? new Set(config.sourceKeys)).has(target.sourceKey))
       const active = this.db
         .prepare(
           "SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND config_revision=? AND (status IN ('pending','running') OR finished_at>?) ORDER BY created_at,id",

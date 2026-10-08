@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { DatabaseSync } from "node:sqlite"
 
 import type { RuleSet } from "@follow/information-core"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
@@ -286,6 +287,173 @@ function execute(value: unknown) {
     return { result: value, model: options.model, durationMs: 1, usage: null, toolCalls: 0 }
   }
 }
+
+// Vitest mock 会擦除泛型返回类型，保留真实验证函数并单独记录调用次数。
+function trackedExecute(value: unknown) {
+  const calls = vi.fn()
+  const run = async <T>(request: CodexJsonOptions<T>) => {
+    calls(request)
+    return execute(value)<T>(request)
+  }
+  return { run, calls }
+}
+
+// 模拟只改标题产生新正文版本：保留不可变旧材料和决定，新指针指向同一来源的新版本。
+function titleReplacement(db: DatabaseSync, previous: PublishedDecision, changedContent?: string) {
+  const next = add(db, 4, "v2", true, changedContent ?? previous.decision.facts[0]!.quote)
+  const stored = db
+    .prepare("SELECT body FROM processing_inputs WHERE seq=?")
+    .get(previous.input.seq)!
+  next.input = {
+    ...next.input,
+    sourceKey: previous.input.sourceKey,
+    itemId: previous.input.itemId,
+    body: { ...previous.input.body, title: "新标题" },
+  }
+  next.decision = structuredClone(previous.decision)
+  if (changedContent) {
+    next.input.body.content = `<p>${changedContent}</p>`
+    next.decision.facts = [{ text: changedContent, quote: changedContent, kind: "fact" }]
+  }
+  db.prepare("UPDATE processing_inputs SET current=0 WHERE seq=?").run(previous.input.seq)
+  const body = { ...JSON.parse(String(stored.body)), title: "新标题" }
+  if (changedContent) body.content = next.input.body.content
+  db.prepare("UPDATE processing_inputs SET source_key=?,item_id=?,body=? WHERE seq=?").run(
+    previous.input.sourceKey,
+    previous.input.itemId,
+    JSON.stringify(body),
+    next.input.seq,
+  )
+  db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+    JSON.stringify(next.decision),
+    next.decisionId,
+  )
+  return next
+}
+
+describe("Story 无增量修复", () => {
+  const instructionFingerprint = createHash("sha256")
+    .update(JSON.stringify({ global: "", create: "create", update: "repair" }))
+    .digest("hex")
+
+  it("仅改标题零模型迁移引用，保留旧事实、读态和收藏", async () => {
+    const options = fixture()
+    const first = add(options.db, 1)
+    const second = add(options.db, 2)
+    const original = draft([first, second])
+    original.instructionFingerprint = instructionFingerprint
+    const story = options.stories.create(original)
+    options.stories.markRead(story.storyId, "reader")
+    options.stories.setCollected(story.storyId, "reader", true)
+    const next = titleReplacement(options.db, first)
+    expect(options.stories.currentSnapshot(story.storyId)).toBeNull()
+    const model = trackedExecute(output([4, 2], ["证据 1", "证据 2"]))
+    const result = await runStoryRepair({
+      ...options,
+      decisions: [next, second],
+      ruleSets: [rules()],
+      signal: new AbortController().signal,
+      execute: model.run,
+    })
+    expect(model.calls).not.toHaveBeenCalled()
+    expect(result.repaired).toEqual([{ storyId: story.storyId, revision: 2 }])
+    const revision = options.stories.currentSnapshot(story.storyId)!
+    expect(revision).toMatchObject({
+      title: original.title,
+      body: original.body,
+      facts: original.facts,
+      citations: original.citations,
+      sentences: original.sentences,
+      substantiveRevision: 1,
+    })
+    expect(revision.sourceSpans[0]).toMatchObject({
+      id: "span-1",
+      inputSeq: 4,
+      contentVersion: "v2",
+    })
+    expect(revision.sourceSpans[0]!.fragmentId).not.toBe(original.sourceSpans[0]!.fragmentId)
+    expect(options.stories.readStatus(story.storyId, "reader").unread).toBe(false)
+    expect(options.stories.isCollected(story.storyId, "reader")).toBe(true)
+    expect(options.stories.revision(story.storyId, 1)!.members).toEqual(original.members)
+  })
+
+  it("正文新增事实时仍请求修复模型并产生实质未读", async () => {
+    const options = fixture()
+    const first = add(options.db, 1)
+    const second = add(options.db, 2)
+    const original = draft([first, second])
+    original.instructionFingerprint = instructionFingerprint
+    const story = options.stories.create(original)
+    options.stories.markRead(story.storyId, "reader")
+    const next = titleReplacement(options.db, first, "证据 1 新价格为 99 元")
+    expect(options.stories.currentSnapshot(story.storyId)).toBeNull()
+    const model = trackedExecute(output([4, 2], ["证据 1 新价格为 99 元", "证据 2"]))
+    const result = await runStoryRepair({
+      ...options,
+      decisions: [next, second],
+      ruleSets: [rules()],
+      signal: new AbortController().signal,
+      execute: model.run,
+    })
+    expect(model.calls).toHaveBeenCalledOnce()
+    expect(result.repaired).toEqual([{ storyId: story.storyId, revision: 2 }])
+    expect(options.stories.readStatus(story.storyId, "reader").unread).toBe(true)
+  })
+
+  it("当前事件归属拒绝旧成员时，在调用模型前保持待核对", async () => {
+    const options = fixture()
+    options.stories = new StoryStore(options.db, () => false)
+    const first = add(options.db, 1)
+    const second = add(options.db, 2)
+    const story = options.stories.create(draft([first, second]))
+    const next = titleReplacement(options.db, first)
+    options.stories.currentSnapshot(story.storyId)
+    const model = trackedExecute(output([4, 2], ["证据 1", "证据 2"]))
+    const result = await runStoryRepair({
+      ...options,
+      decisions: [next, second],
+      ruleSets: [rules()],
+      signal: new AbortController().signal,
+      execute: model.run,
+    })
+    expect(model.calls).not.toHaveBeenCalled()
+    expect(result.pending).toEqual([
+      { storyId: story.storyId, reason: "incompatible_event_identity" },
+    ])
+  })
+
+  it("同正文存在未完成图片时不能按零增量迁移", async () => {
+    const options = fixture()
+    const first = add(options.db, 1)
+    const second = add(options.db, 2)
+    const original = draft([first, second])
+    original.instructionFingerprint = instructionFingerprint
+    const story = options.stories.create(original)
+    const next = titleReplacement(options.db, first)
+    options.stories.currentSnapshot(story.storyId)
+    // 单篇旧格式许可仍可修复引用，但不完整媒体不能证明原材料完全未变。
+    for (const seq of [first.input.seq, next.input.seq]) {
+      const row = options.db.prepare("SELECT body FROM processing_inputs WHERE seq=?").get(seq)!
+      options.db.prepare("UPDATE processing_inputs SET body=? WHERE seq=?").run(
+        JSON.stringify({
+          ...JSON.parse(String(row.body)),
+          imageCount: 1,
+          context: { images: "missing" },
+        }),
+        seq,
+      )
+    }
+    const model = trackedExecute(output([4, 2], ["证据 1", "证据 2"]))
+    await runStoryRepair({
+      ...options,
+      decisions: [next, second],
+      ruleSets: [rules()],
+      signal: new AbortController().signal,
+      execute: model.run,
+    })
+    expect(model.calls).toHaveBeenCalledOnce()
+  })
+})
 
 afterEach(() => {
   for (const db of databases.splice(0)) db.close()

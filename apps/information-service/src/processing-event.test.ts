@@ -8,6 +8,7 @@ import {
   eventIdentitySchema,
   materializeEvent,
   traceableEvent,
+  traceableRelatedEvent,
 } from "./processing-event"
 import { createEvidenceCatalog } from "./processing-evidence"
 
@@ -230,4 +231,59 @@ describe("可追溯的事件身份", () => {
     expect(traceableEvent(verified, "另一条原文。")).toBeNull()
     expect(traceableEvent(undefined, "实际原文。")).toBeNull()
   })
+})
+
+// related 校验允许明确时间格式归一，但日期、时刻和时区均不能靠元数据猜造。
+it("related事件的归一时间仍须由同一引用明确支持", () => {
+  const text = "OpenAI 于北京时间2026年9月25日00:31发布 GPT 5.2。"
+  const event = materializeEvent(createEvidenceCatalog(text), selected("E000001"))!
+  const timed: EventIdentity = {
+    ...event,
+    anchor: {
+      kind: "event_time",
+      value: "2026-09-25T00:31:00+08:00",
+      timeZone: "Asia/Shanghai",
+      quote: text,
+    },
+  }
+  expect(traceableRelatedEvent(timed, text)).toEqual(timed)
+  for (const value of [
+    "2026-09-26T00:31:00+08:00",
+    "2026-09-25T00:32:00+08:00",
+    "2026-09-25T00:31:59+08:00",
+    "2026-09-25T00:31:00Z",
+  ])
+    expect(
+      traceableRelatedEvent({ ...timed, anchor: { ...timed.anchor!, value } }, text),
+    ).toBeNull()
+  expect(
+    traceableRelatedEvent(
+      { ...timed, anchor: { ...timed.anchor!, timeZone: "America/New_York" } },
+      text,
+    ),
+  ).toBeNull()
+})
+
+it("related时区不能把UTC-04来源按子串认成UTC，并支持原文明示英文日期", () => {
+  const text = "OpenAI released GPT 5.2 on September 24, 2026 at 12:31 UTC-04:00."
+  const event = materializeEvent(createEvidenceCatalog(text), selected("E000001"))!
+  const timed: EventIdentity = {
+    ...event,
+    anchor: {
+      kind: "event_time",
+      value: "2026-09-24T12:31:00-04:00",
+      timeZone: "-04:00",
+      quote: text,
+    },
+  }
+  expect(traceableRelatedEvent(timed, text)).toEqual(timed)
+  expect(
+    traceableRelatedEvent({ ...timed, anchor: { ...timed.anchor!, timeZone: "UTC" } }, text),
+  ).toBeNull()
+  expect(
+    traceableRelatedEvent(
+      { ...timed, anchor: { ...timed.anchor!, value: "2026-09-24T12:31:00-04:30" } },
+      text,
+    ),
+  ).toBeNull()
 })

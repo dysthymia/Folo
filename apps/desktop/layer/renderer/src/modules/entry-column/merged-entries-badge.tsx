@@ -126,19 +126,8 @@ export const MergedEntriesBadge = ({
   }
 
   if (!isStory && !isHidden && !isRestored && duplicateCount === 0 && !duplicateOpen)
-    return processingResult ? (
-      <button
-        type="button"
-        className={chipClass(cn("cursor-button", className))}
-        onClick={(event) => {
-          preventEntryNavigation(event)
-          openResult()
-        }}
-        onPointerDown={preventEntryNavigation}
-      >
-        {t("processing.result.view")}
-      </button>
-    ) : null
+    // 普通条目的处理详情统一由左侧状态图标打开，右侧仅保留综述与重复关系角标。
+    return null
 
   if (isHidden || isRestored) {
     const content = (

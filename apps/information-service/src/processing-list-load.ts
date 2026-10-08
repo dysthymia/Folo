@@ -1,7 +1,11 @@
+import { requiredSemanticTagIds } from "@follow/information-core"
 import { z } from "zod"
 
+import { processingRuleInput } from "./processing-context"
 import { resolveAIRuleSourceKeys } from "./processing-rule-scope"
 import type { ProcessingTarget, ProcessingTrigger } from "./processing-schedule"
+import { semanticProfileNeedsAnalysis } from "./processing-semantic-decision"
+import { sourceText } from "./service"
 import type { Store } from "./store"
 
 // 只接收本次列表的元信息；正文与引用材料由后台原有水合流程验证。
@@ -30,7 +34,17 @@ export function listLoadSourceKeys(store: Store): Set<string> {
   const config = store.schedule.snapshot().config
   if (!config?.enabled || !config.runOnListLoad) return new Set()
   const rules = new Set(resolveAIRuleSourceKeys(store))
-  return new Set(config.sourceKeys.filter((key) => rules.has(key)))
+  const active = store.automation.effective().config
+  // 分类来源单独加入列表授权；保留既有定时计划的来源，避免扩大定时采集范围。
+  const classifySources = active
+    ? resolveAIRuleSourceKeys(store, {
+        ...active,
+        rules: active.rules.filter((rule) =>
+          rule.actions.some((action) => action.type === "ai_classify"),
+        ),
+      })
+    : []
+  return new Set([...config.sourceKeys.filter((key) => rules.has(key)), ...classifySources])
 }
 
 export function processListLoaded(
@@ -54,7 +68,27 @@ export function processListLoaded(
       if (publishedAt < Date.parse(config.historySince) || publishedAt > now.getTime()) continue
       // 已读状态也同步回已有材料，但它不会成为本次后台目标。
       store.saveListedEntry({ ...store.entry(entry.sourceKey, entry.id), ...entry, content: null })
-      if (entry.read === false) targets.push({ sourceKey: entry.sourceKey, itemId: entry.id })
+      if (entry.read === false) {
+        const current = store.automation.current(entry.sourceKey, entry.id)
+        const active = store.automation.effective()
+        if (current && active.config && active.releaseVersion !== null) {
+          const stored = store.entry(entry.sourceKey, entry.id)!
+          const requested = requiredSemanticTagIds(
+            active.config,
+            processingRuleInput(
+              store,
+              entry.sourceKey,
+              stored,
+              sourceText(stored.content ?? ""),
+              store.processingState.material(current) === "complete",
+            ),
+          )
+          const profile = requested.length ? store.semantics.view(current).profile : null
+          if (semanticProfileNeedsAnalysis(profile, requested))
+            store.automation.assignLoadedRelease(current, active.releaseVersion)
+        }
+        targets.push({ sourceKey: entry.sourceKey, itemId: entry.id })
+      }
     }
     // 已排队的定时或手动批次能消费这些已同步条目，无需再建重叠列表任务。
     const snapshot = store.schedule.snapshot()
@@ -87,7 +121,7 @@ export function processListLoaded(
         ]),
       ]),
     )
-    trigger = store.schedule.listLoaded(uncovered, now, signatures) ?? trigger
+    trigger = store.schedule.listLoaded(uncovered, now, signatures, allowed) ?? trigger
   })
   return { accepted: targets.length, trigger }
 }

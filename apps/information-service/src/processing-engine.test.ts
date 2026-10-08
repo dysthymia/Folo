@@ -859,7 +859,7 @@ describe("单篇处理 engine", () => {
     expect(fixture.completed.has("entry-1")).toBe(false)
   })
 
-  it("批次进程故障不盲目逐篇重试放大相同失败和费用", async () => {
+  it.each(["PROCESS_FAILED", "TIMEOUT"] as const)("批次 %s 不立即逐篇重付费", async (code) => {
     const fixture = batchStoreFixture(5)
     const result = await runEntryProcessing({
       store: fixture.store,
@@ -869,7 +869,7 @@ describe("单篇处理 engine", () => {
       historySince: "2026-09-01T00:00:00.000Z",
       signal: new AbortController().signal,
       execute: async () => {
-        throw new CodexRunError("PROCESS_FAILED", {
+        throw new CodexRunError(code, {
           inputTokens: 20,
           outputTokens: 8,
           cachedInputTokens: 2,
@@ -880,6 +880,98 @@ describe("单篇处理 engine", () => {
     expect(result.failures).toHaveLength(5)
     expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 8, cachedInputTokens: 2 })
     expect(fixture.completed.size).toBe(0)
+  })
+
+  it("正文很短但证据枚举很大时按 schema 预算拆批，并复用约束引用", async () => {
+    const fixture = batchStoreFixture(3)
+    // 大量短句让证据枚举膨胀，正文仍远小于既有五万字符限制。
+    for (const candidate of fixture.store.automation.inputs())
+      candidate.body.content = Array.from(
+        { length: 180 },
+        (_, index) => `第${candidate.seq}篇第${index}项事实。`,
+      ).join("")
+    const sizes: number[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        const batch = request.prompt.split("批内条目与独立证据目录：\n")[1]
+        const materials = batch
+          ? (JSON.parse(batch) as Array<{
+              entryId: string
+              evidenceCatalog: Array<{ evidenceId: string }>
+            }>)
+          : [
+              {
+                entryId: /entryId=(entry-\d+)/u.exec(request.prompt)![1]!,
+                evidenceCatalog: [{ evidenceId: "E000001" }],
+              },
+            ]
+        sizes.push(materials.length)
+        expect(JSON.stringify(request.schema)).toContain('"$defs"')
+        const items = materials.map((item) =>
+          batchSelection(item.entryId, item.evidenceCatalog[0]!.evidenceId),
+        )
+        const output = batch ? { items } : items[0]
+        expect(request.validate(output)).toBe(true)
+        return {
+          result: output as T,
+          model: request.model,
+          durationMs: 1,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
+    })
+    expect(sizes.length).toBeGreaterThan(1)
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBe(3)
+    expect(result.completed).toBe(3)
+    expect(result.failures).toEqual([])
+  })
+
+  it("已有超时的目标下轮单独调用，正常目标继续批量且不增加本轮重试", async () => {
+    const fixture = batchStoreFixture(3)
+    fixture.store.processingState.failure = (candidate) =>
+      candidate.seq === 2 ? "codex_timeout" : null
+    const sizes: number[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        const batch = request.prompt.split("批内条目与独立证据目录：\n")[1]
+        const materials = batch
+          ? (JSON.parse(batch) as Array<{
+              entryId: string
+              evidenceCatalog: Array<{ evidenceId: string }>
+            }>)
+          : [{ entryId: "entry-2", evidenceCatalog: [{ evidenceId: "E000001" }] }]
+        if (!batch) expect(request.prompt).toContain("entryId=entry-2")
+        else expect(materials.map((item) => item.entryId)).toEqual(["entry-1", "entry-3"])
+        sizes.push(materials.length)
+        const items = materials.map((item) =>
+          batchSelection(item.entryId, item.evidenceCatalog[0]!.evidenceId),
+        )
+        const output = batch ? { items } : items[0]
+        expect(request.validate(output)).toBe(true)
+        return {
+          result: output as T,
+          model: request.model,
+          durationMs: 1,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
+    })
+    expect(sizes).toEqual([2, 1])
+    expect(result.completed).toBe(3)
   })
 
   it("批调用取消后的晚返回只计实际 usage，不写缓存或发布结果", async () => {

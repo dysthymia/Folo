@@ -1,3 +1,4 @@
+import { semanticEntitySchema, semanticTagIdSchema } from "@follow/information-core"
 import { getEntry } from "@follow/store/entry/getter"
 import { useWhoami } from "@follow/store/user/hooks"
 import { useEffect, useSyncExternalStore } from "react"
@@ -31,6 +32,9 @@ const resultIndexSchema = z.object({
       decisionId: z.string(),
       contentVersion: z.string(),
       releaseVersion: z.number().int().positive(),
+      semanticTags: z.array(semanticTagIdSchema).optional(),
+      // 实体随当前正文的批量投影返回，避免列表逐条读取详情。
+      semanticEntities: z.array(semanticEntitySchema).optional(),
     }),
   ),
 })
@@ -88,6 +92,7 @@ const subscribe = (listener: () => void) => {
   if (listeners.size === 1) {
     refresh()
     interval = setInterval(refresh, 60_000)
+    window.addEventListener("processing-reading-invalidated", invalidate)
   }
   return () => {
     listeners.delete(listener)
@@ -96,8 +101,15 @@ const subscribe = (listener: () => void) => {
       interval = null
       controller?.abort()
       controller = null
+      window.removeEventListener("processing-reading-invalidated", invalidate)
     }
   }
+}
+
+// 人工纠错立即失效当前标签与决定指针，不等待下一轮定时刷新，也不保留旧请求结果。
+const invalidate = () => {
+  reset(ownerId)
+  refresh()
 }
 
 function useResultIndex() {

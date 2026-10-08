@@ -16,6 +16,7 @@ import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
+import { EntrySemanticTags } from "../entry-semantic-tags"
 import { MergedEntriesBadge } from "../merged-entries-badge"
 import { StarIcon } from "../star-icon"
 import type { UniversalItemProps } from "../types"
@@ -125,6 +126,7 @@ export const GridItemFooter = ({
           {t("space")}
           {t("words.ago")}
         </span>
+        <EntrySemanticTags entryId={entryId} className="ml-1" />
       </div>
     </div>
   )

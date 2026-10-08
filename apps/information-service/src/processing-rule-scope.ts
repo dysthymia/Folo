@@ -1,5 +1,5 @@
-import type { RuleInput, RuleSet } from "@follow/information-core"
-import { matchConditions, ruleUsesAI } from "@follow/information-core"
+import type { AutomationRule, RuleInput, RuleSet } from "@follow/information-core"
+import { matchConditions, ruleRequiresSemantics, ruleUsesAI } from "@follow/information-core"
 
 import { processingRuleInput } from "./processing-context"
 import type { Store } from "./store"
@@ -9,7 +9,10 @@ export function resolveAIRuleSourceKeys(
   store: Store,
   config = store.automation.effective().config,
 ): string[] {
-  const rules = config?.rules.filter((rule) => rule.enabled && ruleUsesAI(rule)) ?? []
+  const rules =
+    config?.rules.filter(
+      (rule) => rule.enabled && (ruleUsesAI(rule) || ruleRequiresSemantics(rule)),
+    ) ?? []
   if (!rules.length) return []
   return store
     .sources()
@@ -53,18 +56,48 @@ export function resolveAIRuleSourceKeys(
     .sort()
 }
 
-// 正式调用必须明确命中 AI 规则；全局说明或纯本地动作均不自行开启模型处理。
+// 语义条件本身可要求分类；未知不能被当作未命中而失去首次处理机会。
+function pendingSemanticDependency(rule: AutomationRule, context: RuleInput): boolean {
+  const conditions = [
+    rule.when,
+    ...rule.actions.flatMap((action) =>
+      action.type === "ai_aggregate" || action.type === "ai_dedupe" ? [action.scope] : [],
+    ),
+  ]
+  return conditions.some((set) => {
+    if ("all" in set || matchConditions(set, context).state === "no_match") return false
+    return set.anyOf.some(
+      (group) =>
+        matchConditions({ anyOf: [group] }, context).state !== "no_match" &&
+        group.allOf.some(
+          (condition) =>
+            condition.field === "entry_tag" &&
+            matchConditions({ anyOf: [{ allOf: [condition] }] }, context).state === "unknown",
+        ),
+    )
+  })
+}
+
 export function matchesAIRule(config: RuleSet, context: RuleInput): boolean {
-  return config.rules.some(
-    (rule) =>
-      rule.enabled && ruleUsesAI(rule) && matchConditions(rule.when, context).state === "match",
-  )
+  return config.rules.some((rule) => {
+    if (!rule.enabled) return false
+    const match = matchConditions(rule.when, context).state
+    if (ruleUsesAI(rule) && match === "match") return true
+    return (
+      match !== "no_match" &&
+      ruleRequiresSemantics(rule) &&
+      pendingSemanticDependency(rule, context)
+    )
+  })
 }
 
 export function activateRuleSchedule(store: Store) {
   const previous = store.schedule.snapshot()
   const active = store.automation.effective().config
-  const hasAI = active?.rules.some((rule) => rule.enabled && ruleUsesAI(rule)) ?? false
+  const hasAI =
+    active?.rules.some(
+      (rule) => rule.enabled && (ruleUsesAI(rule) || ruleRequiresSemantics(rule)),
+    ) ?? false
   // 旧计划只在用户首次保存统一规则时迁移；保留原来的时间、历史边界和暂停状态。
   if (!previous.config && !hasAI) return previous
   if (previous.config?.scope.mode === "rules") return previous
@@ -89,7 +122,17 @@ export function runnableReleasedConfig(
   config: RuleSet,
   active: RuleSet | null | undefined,
   context?: RuleInput,
+  allowClassification = true,
 ): RuleSet {
+  // 默认分类由列表加载触发；既有定时去重/综述不能因此扩大成历史标签回跑。
+  if (!allowClassification)
+    config = {
+      ...config,
+      rules: config.rules.flatMap((rule) => {
+        const actions = rule.actions.filter((action) => action.type !== "ai_classify")
+        return actions.length ? [{ ...rule, actions }] : []
+      }),
+    }
   if (!active) return config
   return {
     ...config,
@@ -98,11 +141,19 @@ export function runnableReleasedConfig(
         (candidate) => candidate.id === rule.id && candidate.enabled,
       )
       if (!current) return []
+      // 文章标签尚未知时保留已授权的分类动作，确定不匹配的范围继续排除。
+      const currentMatch = context ? matchConditions(current.when, context).state : "match"
+      if (
+        ruleRequiresSemantics(rule) &&
+        (!ruleRequiresSemantics(current) || currentMatch === "no_match")
+      )
+        return []
       const actions = rule.actions.filter((action) => {
         if (!ruleUsesAI({ actions: [action] })) return true
         return (
           current.actions.some((candidate) => candidate.type === action.type) &&
-          (!context || matchConditions(current.when, context).state === "match")
+          (currentMatch === "match" ||
+            (currentMatch === "unknown" && ruleRequiresSemantics(current)))
         )
       })
       return actions.length ? [{ ...rule, actions }] : []

@@ -7,6 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { readingRequest } from "./processing-reader-client"
 import { ProcessingEntryResultPanel } from "./ProcessingEntryResultPanel"
 
+vi.mock("./EntryEventsPanel", () => ({
+  EntryEventsPanel: ({ inputSeq }: { inputSeq: number }) => <div data-entry-events={inputSeq} />,
+}))
+
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock("./processing-reader-client", () => ({ readingRequest: vi.fn() }))
 
@@ -56,6 +60,33 @@ describe("ProcessingEntryResultPanel", () => {
     )
     expect(container.textContent).toContain("AI 标题")
     expect(container.textContent).toContain("AI 摘要")
+    expect(container.querySelector('[data-entry-events="2"]')).not.toBeNull()
+    await act(async () => root.unmount())
+    container.remove()
+  })
+
+  it("拒绝与当前正文版本不一致的语义画像", async () => {
+    request.mockResolvedValueOnce({
+      entry: {
+        ...entry,
+        decision: {
+          ...entry.decision,
+          semanticProfile: {
+            schemaVersion: 2,
+            contentVersion: "v3",
+            materialDigest: "material",
+            definitionDigest: "definition",
+            assessedTagIds: [],
+            assessments: [],
+            evidence: {},
+            coverage: "partial",
+          },
+        },
+      },
+    })
+    const { container, root } = await show()
+    expect(container.textContent).toContain("processing.result.unavailable")
+    expect(container.textContent).not.toContain("AI 摘要")
     await act(async () => root.unmount())
     container.remove()
   })

@@ -11,6 +11,9 @@ import type { CodexUsage, runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
 import type { Source, SourceEntry } from "./folo"
 import { processingRuleInput } from "./processing-context"
+import type { ProcessingDecision } from "./processing-decision"
+import type { EventRecallMetadata } from "./processing-event-recall"
+import { validatedEventRecall } from "./processing-event-recall"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
 import type { ProcessingReadingStore } from "./processing-reading-store"
@@ -66,9 +69,17 @@ export type CachedDedupeRelation = {
 }
 export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate) {
   // 包括方向和全部模型可见字段，防止正文、标题、时间或来源变化后误用旧结论。
-  return createHash("sha256")
-    .update(JSON.stringify([SEMANTIC_DUPLICATE_PROMPT_VERSION, candidate.entries]))
-    .digest("hex")
+  return (
+    createHash("sha256")
+      // 召回登记变化不会改变全文比较证据，不任意清空已有肯定或否定关系。
+      .update(
+        JSON.stringify([
+          SEMANTIC_DUPLICATE_PROMPT_VERSION,
+          candidate.entries.map(({ recall: _recall, ...entry }) => entry),
+        ]),
+      )
+      .digest("hex")
+  )
 }
 
 /**
@@ -235,6 +246,11 @@ export class ProcessingDedupeStore {
     if (!columns.some((row) => row.name === "attempts"))
       db.exec(
         "ALTER TABLE processing_dedupe_decisions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
+      )
+    const scanColumns = db.prepare("PRAGMA table_info(processing_dedupe_scans)").all()
+    if (!scanColumns.some((row) => row.name === "recall_watermark"))
+      db.exec(
+        "ALTER TABLE processing_dedupe_scans ADD COLUMN recall_watermark TEXT NOT NULL DEFAULT 'text-v1'",
       )
   }
 
@@ -429,7 +445,10 @@ export class ProcessingDedupeStore {
   }
 
   /** 已完成整轮扫描且没有可比对象的条目，避免每轮把全库重扫一遍。 */
-  settledItemIds(fingerprints: ReadonlySet<string>): ReadonlySet<string> {
+  settledItemIds(
+    fingerprints: ReadonlySet<string>,
+    recallWatermark = "text-v1",
+  ): ReadonlySet<string> {
     if (fingerprints.size === 0) return new Set()
     const byKey = this.currentInputs()
     const settled = new Set<string>()
@@ -439,6 +458,7 @@ export class ProcessingDedupeStore {
       )
       .all(...fingerprints)) {
       if (!fingerprints.has(String(row.config_fingerprint))) continue
+      if (row.recall_watermark !== recallWatermark) continue
       const input = byKey.get(inputKey(String(row.source_key), String(row.item_id)))
       if (
         !input?.current ||
@@ -552,17 +572,17 @@ export class ProcessingDedupeStore {
   }
 
   /** 登记"这些条目已完成整轮扫描且无可比对象"，下一轮不再重复预筛。 */
-  markScanned(configFingerprint: string, inputs: ProcessingInput[]) {
+  markScanned(configFingerprint: string, inputs: ProcessingInput[], recallWatermark = "text-v1") {
     if (inputs.length === 0) return
     const now = new Date().toISOString()
     const byKey = this.currentInputs()
     this.db.exec("SAVEPOINT dedupe_scans")
     try {
       const insert = this.db.prepare(
-        `INSERT INTO processing_dedupe_scans(source_key,item_id,content_version,config_fingerprint,created_at,input_seq,generation)
-         VALUES(?,?,?,?,?,?,?)
+        `INSERT INTO processing_dedupe_scans(source_key,item_id,content_version,config_fingerprint,created_at,input_seq,generation,recall_watermark)
+         VALUES(?,?,?,?,?,?,?,?)
          ON CONFLICT(source_key,item_id,config_fingerprint) DO UPDATE SET
-           content_version=excluded.content_version,created_at=excluded.created_at,input_seq=excluded.input_seq,generation=excluded.generation`,
+           content_version=excluded.content_version,created_at=excluded.created_at,input_seq=excluded.input_seq,generation=excluded.generation,recall_watermark=excluded.recall_watermark`,
       )
       for (const item of inputs) {
         const current = byKey.get(inputKey(item.sourceKey, item.itemId))
@@ -575,6 +595,7 @@ export class ProcessingDedupeStore {
           now,
           item.seq,
           item.generation,
+          recallWatermark,
         )
       }
       this.db.exec("RELEASE dedupe_scans")
@@ -612,6 +633,8 @@ export type SemanticDedupeStore = {
   dedupe: ProcessingDedupeStore
   sources: () => Source[]
   reading: Pick<ProcessingReadingStore, "representedInputSeqs">
+  /** 已有当前登记/分析结果提供召回，准备过程不调用模型、不扩展读取范围。 */
+  eventRecall?: (input: ProcessingInput, decision?: ProcessingDecision) => EventRecallMetadata
 }
 
 export type SemanticDedupePreparationOptions = {
@@ -635,6 +658,7 @@ export type PreparedSemanticDedupe = {
   participants: DedupeParticipant[]
   targetItemIds: ReadonlySet<string>
   candidates: SemanticDuplicateCandidate[]
+  recallWatermark: string
   exact: ReturnType<typeof exactDuplicateDecisions>
 }
 
@@ -742,6 +766,9 @@ export function prepareSemanticDedupe(
           sourceTitle: source.title,
           title: input.body.title,
           urlHost: dedupeUrlHost(input.body.url),
+          ...(options.store.eventRecall
+            ? { recall: options.store.eventRecall(input, decision) }
+            : {}),
         },
         input,
         readReference,
@@ -760,6 +787,20 @@ export function prepareSemanticDedupe(
         unique.set(participant.input.itemId, participant)
     }
     const uniqueParticipants = [...unique.values()]
+    // 水位只覆盖当前合资格范围的有证据登记；迟到事件索引不能被旧文本扫描永久屏蔽。
+    const recallRows = uniqueParticipants
+      .flatMap(({ input, entry }) => {
+        const recall = validatedEventRecall(entry)
+        return recall.eventIds.length || recall.identities.length
+          ? [[input.sourceKey, input.itemId, input.contentVersion, recall]]
+          : []
+      })
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+    const recallWatermark = recallRows.length
+      ? createHash("sha256")
+          .update(JSON.stringify(["event-recall-v1", recallRows]))
+          .digest("hex")
+      : "text-v1"
     const targetItemIds = new Set(
       participants
         .filter(
@@ -782,9 +823,16 @@ export function prepareSemanticDedupe(
       uniqueParticipants.filter((item) => !exactHidden.has(item.input.itemId)),
       targetItemIds,
       options.store.dedupe.candidateExcludedPairKeys(fingerprints),
-      options.store.dedupe.settledItemIds(fingerprints),
+      options.store.dedupe.settledItemIds(fingerprints, recallWatermark),
     )
-    return { action, candidates, exact, participants: uniqueParticipants, targetItemIds }
+    return {
+      action,
+      candidates,
+      exact,
+      participants: uniqueParticipants,
+      targetItemIds,
+      recallWatermark,
+    }
   })
 }
 
@@ -843,7 +891,7 @@ export async function runSemanticDedupe(
     if (options.signal.aborted) break
     const fingerprints = new Set([action.fingerprint])
     const decided = options.store.dedupe.candidateExcludedPairKeys(fingerprints)
-    const settled = options.store.dedupe.settledItemIds(fingerprints)
+    const settled = options.store.dedupe.settledItemIds(fingerprints, plan.recallWatermark)
     if (targetItemIds?.size === 0 || participants.length < 2) continue
     const entries = [...participants].sort(
       (left, right) =>
@@ -883,6 +931,7 @@ export async function runSemanticDedupe(
         entries
           .filter((participant) => !targetItemIds || targetItemIds.has(participant.input.itemId))
           .map((participant) => participant.input),
+        plan.recallWatermark,
       )
       continue
     }
@@ -1087,6 +1136,7 @@ export async function runSemanticDedupe(
         entries
           .filter((item) => !targetItemIds || targetItemIds.has(item.input.itemId))
           .map((item) => item.input),
+        plan.recallWatermark,
       )
   }
   result.unresolved = options.store.dedupe.unresolvedDecisions(

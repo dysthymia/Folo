@@ -289,3 +289,127 @@ export function hasConfirmedEvent(event: unknown): boolean {
     ) !== null
   )
 }
+
+// related 身份允许分析/教程指向底层具体事件；Story 的 traceableEvent 仍只接受 kind=event。
+export function traceableRelatedEvent(event: unknown, text: string): EventIdentity | null {
+  const parsed = eventIdentitySchema.safeParse(event)
+  if (!parsed.success) return null
+  const identity = parsed.data
+  if (!traceableEvent({ ...identity, kind: "event" }, text)) return null
+  // 名称、版本和轮次必须受其本身的连续证据支持，不借相邻片段或记忆中的别名补足。
+  for (const field of [identity.subject, identity.object, identity.version, identity.round]) {
+    if (field && !supportsIdentityValue(field.value, field.quote)) return null
+  }
+  const { anchor } = identity
+  if (anchor?.kind === "official_reference" && !supportsIdentityValue(anchor.value, anchor.quote))
+    return null
+  if (anchor?.kind === "event_date" || anchor?.kind === "event_time") {
+    if (!supportsEventDate(anchor.value.slice(0, 10), anchor.quote)) return null
+    if (anchor.timeZone && !supportsEventZone(anchor.timeZone, anchor.quote)) return null
+    if (anchor.kind === "event_time") {
+      const localTime = anchor.value.slice(11).match(/^(\d{2}):(\d{2})(?::(\d{2}))?/u)
+      if (!localTime) return null
+      const hour = Number(localTime[1])
+      const minute = Number(localTime[2])
+      const second = Number(localTime[3] ?? "0")
+      const supportedTime = [
+        ...anchor.quote.matchAll(
+          /(?:^|\D)(\d{1,2})(?::|时)(\d{1,2})(?::(\d{1,2})|分(\d{1,2})秒)?/gu,
+        ),
+      ].some(
+        (match) =>
+          Number(match[1]) === hour &&
+          Number(match[2]) === minute &&
+          Number(match[3] ?? match[4] ?? "0") === second,
+      )
+      const offset = /(?:Z|[+-]\d{2}:\d{2})$/u.exec(anchor.value)?.[0]
+      if (!supportedTime || !offset || !supportsEventZone(offset, anchor.quote)) return null
+    }
+  }
+  return identity
+}
+
+function supportsIdentityValue(value: string, quote: string): boolean {
+  if (/^https?:\/\//iu.test(value)) {
+    const urls = quote.match(/https?:\/\/[^\s<>"'，。；）)]+/gu) ?? []
+    return urls.some((url) => canonical(url) === canonical(value))
+  }
+  // 仅消除中英文排版空格和合法数字千分位；保留拉丁词间空格及版本边界，避免拼接不同名称。
+  const normalized = (text: string) =>
+    text
+      .normalize("NFKC")
+      .replace(/(?<![\d.,])\d{1,3}(?:,\d{3})+(?![\d,])/gu, (number) => number.replaceAll(",", ""))
+      .replace(/(?<=\p{Script=Han})\s+|\s+(?=\p{Script=Han})/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .toLowerCase()
+  const original = normalized(quote)
+  const name = normalized(value)
+  const latin = /[a-z0-9_]/u
+  let position = original.indexOf(name)
+  while (position >= 0) {
+    const before = original[position - 1] ?? ""
+    const after = original[position + name.length] ?? ""
+    if (
+      (!latin.test(name[0]!) || !latin.test(before)) &&
+      (!latin.test(name.at(-1)!) || !latin.test(after))
+    )
+      return true
+    position = original.indexOf(name, position + 1)
+  }
+  return false
+}
+
+function supportsEventDate(value: string, quote: string): boolean {
+  const [year, month, day] = value.split("-").map(Number)
+  for (const match of quote.matchAll(/(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})日?/gu))
+    if (Number(match[1]) === year && Number(match[2]) === month && Number(match[3]) === day)
+      return true
+  const months = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ]
+  const monthName = months[month! - 1]
+  if (!monthName) return false
+  const name = `(?:${monthName}|${monthName.slice(0, 3)}\\.?)`
+  return new RegExp(
+    `\\b(?:${name}\\s+0?${day}(?:st|nd|rd|th)?[,]?\\s+${year}|0?${day}\\s+${name}\\s+${year})\\b`,
+    "iu",
+  ).test(quote)
+}
+
+function supportsEventZone(zone: string, quote: string): boolean {
+  // UTC-04:00 不能支持 UTC，时区缩写必须有完整边界，不能按子串升级。
+  if (/^[A-Za-z_]+(?:\/[A-Za-z_+-]+)+$/u.test(zone) && quote.includes(zone)) {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: zone }).format(0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (zone === "Z" && /\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z\b/u.test(quote)) return true
+  const offset = zone === "Z" || zone === "UTC" ? "+00:00" : zone
+  if (offset === "+00:00" && /\b(?:UTC|GMT)(?![+-])\b/u.test(quote)) return true
+  // 北京时间是明确时区名称，国家名等宽泛地理信息不能用于推算。
+  if (
+    ["Asia/Shanghai", "+08:00", "UTC+08:00"].includes(zone) &&
+    /北京时间|Beijing time/iu.test(quote)
+  )
+    return true
+  const match = /^(?:UTC)?([+-])(\d{2}):(\d{2})$/u.exec(offset)
+  if (!match) return false
+  const sign = match[1] === "+" ? "\\+" : "-"
+  const minute = match[3] === "00" ? "(?::00|00)?" : `(?::${match[3]}|${match[3]})`
+  return new RegExp(`(?:UTC|GMT)?${sign}0?${Number(match[2])}${minute}(?![:\\d])`, "u").test(quote)
+}

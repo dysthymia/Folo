@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
+import type { SourceEntry } from "./folo"
+import type { ProcessingDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
 import { compatibleEvents, traceableEvent } from "./processing-event"
+import { factsForPrimaryEvent } from "./processing-event-mentions"
+import { unchangedStoryMaterial } from "./story-material"
 
 export type StoryStatus = "active" | "merged" | "split" | "repairing"
 export type StoryFactKind = "fact" | "source_claim" | "inference"
@@ -121,7 +125,10 @@ type StoryRow = Record<string, unknown>
 
 // Story 只保存派生阅读对象；原文 read 状态和原文内容仍由既有 Folo 读取链路管理。
 export class StoryStore {
-  constructor(private readonly db: DatabaseSync) {
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly eventMembersAllowed?: (members: StoryMemberReference[]) => boolean,
+  ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS stories (
         id TEXT PRIMARY KEY,
@@ -134,6 +141,13 @@ export class StoryStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS story_event_links (
+        story_id TEXT NOT NULL,
+        story_revision INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY(story_id, story_revision, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS story_event_lookup ON story_event_links(event_id, story_id);
       CREATE TABLE IF NOT EXISTS story_revisions (
         story_id TEXT NOT NULL,
         revision INTEGER NOT NULL,
@@ -360,6 +374,97 @@ export class StoryStore {
         })
         return [{ story, revision, memberOrigins }]
       })
+  }
+
+  // 完整材料和单篇许可均未变时，只把旧引用绑定到新正文版本；保留所有句段、事实和历史版本。
+  unchangedRepairDraft(
+    target: RepairingStory,
+    members: StoryMemberReference[],
+    appliedRuleSetVersion: number,
+    instructionFingerprint: string,
+    legacyInstructionFingerprint: string,
+  ): StoryRevisionDraft | null {
+    if (
+      target.revision.appliedRuleSetVersion !== appliedRuleSetVersion ||
+      ![instructionFingerprint, legacyInstructionFingerprint].includes(
+        target.revision.instructionFingerprint,
+      ) ||
+      members.length !== target.revision.members.length ||
+      target.memberOrigins.length !== members.length
+    )
+      return null
+    const read = (member: StoryMemberReference) => {
+      const row = this.db
+        .prepare(
+          `SELECT inputs.source_key,inputs.item_id,inputs.content_version,inputs.body AS input,decisions.body AS decision
+           FROM processing_inputs inputs JOIN entry_decisions decisions ON decisions.input_seq=inputs.seq
+           AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version
+           WHERE inputs.seq=? AND decisions.id=?`,
+        )
+        .get(member.inputSeq, member.decisionId)
+      return row
+        ? {
+            member,
+            sourceKey: String(row.source_key),
+            itemId: String(row.item_id),
+            contentVersion: String(row.content_version),
+            body: JSON.parse(String(row.input)) as SourceEntry,
+            decision: JSON.parse(String(row.decision)) as ProcessingDecision,
+          }
+        : null
+    }
+    const current = members.map((member) => (this.memberIsCurrent(member) ? read(member) : null))
+    const replacements = new Map<number, NonNullable<ReturnType<typeof read>>>()
+    for (const member of target.revision.members) {
+      const previous = read(member)
+      if (!previous) return null
+      const replacement = current.find(
+        (item) => item?.sourceKey === previous.sourceKey && item.itemId === previous.itemId,
+      )
+      if (!replacement || !unchangedStoryMaterial(previous, replacement)) return null
+      replacements.set(member.inputSeq, replacement)
+    }
+    if (
+      new Set([...replacements.values()].map((item) => item.member.inputSeq)).size !==
+      members.length
+    )
+      return null
+    const draft: StoryRevisionDraft = {
+      ...(target.revision.eventIdentity ? { eventIdentity: target.revision.eventIdentity } : {}),
+      title: target.revision.title,
+      body: target.revision.body,
+      aggregationRuleId: target.revision.aggregationRuleId,
+      aggregationScopeVersion: target.revision.aggregationScopeVersion,
+      appliedRuleSetVersion,
+      instructionFingerprint,
+      members,
+      sourceSpans: target.revision.sourceSpans.map((span) => {
+        const replacement = replacements.get(span.inputSeq)
+        return replacement
+          ? {
+              ...span,
+              inputSeq: replacement.member.inputSeq,
+              contentVersion: replacement.contentVersion,
+              fragmentId: sourceSpanFragmentId(
+                replacement.itemId,
+                replacement.contentVersion,
+                span.quote,
+              ),
+            }
+          : span
+      }),
+      citations: target.revision.citations,
+      sentences: target.revision.sentences,
+      facts: target.revision.facts,
+    }
+    try {
+      // 重新走当前指针、人工排除、事件归属和逐字证据校验，不能仅凭材料相等恢复失效成员。
+      this.validateDraft(draft)
+      this.assertMembersNotExcluded(target.story.id, members)
+      return draft
+    } catch {
+      return null
+    }
   }
 
   // 仅 repairing 的原 ID 可恢复；新草稿仍经过成员、原文 span、事实依赖与排除约束校验。
@@ -765,6 +870,7 @@ export class StoryStore {
 
   // 只读核验持久化成员的原文身份；旧记录不自动猜测，也不改写历史revision。
   eventIdentityForMembers(members: StoryMemberReference[]): EventIdentity | null {
+    if (this.eventMembersAllowed && !this.eventMembersAllowed(members)) return null
     const events: EventIdentity[] = []
     for (const member of members) {
       const row = this.db
@@ -773,13 +879,49 @@ export class StoryStore {
         )
         .get(member.decisionId, member.inputSeq)
       if (!row) return null
-      const decision = JSON.parse(String(row.decision)) as { semantic?: { event?: unknown } }
+      const decision = JSON.parse(String(row.decision)) as ProcessingDecision
       const original = sourceTextFromInputBody(String(row.input))
       const event = original === null ? null : traceableEvent(decision.semantic?.event, original)
       if (!event || events.some((previous) => !compatibleEvents(previous, event))) return null
+      // 有背景提及的报道仍需至少一条可隔离主事实，不能把整篇周报身份当成许可证。
+      if (
+        (decision.semantic?.eventMentions?.length ?? 0) > 1 &&
+        !factsForPrimaryEvent(decision.facts, decision.semantic!, original!).length
+      )
+        return null
       events.push(event)
     }
     return events[0] ?? null
+  }
+
+  // 事件关联是当前阅读投影，不改 Story 的 ID、正文、读态或收藏，也不制造新综述。
+  synchronizeEventLinks(resolve: (revision: StoryRevision) => string[]) {
+    return this.transaction(() => {
+      this.db.prepare("DELETE FROM story_event_links").run()
+      const insert = this.db.prepare("INSERT INTO story_event_links VALUES(?,?,?)")
+      for (const story of this.list()) {
+        const revision = this.currentSnapshot(story.id)
+        if (!revision?.eventIdentity) continue
+        for (const eventId of new Set(resolve(revision)))
+          insert.run(story.id, revision.revision, eventId)
+      }
+    })
+  }
+
+  linkedStories(eventId: string) {
+    return this.db
+      .prepare(
+        `SELECT links.story_id FROM story_event_links links
+      JOIN stories ON stories.id=links.story_id AND stories.current_revision=links.story_revision
+      WHERE links.event_id=? AND stories.status='active' ORDER BY stories.updated_at DESC`,
+      )
+      .all(eventId)
+      .flatMap((row) => {
+        const revision = this.currentSnapshot(String(row.story_id))
+        return revision
+          ? [{ id: revision.storyId, title: revision.title, revision: revision.revision }]
+          : []
+      })
   }
 
   canAggregate(aggregationRuleId: string, aggregationScopeVersion: string, inputSeqs: number[]) {
@@ -1026,6 +1168,9 @@ export class StoryStore {
     )
       throw new StoryStoreError("invalid_reference")
     const memberSet = new Set(memberIds)
+    // 每个成员只读一次事实许可证；同一报道多条引用不重复查询和扫描原文。
+    const scopedQuotes = new Map<number, Set<string> | null>()
+    const normalizeQuote = (quote: string) => quote.replace(/\s+/gu, " ").trim()
     for (const span of input.sourceSpans) {
       if (
         !span.id.trim() ||
@@ -1038,6 +1183,32 @@ export class StoryStore {
       )
         throw new StoryStoreError("invalid_reference")
       this.validateSpan(span)
+      if (input.eventIdentity) {
+        if (!scopedQuotes.has(span.inputSeq)) {
+          const member = input.members.find((item) => item.inputSeq === span.inputSeq)!
+          const row = this.db
+            .prepare(
+              "SELECT decisions.body AS decision, inputs.body AS input FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.seq=decisions.input_seq WHERE decisions.id=? AND inputs.seq=?",
+            )
+            .get(member.decisionId, member.inputSeq)!
+          const decision = JSON.parse(String(row.decision)) as ProcessingDecision
+          const original = sourceTextFromInputBody(String(row.input))
+          const facts =
+            (decision.semantic?.eventMentions?.length ?? 0) > 1
+              ? original === null
+                ? []
+                : factsForPrimaryEvent(decision.facts, decision.semantic!, original)
+              : null
+          scopedQuotes.set(
+            span.inputSeq,
+            facts === null ? null : new Set(facts.map((fact) => normalizeQuote(fact.quote))),
+          )
+        }
+        // 持久化边界再次隔离背景片段，人工操作、缓存或共享草稿也不能绕过主事实范围。
+        const allowed = scopedQuotes.get(span.inputSeq)
+        if (allowed && !allowed.has(normalizeQuote(span.quote)))
+          throw new StoryStoreError("invalid_reference")
+      }
     }
     const spanSet = new Set(spanIds)
     const sentenceSet = new Set(sentenceIds)

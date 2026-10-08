@@ -13,7 +13,11 @@ import { CodexExecutionQueueError, runSerialized } from "./codex-execution-queue
 import { startQianwenResponsesBridge } from "./qianwen-responses-bridge"
 
 const MAX_OUTPUT_BYTES = 1024 * 1024
+// 复杂阅读任务允许执行十分钟；调用方仍可为试验或取消场景指定更短期限。
+export const DEFAULT_CODEX_TIMEOUT_MS = 10 * 60_000
 const TERMINATION_GRACE_MS = 250
+// 模型完成后只给 CLI 留短暂落盘时间；收尾不能继续消耗模型执行期限。
+const COMPLETION_EXIT_GRACE_MS = 1_000
 const ENVIRONMENT_KEYS = [
   "ALL_PROXY",
   "CODEX_HOME",
@@ -233,7 +237,12 @@ const execute = ({
   timeoutMs: number
   signal?: AbortSignal
   environment?: NodeJS.ProcessEnv
-}): Promise<{ usage: CodexUsage | null; toolCalls: number }> =>
+}): Promise<{
+  usage: CodexUsage | null
+  toolCalls: number
+  completionCleanup: boolean
+  outputText: string | undefined
+}> =>
   new Promise((resolveRun, rejectRun) => {
     if (signal?.aborted) {
       rejectRun(new CodexRunError("ABORTED"))
@@ -248,10 +257,13 @@ const execute = ({
     })
     let failure: CodexRunError | undefined
     let killTimer: ReturnType<typeof setTimeout> | undefined
+    let completionTimer: ReturnType<typeof setTimeout> | undefined
+    let completionCleanup = false
     let outputBytes = 0
     let pendingLine = ""
     let turnCompleted = false
     let usage: CodexUsage | null = null
+    let outputText: string | undefined
     let toolCalls = 0
     let closed = false
     let exitCode: number | null = null
@@ -259,9 +271,10 @@ const execute = ({
     const finish = () => {
       if (!closed || killTimer) return
       if (failure) rejectRun(new CodexRunError(failure.code, usage))
-      else if (exitCode !== 0) rejectRun(new CodexRunError("PROCESS_FAILED", usage))
+      else if (exitCode !== 0 && !completionCleanup)
+        rejectRun(new CodexRunError("PROCESS_FAILED", usage))
       else if (!turnCompleted) rejectRun(new CodexRunError("INCOMPLETE_TURN", usage))
-      else resolveRun({ usage, toolCalls })
+      else resolveRun({ usage, toolCalls, completionCleanup, outputText })
     }
 
     const kill = (killSignal: NodeJS.Signals) => {
@@ -272,15 +285,20 @@ const execute = ({
         // 进程可能已自行退出；close 事件仍是完成清理与结算的唯一入口。
       }
     }
-    const stop = (code: CodexRunErrorCode) => {
-      if (failure) return
-      failure = new CodexRunError(code)
+    const terminate = () => {
+      if (killTimer) return
       kill("SIGTERM")
       killTimer = setTimeout(() => {
         kill("SIGKILL")
         killTimer = undefined
         finish()
       }, TERMINATION_GRACE_MS)
+    }
+    const stop = (code: CodexRunErrorCode) => {
+      if (failure) return
+      failure = new CodexRunError(code)
+      clearTimeout(completionTimer)
+      terminate()
     }
     const onAbort = () => stop("ABORTED")
     const timeout = setTimeout(() => stop("TIMEOUT"), timeoutMs)
@@ -305,6 +323,14 @@ const execute = ({
       if (event.type === "turn.completed") {
         turnCompleted = true
         usage = readUsage(event.usage)
+        clearTimeout(timeout)
+        // 完成事件之后仍校验最终文件；仅清理迟迟不退出的进程，不接受缺失或无效结果。
+        if (!closed)
+          completionTimer ??= setTimeout(() => {
+            if (closed || failure) return
+            completionCleanup = true
+            terminate()
+          }, COMPLETION_EXIT_GRACE_MS)
       }
       if (event.type.startsWith("item.")) {
         if (!isRecord(event.item) || typeof event.item.type !== "string") {
@@ -315,6 +341,13 @@ const execute = ({
           stop(classifyProcessFailure(event.item))
           return
         }
+        // 只保留最后一条已完成的响应，避免 CLI 收尾尚未落盘时丢失已经返回的 JSON。
+        if (
+          event.type === "item.completed" &&
+          event.item.type === "agent_message" &&
+          typeof event.item.text === "string"
+        )
+          outputText = event.item.text
         // 只接受推理与文本消息，未知条目同样按工具活动中止，防止新增工具漏检。
         if (!["agent_message", "reasoning"].includes(event.item.type)) {
           toolCalls += 1
@@ -349,10 +382,11 @@ const execute = ({
     child.on("error", () => stop("SPAWN_FAILED"))
     child.on("close", (code) => {
       clearTimeout(timeout)
+      clearTimeout(completionTimer)
       signal?.removeEventListener("abort", onAbort)
-      parseLine(pendingLine)
       closed = true
       exitCode = code
+      parseLine(pendingLine)
       // 父进程先退出时仍执行组级 KILL，不能遗留忽略 TERM 的子孙进程。
       finish()
     })
@@ -383,7 +417,7 @@ const runCodexJsonUnlocked = async <T>(
     model,
     reasoningEffort = "low",
     runtimeDir,
-    timeoutMs = 120_000,
+    timeoutMs = DEFAULT_CODEX_TIMEOUT_MS,
     signal,
     command = resolveCodexCommand(),
     qianwen,
@@ -418,6 +452,8 @@ const runCodexJsonUnlocked = async <T>(
   let attempted = false
   let recordedUsage: CodexUsage | null = null
   let resultCode: string = "succeeded"
+  let completionCleanup = false
+  let resultSource: "file" | "jsonl" | null = null
   let bridge: Awaited<ReturnType<typeof startQianwenResponsesBridge>> | undefined
   try {
     await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 })
@@ -506,6 +542,7 @@ const runCodexJsonUnlocked = async <T>(
       timeoutMs,
       signal,
     })
+    completionCleanup = execution.completionCleanup
     recordedUsage = bridge ? bridge.getUsage() : execution.usage
     if (signal?.aborted) throw new CodexRunError("ABORTED")
     let output: unknown
@@ -513,10 +550,19 @@ const runCodexJsonUnlocked = async <T>(
       const outputStat = await stat(outputPath)
       if (outputStat.size > MAX_OUTPUT_BYTES) throw new CodexRunError("OUTPUT_LIMIT")
       output = JSON.parse(await readFile(outputPath, "utf8"))
+      resultSource = "file"
     } catch (error) {
       if (error instanceof CodexRunError) throw error
-      if (isRecord(error) && error.code === "ENOENT") throw new CodexRunError("MISSING_OUTPUT")
-      throw new CodexRunError("INVALID_OUTPUT")
+      const missing = isRecord(error) && error.code === "ENOENT"
+      // JSONL 完成消息与最终文件使用相同的结构校验，正文只暂存在内存，不进入用量日志。
+      if (execution.outputText === undefined)
+        throw new CodexRunError(missing ? "MISSING_OUTPUT" : "INVALID_OUTPUT")
+      try {
+        output = JSON.parse(execution.outputText)
+        resultSource = "jsonl"
+      } catch {
+        throw new CodexRunError("INVALID_OUTPUT")
+      }
     }
     try {
       if (!validate(output)) throw new CodexRunError("INVALID_OUTPUT")
@@ -529,7 +575,7 @@ const runCodexJsonUnlocked = async <T>(
       model,
       durationMs: Date.now() - startedAt,
       queueDurationMs: startedAt - queuedAt,
-      ...execution,
+      toolCalls: execution.toolCalls,
       usage: recordedUsage,
     }
   } catch (error) {
@@ -556,6 +602,9 @@ const runCodexJsonUnlocked = async <T>(
             startedAt: new Date(startedAt).toISOString(),
             queueDurationMs: startedAt - queuedAt,
             executionDurationMs: Date.now() - startedAt,
+            timeoutMs,
+            completionCleanup,
+            resultSource,
             promptChars: prompt.length,
             schemaChars: JSON.stringify(schema).length,
             triggerId: telemetry?.triggerId ?? null,
@@ -564,6 +613,7 @@ const runCodexJsonUnlocked = async <T>(
             pairCount: telemetry?.pairCount ?? null,
             finishedAt: new Date().toISOString(),
             model,
+            reasoningEffort,
             provider: qianwen ? (qianwen.provider ?? "qianwen") : "codex",
             purpose,
             status: resultCode,

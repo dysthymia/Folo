@@ -48,7 +48,10 @@ function schedule(store: Store) {
   })
 }
 
-afterEach(() => stores.splice(0).forEach((store) => store.close()))
+afterEach(() => {
+  stores.splice(0).forEach((store) => store.close())
+  vi.restoreAllMocks()
+})
 
 describe("处理服务 API", () => {
   it("只用当前 decision 的引用反馈标记待核对，旧 decision 不污染新结果", () => {
@@ -96,6 +99,32 @@ describe("处理服务 API", () => {
     expect(processingApi(store, "GET", "/processing/entries", {})).toMatchObject({
       entries: [{ reviewNeeded: true, issueCount: 1 }],
     })
+
+    // 单条详情必须下推主键范围，并完整保留 AI 决定及原文，不调用处理器。
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const published = vi.spyOn(store.processingState, "published")
+    const overrides = vi.spyOn(store.processingState, "overrides")
+    const feedback = vi.spyOn(store.feedback, "list")
+    expect(processingApi(store, "GET", `/processing/entries/${firstInput.seq}`, {})).toMatchObject({
+      entry: {
+        seq: firstInput.seq,
+        input: entry,
+        contentVersion: firstInput.contentVersion,
+        decisionId: firstPublished.decisionId,
+        decision,
+        reviewNeeded: true,
+        issueCount: 1,
+      },
+    })
+    expect(
+      inputs.mock.calls.every(
+        ([seqs]) => JSON.stringify(seqs) === JSON.stringify([firstInput.seq]),
+      ),
+    ).toBe(true)
+    expect(published.mock.calls).toEqual([[[firstInput.seq]], [[firstInput.seq]]])
+    expect(overrides).toHaveBeenCalledExactlyOnceWith([firstInput.seq])
+    expect(feedback).toHaveBeenCalledExactlyOnceWith([firstPublished.decisionId])
+    vi.restoreAllMocks()
 
     store.saveEntry({ ...entry, content: "更新后的正文" })
     const secondInput = store.automation.assign(store.automation.inputs()[0]!.seq)

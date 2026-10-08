@@ -66,6 +66,43 @@ afterEach(() => stores.splice(0).forEach((store) => store.close()))
 
 // 只使用内存库，验证事件捕获和队列范围，不请求真实模型。
 describe("列表加载自动化入口", () => {
+  it("只有语义阅读动作也能接收授权来源的新未读条目", () => {
+    const store = fixture()
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...draft.config,
+        formatVersion: 5,
+        rules: draft.config.rules.map((rule) => ({
+          ...rule,
+          when: {
+            anyOf: [
+              {
+                allOf: [
+                  { field: "source_id", operator: "in", value: [source.key] },
+                  {
+                    field: "entry_tag",
+                    operator: "contains_any",
+                    value: ["signal:social_chatter"],
+                  },
+                ],
+              },
+            ],
+          },
+          actions: [{ type: "reading_decision", visibility: "hide" }],
+        })),
+      },
+      draft.revision,
+    )
+    store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+    const result = processListLoaded(
+      store,
+      { entries: [listed, { ...listed, id: "outside", sourceKey: "feed/other" }] },
+      now,
+    )
+    expect(result.accepted).toBe(1)
+    expect(result.trigger?.targets).toEqual([{ sourceKey: source.key, itemId: listed.id }])
+  })
   it("严格校验列表元信息、最多一百条且不能提交正文", () => {
     const store = fixture()
     expect(() =>
@@ -190,4 +227,50 @@ describe("列表加载自动化入口", () => {
     expect(result.trigger?.id).toBe(scheduled.id)
     expect(store.schedule.triggers()).toHaveLength(1)
   })
+})
+
+it("只重排本次加载且缺少标签的未读条目，并保持定时来源范围", () => {
+  const store = fixture()
+  const old = { ...listed, id: "old", sourceKey: "feed/other", content: "真实正文" }
+  const unread = { ...old, id: "unread" }
+  const read = { ...old, id: "read", read: true }
+  for (const entry of [old, unread, read]) {
+    store.saveEntry(entry)
+    store.automation.recalculate(store.automation.current(entry.sourceKey, entry.id)!, {}, 1)
+  }
+  const draft = store.automation.draft()
+  store.automation.activateRule(
+    "classify",
+    {
+      id: "classify",
+      ownerId: "owner",
+      name: "标签",
+      order: 1,
+      enabled: true,
+      version: 1,
+      executionLocation: "processing_service",
+      when: { all: true },
+      actions: [{ type: "ai_classify", tagIds: ["topic:ai"] }],
+    },
+    draft.revision,
+    randomUUID(),
+  )
+  const prior = store.automation.current(old.sourceKey, old.id)!
+  const result = processListLoaded(
+    store,
+    { entries: [unread, read].map(({ content: _content, ...entry }) => entry) },
+    now,
+  )
+  expect(result.accepted).toBe(1)
+  expect(result.trigger?.targets).toEqual([{ sourceKey: unread.sourceKey, itemId: unread.id }])
+  expect(store.automation.current(unread.sourceKey, unread.id)).toMatchObject({
+    status: "pending",
+    releaseVersion: 2,
+  })
+  expect(store.automation.current(old.sourceKey, old.id)).toEqual(prior)
+  expect(store.automation.current(read.sourceKey, read.id)).toMatchObject({
+    status: "succeeded",
+    releaseVersion: 1,
+  })
+  expect(store.schedule.snapshot().config?.sourceKeys).toEqual([source.key])
 })

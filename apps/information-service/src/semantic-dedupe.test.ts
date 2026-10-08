@@ -38,6 +38,71 @@ function entry(
 const base = Date.parse("2026-01-10T00:00:00.000Z")
 const at = (hours: number) => new Date(base + hours * 60 * 60 * 1000).toISOString()
 
+it("事件并集每批为文本预留名额，模型提示仅包含原全文比较证据", () => {
+  const samples = Array.from({ length: 5 }, (_, i) => entry(`text-${i}`, "相同文本新闻", at(i)))
+  for (let i = 0; i < 12; i++) {
+    const recall = {
+      eventIds: [`evt_${i.toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`],
+      identities: [],
+    }
+    samples.push(
+      { ...entry(`event-a-${i}`, String.fromCodePoint(0x4e00 + i, 0x5200 + i), at(i)), recall },
+      {
+        ...entry(`event-b-${i}`, String.fromCodePoint(0x6100 + i, 0x6700 + i), at(i + 0.5)),
+        recall,
+      },
+    )
+  }
+  const selected = getSemanticDuplicateCandidates(samples, { maxCandidates: 16 })
+  expect(selected).toHaveLength(16)
+  for (let offset = 0; offset < selected.length; offset += 8) {
+    const batch = selected.slice(offset, offset + 8)
+    expect(
+      batch.some((candidate) => candidate.recallReasons?.some((reason) => reason.type === "text")),
+    ).toBe(true)
+    expect(
+      batch.some((candidate) =>
+        candidate.recallReasons?.some((reason) => reason.type === "confirmed_event"),
+      ),
+    ).toBe(true)
+  }
+  const prompt = createSemanticDuplicatePrompt(selected)
+  expect(prompt).not.toContain("evt_")
+  expect(prompt).not.toContain("recallReasons")
+  expect(prompt).toContain("完整正文")
+})
+
+it("事件路线已判与非目标候选在八对预算前排除", () => {
+  const recall = { eventIds: ["evt_11111111-1111-4111-8111-111111111111"], identities: [] }
+  const samples = Array.from({ length: 20 }, (_, i) => ({
+    ...entry(`id-${i}`, String.fromCodePoint(0x4e00 + i, 0x5200 + i), at(i)),
+    recall,
+  }))
+  const decided = new Set(
+    samples.slice(1).map((item) => semanticDuplicatePairKey("id-0", item.itemId)),
+  )
+  const candidates = getSemanticDuplicateCandidates(samples, {
+    maxCandidates: 1,
+    decidedPairKeys: decided,
+    targetItemIds: new Set(["id-1"]),
+  })
+  expect(candidates).toHaveLength(1)
+  expect(candidates[0]?.entries.some((item) => item.itemId === "id-1")).toBe(true)
+  expect(decided.has(candidates[0]!.pairKey)).toBe(false)
+})
+
+it("多历史候选轮流分配事件预算，较新的单篇不会占满整批", () => {
+  const recall = { eventIds: ["evt_11111111-1111-4111-8111-111111111111"], identities: [] }
+  const samples = Array.from({ length: 8 }, (_, i) => ({
+    ...entry(`id-${i}`, String.fromCodePoint(0x4e00 + i, 0x5200 + i), at(i)),
+    recall,
+  }))
+  const candidates = getSemanticDuplicateCandidates(samples)
+  expect(candidates).toHaveLength(8)
+  expect(new Set(candidates.slice(0, 7).map((candidate) => candidate.testEntryId)).size).toBe(7)
+  expect(candidates.filter((candidate) => candidate.testEntryId === "id-7")).toHaveLength(2)
+})
+
 it.each([0.1, 0.84, 0.85, 0.99])("否定结论也需要明确把握，置信度 %s", (confidence) => {
   // 低把握不冒充确定不同；阈值不代表测得的准确率，不触发无限补判。
   const candidates = getSemanticDuplicateCandidates([

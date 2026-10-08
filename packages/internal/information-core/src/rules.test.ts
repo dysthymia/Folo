@@ -7,9 +7,14 @@ import {
   conditionSetSchema,
   matchConditions,
   orStates,
+  requiredSemanticTagIds,
+  ruleRequiresSemantics,
   ruleSetSchema,
+  ruleUsesAI,
   visibleLength,
 } from "./rules"
+import type { TagAssessment } from "./semantic-tags"
+import { semanticTagIds } from "./semantic-tags"
 
 const input: RuleInput = {
   source_id: "feed/1",
@@ -301,6 +306,264 @@ describe("有效指令与字段优先级", () => {
           ownerId: "someone-else",
         }),
       ).success,
+    ).toBe(false)
+  })
+})
+
+// 使用真实版本和置信度覆盖语义条件，避免用标签字符串模拟已分析状态。
+const assessment = (
+  tagId: TagAssessment["tagId"],
+  state: TagAssessment["state"] = "present",
+  overrides: Partial<TagAssessment> = {},
+): TagAssessment => ({
+  tagId,
+  definitionVersion: 1,
+  state,
+  confidence: 0.95,
+  reason: "原文已按定义检查",
+  evidenceIds: ["entry:1:body"],
+  ...overrides,
+})
+const semanticWhen = (
+  operator: "contains_any" | "contains_all" | "not_contains_any",
+  value: TagAssessment["tagId"][] = ["signal:social_chatter"],
+) => when({ field: "entry_tag", operator, value })
+const semanticRules = (...items: AutomationRule[]): RuleSet => ({
+  ...rules(...items),
+  formatVersion: 5,
+})
+
+describe("v5 语义契约与阅读动作", () => {
+  it("缺失、未知、旧定义、空置信度和低置信度不能命中正向或否定条件", () => {
+    for (const entry_tag of [
+      null,
+      [],
+      [assessment("signal:social_chatter", "unknown")],
+      [assessment("signal:social_chatter", "absent", { definitionVersion: 2 })],
+      [assessment("signal:social_chatter", "absent", { confidence: null })],
+      [assessment("signal:social_chatter", "absent", { confidence: 0.89 })],
+      [assessment("signal:social_chatter", "absent"), assessment("signal:social_chatter")],
+    ])
+      for (const operator of ["contains_any", "not_contains_any"] as const)
+        expect(matchConditions(semanticWhen(operator), { ...input, entry_tag }).state).toBe(
+          "unknown",
+        )
+    expect(
+      matchConditions(semanticWhen("not_contains_any"), {
+        ...input,
+        entry_tag: [assessment("signal:social_chatter", "absent")],
+      }).state,
+    ).toBe("match")
+    expect(
+      matchConditions(semanticWhen("not_contains_any"), {
+        ...input,
+        entry_tag: [assessment("signal:social_chatter")],
+      }).state,
+    ).toBe("no_match")
+  })
+  it("ANY/ALL/否定组合按三态传播，显式阈值包含边界", () => {
+    const value: TagAssessment["tagId"][] = ["signal:social_chatter", "signal:pure_promotion"]
+    const present = { ...input, entry_tag: [assessment(value[0]!)] }
+    expect(matchConditions(semanticWhen("contains_any", value), present).state).toBe("match")
+    expect(matchConditions(semanticWhen("contains_all", value), present).state).toBe("unknown")
+    expect(matchConditions(semanticWhen("not_contains_any", value), present).state).toBe("no_match")
+    const absent = { ...input, entry_tag: [assessment(value[0]!, "absent")] }
+    expect(matchConditions(semanticWhen("contains_all", value), absent).state).toBe("no_match")
+    expect(matchConditions(semanticWhen("not_contains_any", value), absent).state).toBe("unknown")
+    const condition = when({
+      field: "entry_tag",
+      operator: "contains_any",
+      value: ["form:review"],
+      minConfidence: 0.7,
+    })
+    expect(
+      matchConditions(condition, {
+        ...input,
+        entry_tag: [assessment("form:review", "present", { confidence: 0.7 })],
+      }).state,
+    ).toBe("match")
+  })
+  it("v4 保持旧规则可解析，新条件/动作必须 v5，未知 ID 和空动作被拒绝", () => {
+    const semantic = rule(
+      "tag",
+      0,
+      [{ type: "reading_decision", visibility: "hide" }],
+      semanticWhen("contains_any"),
+    )
+    expect(ruleSetSchema.safeParse(rules(semantic)).success).toBe(false)
+    expect(ruleSetSchema.safeParse(semanticRules(semantic)).success).toBe(true)
+    expect(
+      ruleSetSchema.safeParse(
+        rules(rule("legacy", 0, [{ type: "presentation", policy: { standalone: "never" } }])),
+      ).success,
+    ).toBe(true)
+    expect(
+      ruleSetSchema.safeParse(
+        rules(rule("action", 0, [{ type: "reading_decision", visibility: "show" }])),
+      ).success,
+    ).toBe(false)
+    expect(
+      conditionSetSchema.safeParse({
+        anyOf: [
+          { allOf: [{ field: "entry_tag", operator: "contains_any", value: ["free-label"] }] },
+        ],
+      }).success,
+    ).toBe(false)
+    expect(
+      ruleSetSchema.safeParse(semanticRules(rule("empty", 0, [{ type: "reading_decision" }])))
+        .success,
+    ).toBe(false)
+    expect(
+      ruleSetSchema.safeParse(
+        semanticRules(
+          rule("duplicate", 0, [
+            { type: "presentation", policy: { standalone: "always" } },
+            { type: "reading_decision", visibility: "hide" },
+          ]),
+        ),
+      ).success,
+    ).toBe(false)
+  })
+  it("新旧阅读动作逐字段按顺序取首项", () => {
+    const bundle = compileInstructions(
+      semanticRules(
+        rule("legacy", 0, [{ type: "presentation", policy: { standalone: "always" } }]),
+        rule("semantic", 1, [
+          { type: "reading_decision", visibility: "hide", aggregationEligibility: "deny" },
+        ]),
+        rule("later", 2, [
+          { type: "presentation", policy: { aggregation: "allow", rewrite: "deny" } },
+        ]),
+      ),
+      input,
+    )
+    expect(bundle.policy).toEqual({ standalone: "always", aggregation: "deny", rewrite: "deny" })
+    expect(bundle.resolvedBy).toEqual({
+      standalone: "legacy",
+      aggregation: "semantic",
+      rewrite: "later",
+    })
+    expect(bundle.shadowed).toContainEqual({
+      field: "standalone",
+      ruleId: "semantic",
+      winnerRuleId: "legacy",
+    })
+  })
+  it("早期未知规则仅阻塞它会覆盖的字段；后期未知规则不阻塞已有赢家", () => {
+    const unknown = semanticWhen("contains_any")
+    const bundle = compileInstructions(
+      semanticRules(
+        rule("known", 1, [
+          {
+            type: "presentation",
+            policy: { standalone: "always", aggregation: "allow", rewrite: "deny" },
+          },
+        ]),
+        rule("early", 0, [{ type: "reading_decision", aggregationEligibility: "deny" }], unknown),
+        rule("late", 2, [{ type: "reading_decision", visibility: "hide" }], unknown),
+      ),
+      input,
+    )
+    expect(bundle.pendingPolicyFields).toEqual(["aggregation"])
+    expect(bundle.blocksFinalPresentation).toBe(true)
+    expect(
+      compileInstructions(
+        semanticRules(
+          rule("known", 0, [{ type: "presentation", policy: { standalone: "always" } }]),
+          rule("late", 1, [{ type: "reading_decision", visibility: "hide" }], unknown),
+        ),
+        input,
+      ).blocksFinalPresentation,
+    ).toBe(false)
+    expect(
+      compileInstructions(
+        semanticRules(rule("prompt", 0, [{ type: "ai_transform", prompt: "处理要求" }], unknown)),
+        input,
+      ).pendingPolicyFields,
+    ).toEqual(["standalone", "aggregation", "rewrite"])
+  })
+  it("语义阅读依赖触发分类而不冒充 AI 动作，确定范围外的规则不扩大依赖", () => {
+    const semantic = rule(
+      "semantic",
+      0,
+      [{ type: "reading_decision", visibility: "hide" }],
+      semanticWhen("contains_any"),
+    )
+    const outside = rule(
+      "outside",
+      1,
+      [{ type: "reading_decision", visibility: "hide" }],
+      when(
+        { field: "source_id", operator: "in", value: ["feed/other"] },
+        { field: "entry_tag", operator: "contains_any", value: ["form:pure_entertainment"] },
+      ),
+    )
+    const aggregate = rule("scope", 2, [
+      {
+        type: "ai_aggregate",
+        createPrompt: "综合",
+        updatePrompt: "",
+        mode: "topic",
+        scope: semanticWhen("contains_any", ["topic:ai"]),
+      },
+    ])
+    const disabled = {
+      ...rule(
+        "disabled",
+        3,
+        [{ type: "reading_decision", visibility: "hide" }],
+        semanticWhen("contains_any", ["topic:music"]),
+      ),
+      enabled: false,
+    }
+    const config = semanticRules(semantic, outside, aggregate, disabled)
+    expect(ruleRequiresSemantics(semantic)).toBe(true)
+    expect(ruleUsesAI(semantic)).toBe(false)
+    expect(ruleRequiresSemantics(aggregate)).toBe(true)
+    expect(requiredSemanticTagIds(config, input)).toEqual(["signal:social_chatter", "topic:ai"])
+    expect(requiredSemanticTagIds(config)).toEqual([
+      "form:pure_entertainment",
+      "signal:social_chatter",
+      "topic:ai",
+    ])
+    const bundle = compileInstructions(config, input)
+    expect(bundle.semanticTagIds).toEqual(["signal:social_chatter", "topic:ai"])
+    expect(bundle.pendingRuleIds).toEqual(["semantic"])
+  })
+})
+
+describe("独立标签分类动作", () => {
+  it("当前全部稳定标签可配置，重复标签申请被拒绝", () => {
+    // 验证真实内置清单，防止新增标签后固定数量上限再次阻止规则发布。
+    const classifyRule = (tagIds: TagAssessment["tagId"][]) =>
+      semanticRules(rule("classify-all", 0, [{ type: "ai_classify", tagIds }]))
+    expect(ruleSetSchema.safeParse(classifyRule([...semanticTagIds])).success).toBe(true)
+    expect(
+      ruleSetSchema.safeParse(classifyRule([semanticTagIds[0], semanticTagIds[0]])).success,
+    ).toBe(false)
+  })
+  it("按来源申请标签但不赋予隐藏、综述或变换权限，并要求 v5", () => {
+    const classifier = rule(
+      "classify",
+      0,
+      [{ type: "ai_classify", tagIds: ["topic:ai", "form:review"] }],
+      when({ field: "source_id", operator: "in", value: ["feed/1"] }),
+    )
+    const config = { ...rules(classifier), formatVersion: 5 as const }
+    expect(ruleSetSchema.safeParse({ ...config, formatVersion: 4 }).success).toBe(false)
+    expect(ruleUsesAI(classifier)).toBe(true)
+    expect(ruleRequiresSemantics(classifier)).toBe(true)
+    const compiled = compileInstructions(config, input)
+    expect(compiled.semanticTagIds).toEqual(["form:review", "topic:ai"])
+    expect(compiled.policy).toEqual({})
+    expect(compiled.transformations).toEqual([])
+    expect(compiled.aggregates).toEqual([])
+    expect(requiredSemanticTagIds(config, { ...input, source_id: "feed/other" })).toEqual([])
+    expect(
+      ruleSetSchema.safeParse({
+        ...config,
+        rules: [{ ...classifier, actions: [{ type: "ai_classify", tagIds: [] }] }],
+      }).success,
     ).toBe(false)
   })
 })

@@ -12,7 +12,7 @@ import type { PublishedDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
 import type { SharedStoryGroup, StoryModelOutput } from "./story-engine"
 import { runStoryAggregation, sharedStoryRuleFingerprint } from "./story-engine"
-import { StoryStore } from "./story-store"
+import { sourceSpanFragmentId, StoryStore } from "./story-store"
 
 const databases: DatabaseSync[] = []
 const directories: string[] = []
@@ -366,6 +366,158 @@ function sharedDraft(
 }
 
 describe("Story 模型聚合", () => {
+  it("人工拆分后的稳定事件 ID 在模型前隔离候选，也不会召回另一个子事件的旧 Story", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const decisions = [published(db, 1), published(db, 2)]
+    const prompts: string[] = []
+    const options = {
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+    }
+    // 原始事件字段完全相同，也须尊重人工划定的不同稳定事件身份。
+    const separated = await runStoryAggregation({
+      ...options,
+      registeredEventId: (members) => `event-${members[0]!.inputSeq}`,
+      execute: executeWith([], prompts),
+    })
+    expect(separated.created).toEqual([])
+    expect(prompts).toEqual([])
+    const first = await runStoryAggregation({
+      ...options,
+      registeredEventId: () => "event-A",
+      execute: executeWith([modelOutput()]),
+    })
+    expect(first.created).toHaveLength(1)
+    const next = await runStoryAggregation({
+      ...options,
+      decisions: [published(db, 3)],
+      registeredEventId: (members) =>
+        members.every((member) => member.inputSeq < 3) ? "event-A" : "event-B",
+      execute: executeWith([], prompts),
+    })
+    expect(next.created).toEqual([])
+    expect(prompts).toEqual([])
+    expect(stories.currentSnapshot(first.created[0]!.storyId)?.revision).toBe(1)
+  })
+
+  it("多事件文章与人工失效成员不进入主事件综合，也不触发额外模型", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const original = "Acme released Widget 2.0. Beta released Tool 3.0."
+    const primary = caseEvent(original, "Acme", "product_release", "Widget", { version: "2.0" })
+    const secondary = caseEvent(original, "Beta", "product_release", "Tool", { version: "3.0" })
+    const multi = casePublished(db, 1, original, primary)
+    multi.decision.semantic!.eventMentions = [
+      { identity: primary, role: "reports", isPrimary: true },
+      { identity: secondary, role: "mentions", isPrimary: false },
+    ]
+    const decisions = [multi, casePublished(db, 2, original, primary)]
+    const prompts: string[] = []
+    const options = {
+      decisions,
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([], prompts),
+    }
+    const multiResult = await runStoryAggregation(options)
+    expect(multiResult.created).toEqual([])
+    // 单事件另一篇仍独立保留；共享草稿也不能绕过多事件成员资格。
+    const corrected = await runStoryAggregation({
+      ...options,
+      sameEventEligible: () => false,
+      sharedGroups: [sharedDraft(decisions, options.ruleSet)],
+    })
+    expect(corrected.created).toEqual([])
+    expect(prompts).toEqual([])
+    expect(stories.list()).toEqual([])
+  })
+
+  it("普通主报道带背景提及时只综合隔离后的主事实，共享草稿不能偷渡背景", async () => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const primaryText = "Acme released Widget 2.0 with faster sync."
+    const otherText = "Acme released Widget 2.0 with a smaller database."
+    const background = "Beta released Tool 3.0."
+    const primary = caseEvent(primaryText, "Acme", "product_release", "Widget", { version: "2.0" })
+    const secondary = caseEvent(background, "Beta", "product_release", "Tool", { version: "3.0" })
+    const multi = casePublished(db, 1, `${primaryText}\n${background}`, primary)
+    multi.input.body.title = "Acme released Widget 2.0"
+    multi.decision.summary = background
+    multi.decision.facts = [primaryText, background].map((quote) => ({
+      text: quote,
+      quote,
+      kind: "fact",
+    }))
+    multi.decision.semantic!.eventMentions = [
+      { identity: primary, role: "reports", isPrimary: true },
+      { identity: secondary, role: "mentions", isPrimary: false },
+    ]
+    // 与生产一样持久化完整单篇材料，Store 会独立验证发布边界的主事实范围。
+    db.prepare("UPDATE entry_decisions SET body=? WHERE id=?").run(
+      JSON.stringify(multi.decision),
+      multi.decisionId,
+    )
+    const second = casePublished(
+      db,
+      2,
+      otherText,
+      caseEvent(otherText, "Acme", "product_release", "Widget", { version: "2.0" }),
+    )
+    const decisions = [multi, second]
+    const ruleSet = rules([aggregateAction()])
+    const invalidShared = modelOutput()
+    const shared = sharedDraft(decisions, ruleSet, invalidShared)
+    shared.evidenceCatalogs[0]!.fragments = [
+      ...shared.evidenceCatalogs[0]!.fragments,
+      { evidenceId: "E000002", quote: background },
+    ]
+    // 背景 evidenceId 虽然存在于单篇目录，但不属于本次主事件许可证。
+    shared.output.groups[0]!.sentences[0]!.sources[0]!.evidenceId =
+      shared.evidenceCatalogs[0]!.fragments[1]!.evidenceId
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions,
+      ruleSet,
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      sharedGroups: [shared],
+      execute: executeWith([modelOutput()], prompts),
+    })
+    expect(result.created).toHaveLength(1)
+    expect(result.failures).toEqual([])
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).not.toContain(background)
+    const revision = stories.currentSnapshot(result.created[0]!.storyId)!
+    expect(revision.sourceSpans.map((span) => span.quote)).toEqual([primaryText, otherText])
+    expect(stories.eventIdentityForMembers(revision.members)).toEqual(primary)
+    // 直接改持久化草稿也不能把另一事件的原文塞进已确认主事件。
+    expect(() =>
+      stories.appendRevision(revision.storyId, 1, {
+        ...revision,
+        sourceSpans: revision.sourceSpans.map((span) =>
+          span.inputSeq === 1
+            ? {
+                ...span,
+                quote: background,
+                fragmentId: sourceSpanFragmentId(
+                  span.sourceItemId,
+                  span.contentVersion,
+                  background,
+                ),
+              }
+            : span,
+        ),
+      }),
+    ).toThrow("invalid_reference")
+  })
+
   it("同批综述复用单篇分析的证据目录，不再请求模型", async () => {
     const { db, stories, aiConfig, runtimeDir } = fixture()
     const decisions = [published(db, 1), published(db, 2)]
@@ -395,7 +547,7 @@ describe("Story 模型聚合", () => {
     ])
   })
 
-  it("已有综述仍读取当前 revision 后单独更新，不采用新建共享草稿", async () => {
+  it("已有综述没有材料增量时不消费共享草稿，也不额外调用更新模型", async () => {
     const { db, stories, aiConfig, runtimeDir } = fixture()
     const decisions = [published(db, 1), published(db, 2)]
     const ruleSet = rules([aggregateAction()])
@@ -414,8 +566,7 @@ describe("Story 模型聚合", () => {
       ...options,
       execute: executeWith([modelOutput(first.created[0]!.storyId)], prompts),
     })
-    expect(prompts).toHaveLength(1)
-    expect(prompts[0]).toContain(first.created[0]!.storyId)
+    expect(prompts).toEqual([])
     expect(second.created).toEqual([])
     expect(second.failures).toEqual([])
   })
@@ -1003,7 +1154,7 @@ describe("Story 模型聚合", () => {
     expect(second.created).toEqual([])
     expect(second.updated).toEqual([])
     expect(stories.story(first.created[0]!.storyId)?.currentRevision).toBe(1)
-    expect(prompts[0]).toContain("更新已有 Story，说明新增和修正。")
+    expect(prompts).toEqual([])
   })
 
   it("相同内容再次运行复用当前 revision，不新增空历史版本", async () => {
@@ -1635,4 +1786,246 @@ describe("列表触发 Story 范围", () => {
       stories.currentSnapshot(result.created[0]!.storyId)?.members.map((member) => member.inputSeq),
     ).toEqual([1, 2])
   })
+})
+
+it.each(["same_body", "same_fact_wrapper"] as const)(
+  "不同URL的%s不冒充两个独立Story来源，原文保持可读",
+  async (mode) => {
+    const { db, stories, aiConfig, runtimeDir } = fixture()
+    const first = published(db, 1)
+    const quote = first.decision.facts[0]!.quote
+    const secondText = mode === "same_body" ? quote : `转载导语。${quote}`
+    const second = casePublished(db, 2, secondText, fixtureEvent(secondText))
+    second.input.body.title = "改标题的转载"
+    second.decision.facts = [{ text: "抽取换一种措辞", quote, kind: "source_claim" }]
+    const prompts: string[] = []
+    const result = await runStoryAggregation({
+      decisions: [first, second],
+      ruleSet: rules([aggregateAction()]),
+      stories,
+      aiConfig,
+      runtimeDir,
+      signal: new AbortController().signal,
+      execute: executeWith([], prompts),
+    })
+    expect(prompts).toEqual([])
+    expect(result.created).toEqual([])
+    expect(stories.list()).toEqual([])
+    expect([first.decision.status, second.decision.status]).toEqual(["keep", "keep"])
+    expect([first.input.body.read, second.input.body.read]).toEqual([false, false])
+  },
+)
+
+it("完整转载和仅改标题/抽取措辞不更新Story，不刷新实质未读或收藏", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const first = [published(db, 1), published(db, 2)]
+  const base = {
+    decisions: first,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+  }
+  const created = await runStoryAggregation({ ...base, execute: executeWith([modelOutput()]) })
+  const storyId = created.created[0]!.storyId
+  const prior = stories.currentSnapshot(storyId)!
+  stories.markRead(storyId, "reader")
+  stories.setCollected(storyId, "reader", true)
+  const body = first[0]!.decision.facts[0]!.quote
+  const repost = casePublished(db, 3, body, fixtureEvent(body))
+  repost.input.body.title = "原标题改名，但事实未变"
+  repost.decision.facts = [{ text: "换一种写法的同一事实", quote: body, kind: "source_claim" }]
+  const prompts: string[] = []
+  const unchanged = await runStoryAggregation({
+    ...base,
+    decisions: [repost],
+    execute: executeWith([], prompts),
+  })
+  expect(prompts).toEqual([])
+  expect(unchanged.created).toEqual([])
+  expect(unchanged.updated).toEqual([])
+  expect(unchanged.pending).toEqual([])
+  expect(stories.currentSnapshot(storyId)).toEqual(prior)
+  expect(stories.readStatus(storyId, "reader").unread).toBe(false)
+  expect(stories.isCollected(storyId, "reader")).toBe(true)
+  expect(repost.decision.status).toBe("keep")
+})
+
+it("新增限制进入更新并保留旧句、事实和原始引用", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const base = {
+    decisions: [published(db, 1), published(db, 2)],
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+  }
+  const created = await runStoryAggregation({ ...base, execute: executeWith([modelOutput()]) })
+  const storyId = created.created[0]!.storyId
+  const prior = stories.currentSnapshot(storyId)!
+  stories.markRead(storyId, "reader")
+  const update = published(db, 3)
+  const quote = update.decision.facts[0]!.quote
+  const output: StoryModelOutput = {
+    groups: [
+      {
+        existingStoryId: storyId,
+        title: prior.title,
+        body: "自由正文不作为持久化来源",
+        retainedSentenceIds: prior.sentences.map((sentence) => sentence.id),
+        retainedFactIds: prior.facts.map((fact) => fact.id),
+        sentences: [{ text: quote, sources: [{ inputSeq: 3, evidenceId: evidenceId(3) }] }],
+        facts: [
+          {
+            text: "新增明确限制",
+            kind: "source_claim",
+            sentenceIndexes: [0],
+            dependsOnFactIndexes: [],
+            dependsOnRetainedFactIds: [],
+          },
+        ],
+      },
+    ],
+  }
+  const prompts: string[] = []
+  const result = await runStoryAggregation({
+    ...base,
+    decisions: [update],
+    execute: executeWith([output], prompts),
+  })
+  expect(prompts).toHaveLength(1)
+  expect(result.updated).toEqual([{ storyId, ruleId: "aggregate-0", revision: 2 }])
+  const current = stories.currentSnapshot(storyId)!
+  expect(current.sentences).toEqual(expect.arrayContaining(prior.sentences))
+  expect(current.facts).toEqual(expect.arrayContaining(prior.facts))
+  expect(current.sourceSpans).toEqual(expect.arrayContaining(prior.sourceSpans))
+  expect(current.citations).toEqual(expect.arrayContaining(prior.citations))
+  expect(stories.readStatus(storyId, "reader").unread).toBe(true)
+})
+
+it("事实子集不能证明未抽取的新限制不存在，未知增量仍交给更新模型且不隐藏原文", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const first = [published(db, 1), published(db, 2)]
+  const base = {
+    decisions: first,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+  }
+  const created = await runStoryAggregation({ ...base, execute: executeWith([modelOutput()]) })
+  const original = first[0]!.decision.facts[0]!.quote
+  const text = `${original}额外限制：只适用于测试环境，生产不适用。`
+  const update = casePublished(db, 3, text, fixtureEvent(text))
+  update.decision.facts = [
+    { text: first[0]!.decision.facts[0]!.text, quote: original, kind: "fact" },
+  ]
+  const prompts: string[] = []
+  const result = await runStoryAggregation({
+    ...base,
+    decisions: [update],
+    execute: executeWith([{ groups: [] }], prompts),
+  })
+  expect(prompts).toHaveLength(1)
+  expect(result.updated).toEqual([])
+  expect(stories.currentSnapshot(created.created[0]!.storyId)?.revision).toBe(1)
+  expect(update.decision.status).toBe("keep")
+  expect(update.input.body.content).toContain("生产不适用")
+})
+
+it("更新缓存绑定当前Story revision，人工展示修订后不复用先前update草稿", async () => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const base = {
+    decisions: [published(db, 1), published(db, 2)],
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+  }
+  const created = await runStoryAggregation({ ...base, execute: executeWith([modelOutput()]) })
+  const storyId = created.created[0]!.storyId
+  const update = published(db, 3)
+  const prompts: string[] = []
+  const options = {
+    ...base,
+    decisions: [update],
+    execute: executeWith([{ groups: [] }, { groups: [] }], prompts),
+  }
+  await runStoryAggregation(options)
+  const current = stories.currentSnapshot(storyId)!
+  stories.appendRevision(storyId, 1, { ...current, title: "人工修订标题" })
+  const differentRevision = await runStoryAggregation(options)
+  expect(prompts).toHaveLength(2)
+  expect(differentRevision.cacheHits).toBe(0)
+  const sameRevision = await runStoryAggregation(options)
+  expect(prompts).toHaveLength(2)
+  expect(sameRevision.cacheHits).toBe(1)
+})
+
+const unresolvedStoryMaterials: Array<[string, Partial<ProcessingInput["body"]>]> = [
+  ["图片未读", { imageCount: 1, context: { images: "missing" } }],
+  ["引用未读", { context: { quote: "missing" } }],
+  [
+    "外链失败",
+    {
+      linkedMaterials: [
+        {
+          url: "https://example.test/context",
+          resolvedUrl: null,
+          title: null,
+          content: null,
+          status: "failed",
+          failure: "fetch_failed",
+        },
+      ],
+    },
+  ],
+  ["视频未读", { mediaLength: 1, imageCount: 0 }],
+  ["附件时长", { attachmentsDuration: 10 }],
+  ["图已读但材料身份不同", { imageCount: 1, context: { images: "complete" } }],
+  [
+    "已读新外链仍有独立材料",
+    {
+      linkedMaterials: [
+        {
+          url: "https://example.test/new-context",
+          resolvedUrl: "https://example.test/new-context",
+          title: "额外方法",
+          content: "旧摘引之外的新方法。",
+          status: "complete",
+          failure: null,
+        },
+      ],
+    },
+  ],
+]
+it.each(unresolvedStoryMaterials)("正文相同但%s不能用有限证据判零增量", async (_name, context) => {
+  const { db, stories, aiConfig, runtimeDir } = fixture()
+  const first = [published(db, 1), published(db, 2)]
+  const base = {
+    decisions: first,
+    ruleSet: rules([aggregateAction()]),
+    stories,
+    aiConfig,
+    runtimeDir,
+    signal: new AbortController().signal,
+  }
+  const created = await runStoryAggregation({ ...base, execute: executeWith([modelOutput()]) })
+  const body = first[0]!.decision.facts[0]!.quote
+  const update = casePublished(db, 3, body, fixtureEvent(body))
+  update.input.body = { ...update.input.body, ...context }
+  const prompts: string[] = []
+  const result = await runStoryAggregation({
+    ...base,
+    decisions: [update],
+    execute: executeWith([{ groups: [] }], prompts),
+  })
+  expect(prompts).toHaveLength(1)
+  expect(result.updated).toEqual([])
+  expect(stories.currentSnapshot(created.created[0]!.storyId)?.revision).toBe(1)
+  expect(update.decision.status).toBe("keep")
 })

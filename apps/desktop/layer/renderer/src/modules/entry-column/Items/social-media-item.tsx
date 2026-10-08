@@ -22,6 +22,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 
 import { socialMediaContentWidthAtom } from "../atoms/social-media-content-width"
+import { EntrySemanticTags } from "../entry-semantic-tags"
 import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
 import { readableContentMaxWidth } from "../styles"
@@ -132,6 +133,7 @@ export const SocialMediaItem: EntryListItemFC = ({
             <span className="text-zinc-500">
               <RelativeTime date={entry.publishedAt} />
             </span>
+            <EntrySemanticTags entryId={entryId} className="ml-1" />
           </div>
           <div className="relative mt-1 text-base">
             <EntryContentWrapper entryId={entryId}>

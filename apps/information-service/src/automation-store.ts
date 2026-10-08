@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
 import type { AutomationRule, RuleSet } from "@follow/information-core"
-import { ruleSetSchema } from "@follow/information-core"
+import { ruleRequiresSemantics, ruleSetSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import type { SourceEntry } from "./folo"
@@ -77,6 +77,18 @@ export type UnchangedInputReconciliationGuard = {
   minimumCurrentSeq: number
   minimumCurrentReceivedAt: string
   maximumHistoricalSeq: number
+}
+
+// 单条和批量激活都显式升级语义契约；旧规则与已有 v5 配置不降级。
+export function promoteSemanticRuleSet(config: RuleSet): RuleSet {
+  return config.formatVersion === 5 ||
+    config.rules.some(
+      (rule) =>
+        ruleRequiresSemantics(rule) ||
+        rule.actions.some((action) => action.type === "reading_decision"),
+    )
+    ? { ...config, formatVersion: 5 }
+    : config
 }
 
 // 草稿、不可变发布和输入目标共用业务数据库，发布边界使用摄取序号而非文章来源日期。
@@ -423,6 +435,8 @@ export class AutomationStore {
         draftConfig = replace(draftConfig)
         effectiveConfig = replace(active)
       }
+      draftConfig = promoteSemanticRuleSet(draftConfig)
+      effectiveConfig = promoteSemanticRuleSet(effectiveConfig)
       const saved = this.saveDraft(draftConfig, expectedRevision)
       if (change.type === "rule" && change.rule) {
         const savedRule = saved.config.rules.find((rule) => rule.id === change.ruleId)!
@@ -751,6 +765,55 @@ export class AutomationStore {
       return this.inputFromRow(
         this.db.prepare("SELECT * FROM processing_inputs WHERE seq=?").get(seq)!,
       )
+    })
+  }
+
+  // 仅把用户本次加载的未读条目交给当前分类规则，不扫描或迁移其他历史输入。
+  assignLoadedRelease(input: ProcessingInput, releaseVersion: number): boolean {
+    this.owner()
+    if (
+      input.body.read !== false ||
+      !input.current ||
+      input.status === "running" ||
+      input.status === "pending" ||
+      releaseVersion !== this.effective().releaseVersion
+    )
+      return false
+    const result = this.db
+      .prepare(
+        "UPDATE processing_inputs SET generation=generation+1,release_version=?,status='pending',decision_id=NULL WHERE seq=? AND current=1 AND content_version=? AND generation=? AND release_version IS ? AND status IN ('succeeded','skipped','failed')",
+      )
+      .run(releaseVersion, input.seq, input.contentVersion, input.generation, input.releaseVersion)
+    return result.changes === 1
+  }
+
+  recalculate(target: ProcessingInput, decision: object, releaseVersion = target.releaseVersion) {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM processing_inputs WHERE seq=?").get(target.seq)
+      if (
+        !row ||
+        !row.current ||
+        !target.current ||
+        row.content_version !== target.contentVersion ||
+        Number(row.generation) !== target.generation ||
+        (row.release_version === null ? null : Number(row.release_version)) !==
+          target.releaseVersion
+      ) {
+        throw new AutomationError("revision_conflict")
+      }
+      if (releaseVersion === null || !this.release(releaseVersion))
+        throw new AutomationError("invalid_target")
+      // 策略重算只更换决策代际和发布引用，不修改材料、已读状态或不可变历史。
+      this.db
+        .prepare(
+          "UPDATE processing_inputs SET generation=generation+1,release_version=?,status='pending',decision_id=NULL WHERE seq=?",
+        )
+        .run(releaseVersion, target.seq)
+      const input = this.inputFromRow(
+        this.db.prepare("SELECT * FROM processing_inputs WHERE seq=?").get(target.seq)!,
+      )
+      const completed = this.complete(input, decision)
+      return { input: { ...input, status: "succeeded" }, ...completed }
     })
   }
 

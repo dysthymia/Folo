@@ -7,14 +7,19 @@ import { dirname } from "pathe"
 
 import type { AIProvider } from "./ai-config"
 import type { ReasoningEffort } from "./ai-reasoning"
+import type { ProcessingInput } from "./automation-store"
 import { AutomationStore } from "./automation-store"
 import { ExportStore } from "./export-store"
 import type { Source, SourceEntry } from "./folo"
 import { ProcessingDedupeStore } from "./processing-dedupe"
+import { normalizeEventMentions } from "./processing-event-mentions"
+import type { EventRecallMetadata } from "./processing-event-recall"
+import { ProcessingEventRegistry } from "./processing-event-registry"
 import { ProcessingFeedbackStore } from "./processing-feedback"
 import { ProcessingReadingStore } from "./processing-reading-store"
 import { resolveAIRuleSourceKeys } from "./processing-rule-scope"
 import { ProcessingScheduleStore } from "./processing-schedule"
+import { ProcessingSemanticStore } from "./processing-semantic-store"
 import { SourceSyncStore } from "./processing-source-sync"
 import { ProcessingStateStore } from "./processing-state"
 import { ResearchStore } from "./research-store"
@@ -82,6 +87,8 @@ export class Store {
   readonly automation: AutomationStore
   readonly subscriptionTags: SubscriptionTagStore
   readonly processingState: ProcessingStateStore
+  readonly semantics: ProcessingSemanticStore
+  readonly events: ProcessingEventRegistry
   readonly feedback: ProcessingFeedbackStore
   readonly exports: ExportStore
   readonly research: ResearchStore
@@ -113,6 +120,13 @@ export class Store {
     this.subscriptionTags = new SubscriptionTagStore(this.db, () => this.ownerId)
     // 同一账号的队列、原文版本与派生 Story 共用事务数据库。
     this.processingState = new ProcessingStateStore(this.db, this.automation)
+    this.events = new ProcessingEventRegistry(this.db, this.automation, () => this.ownerId)
+    this.semantics = new ProcessingSemanticStore(
+      this.db,
+      this.automation,
+      () => this.ownerId,
+      (input, decision, id) => this.events.publish(input, decision, id),
+    )
     this.feedback = new ProcessingFeedbackStore(this.db, () => this.ownerId)
     this.exports = new ExportStore(this.db, () => this.ownerId)
     this.research = new ResearchStore(this.db, () => this.ownerId)
@@ -135,7 +149,14 @@ export class Store {
     this.sourceSync = new SourceSyncStore(this.db, () =>
       this.ownerId ? this.xQueries.sources() : [],
     )
-    this.stories = new StoryStore(this.db)
+    this.stories = new StoryStore(this.db, (members) => {
+      // 完全未登记的旧 Story 维持兼容；已有归属时人工移出/拆分不能被重新拼回。
+      const registered = members.some((member) => {
+        const input = this.automation.inputs([member.inputSeq])[0]
+        return input && this.events.entryEvents(input).length > 0
+      })
+      return !registered || this.events.confirmedEventIdsForMembers(members).length > 0
+    })
     this.xQueries = new XQueryStore(this.db, () => this.ownerId)
     this.dedupe = new ProcessingDedupeStore(this.db, () => this.automation.inputs())
     this.reading = new ProcessingReadingStore(
@@ -162,6 +183,47 @@ export class Store {
           this.automation.capture(JSON.parse(String(row.body)) as SourceEntry)
         this.db.prepare("INSERT INTO metadata VALUES('processing_inputs_initialized','1')").run()
       })
+    }
+  }
+
+  // 只登记已保存的当前决定；不会补抓来源、扩展计划范围或请求模型。
+  synchronizeEvents(inputSeqs?: readonly number[]) {
+    if (!this.ownerId) return
+    for (const { input, decision, decisionId } of this.processingState.published(inputSeqs))
+      this.events.publish(input, decision, decisionId)
+    // 单篇结果读取只补登记目标事件；Story 关系由完整后台同步维护，避免读取时遍历所有综述。
+    if (inputSeqs) return
+    this.stories.synchronizeEventLinks((revision) =>
+      this.events.confirmedEventIdsForMembers(revision.members),
+    )
+  }
+
+  // 召回只读取当前发布指针和确认归属；展示标题、候选事件与人工移出不能成为合并依据。
+  eventRecall(input: ProcessingInput): EventRecallMetadata {
+    const empty = { eventIds: [], identities: [] }
+    if (!this.ownerId) return empty
+    const published = this.processingState.published([input.seq])[0]
+    if (
+      !published?.input.current ||
+      published.input.contentVersion !== input.contentVersion ||
+      published.input.generation !== input.generation ||
+      published.input.releaseVersion !== input.releaseVersion
+    )
+      return empty
+    const memberships = this.events
+      .entryEvents(published.input)
+      .filter(
+        ({ event, membership }) =>
+          event.status === "confirmed" &&
+          membership.state === "confirmed" &&
+          membership.decisionId === published.decisionId,
+      )
+    return {
+      eventIds: [...new Set(memberships.map(({ event }) => event.id))],
+      // 保留该篇原文实际核验的身份，人工移动不能把另一事件的身份反写成当前原文证据。
+      identities: normalizeEventMentions(published.decision.semantic ?? {}).map(
+        (mention) => mention.identity,
+      ),
     }
   }
 

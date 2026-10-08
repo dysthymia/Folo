@@ -6,7 +6,6 @@ import {
   TooltipRoot,
   TooltipTrigger,
 } from "@follow/components/ui/tooltip/index.js"
-import { EllipsisHorizontalTextWithTooltip } from "@follow/components/ui/typography/index.js"
 import { FeedViewType } from "@follow/constants"
 import { IN_ELECTRON } from "@follow/shared/constants"
 import { useCollectionEntry } from "@follow/store/collection/hooks"
@@ -33,6 +32,7 @@ import { FeedTitle } from "~/modules/feed/feed-title"
 import { HighlightedText } from "~/modules/spotlight/HighlightedText"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
+import { EntrySemanticTags } from "../entry-semantic-tags"
 import { MergedEntriesBadge } from "../merged-entries-badge"
 import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
@@ -157,48 +157,41 @@ export function AllItem({
       {currentFeedTitle !== thisFeedTitle && (
         <FeedIcon target={related} fallback entry={iconEntry} size={16} />
       )}
-      <div className={cn("flex h-fit min-w-0 flex-1 items-center truncate text-sm leading-tight")}>
+      <div className="flex h-fit min-w-0 flex-1 items-center text-sm leading-tight">
         {entry.firstAudio && <AudioIcon entryId={entryId} src={entry.firstAudio.url} />}
         {entry.video && <VideoIcon src={entry.video} />}
-        <div
-          className={cn(
-            "relative flex items-center",
-            "text-text",
-            entry?.title ? "font-medium" : "text-[13px]",
-            isRead && dimRead && "text-text-secondary",
-          )}
-        >
-          <EllipsisHorizontalTextWithTooltip>
-            {entry?.title ? (
+        {/* 标题和标签先占用自然宽度，简介只使用剩余空间；窄栏中标题换行而不被简介挤短。 */}
+        <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <div
+              className={cn(
+                "relative min-w-0 break-words leading-5 text-text",
+                entry?.title ? "font-medium" : "text-[13px]",
+                isRead && dimRead && "text-text-secondary",
+              )}
+            >
               <EntryTranslation
-                className={cn(
-                  "inline-flex min-w-0 items-center hyphens-auto font-medium",
-                  lineClamp.title,
-                )}
-                source={titleCase(entry?.title ?? "")}
-                target={titleCase(translation?.title ?? "")}
+                className="hyphens-auto"
+                source={entry?.title ? titleCase(entry.title) : entry?.description}
+                target={
+                  entry?.title ? titleCase(translation?.title ?? "") : translation?.description
+                }
               />
-            ) : (
-              <EntryTranslation
-                className={cn("inline-flex items-center hyphens-auto", lineClamp.description)}
-                source={entry?.description}
-                target={translation?.description}
-              />
+            </div>
+            <EntrySemanticTags entryId={entryId} className="max-w-full" showAll />
+          </div>
+          <div
+            className={cn(
+              "min-w-0 truncate text-[13px] text-text-secondary",
+              isRead && dimRead && "text-text-tertiary",
             )}
-          </EllipsisHorizontalTextWithTooltip>
-        </div>
-        <div
-          className={cn(
-            "ml-4 truncate text-[13px]",
-            "text-text-secondary",
-            isRead && dimRead && "text-text-tertiary",
-          )}
-        >
-          <EntryTranslation
-            className={cn("hyphens-auto", lineClamp.description)}
-            source={entry?.description}
-            target={translation?.description}
-          />
+          >
+            <EntryTranslation
+              className={cn("hyphens-auto", lineClamp.description)}
+              source={entry?.description}
+              target={translation?.description}
+            />
+          </div>
         </div>
       </div>
 

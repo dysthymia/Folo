@@ -63,6 +63,21 @@ ${body}
 const hasCode = (code: string) => (error: unknown) =>
   error instanceof CodexRunError && error.code === code
 
+test("默认十分钟期限进入实际调用账本，显式短期限仍可覆盖", async () => {
+  // 假 CLI 立即完成，通过账本验证实际执行参数，无需等待十分钟或调用真实模型。
+  const f = await fixture(`result({summary:"完成"}); emit({type:"turn.completed"});`)
+  await f.run({ timeoutMs: undefined })
+  await f.run({ timeoutMs: 3_000 })
+  const rows = (await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { timeoutMs: number })
+  assert.deepEqual(
+    rows.map((row) => row.timeoutMs),
+    [600_000, 3_000],
+  )
+})
+
 test("reasoning effort uses explicit CLI flags including none and ultra, with legacy low", async () => {
   // 假 CLI 只记录参数；各强度都不会触发真实模型调用。
   const f = await fixture(
@@ -334,6 +349,107 @@ setInterval(() => {},1000);`)
     (await readdir(f.runtimeDir)).filter((name) => name !== "codex-usage.jsonl"),
     [],
   )
+})
+
+test("completed turn can finish writing and exit after the model deadline", async () => {
+  // 模型已完成后继续落盘，不能被原来的执行计时器误杀。
+  const f = await fixture(`
+emit({type:"turn.completed",usage:{input_tokens:20,output_tokens:4,cached_input_tokens:0}});
+setTimeout(() => result({summary:"已完成，稍后落盘"}),900);`)
+  assert.equal((await f.run({ timeoutMs: 800 })).result.summary, "已完成，稍后落盘")
+  const ledger = JSON.parse(
+    (await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8")).trim(),
+  )
+  assert.equal(ledger.status, "succeeded")
+  assert.equal(ledger.completionCleanup, false)
+})
+
+test("completed valid result survives bounded cleanup of a TERM-resistant CLI", async () => {
+  // 完成事件与有效文件齐备后，收尾卡住只需清理进程，不重新调用模型。
+  const f = await fixture(`
+process.on("SIGTERM", () => {});
+fs.writeFileSync(require("node:path").join(process.cwd(), "../../pid"), String(process.pid));
+result({summary:"完整结果"});
+emit({type:"turn.completed",usage:{input_tokens:20,output_tokens:4,cached_input_tokens:0}});
+setInterval(() => {},1000);`)
+  const running = f.run({ timeoutMs: 500 })
+  const pid = Number(await waitForFile(join(f.root, "pid")))
+  assert.equal((await running).result.summary, "完整结果")
+  assertStopped(pid)
+  const ledger = JSON.parse(
+    (await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8")).trim(),
+  )
+  assert.equal(ledger.status, "succeeded")
+  assert.equal(ledger.completionCleanup, true)
+  assert.deepEqual(ledger.usage, { inputTokens: 20, outputTokens: 4, cachedInputTokens: 0 })
+  assert.deepEqual(
+    (await readdir(f.runtimeDir)).filter((name) => name !== "codex-usage.jsonl"),
+    [],
+  )
+})
+
+test("completed hanging CLI still requires a valid final file", async () => {
+  // 收尾清理不能把完成事件当成结果文件，也不能放宽原来的结构校验。
+  for (const [body, code] of [
+    ["", "MISSING_OUTPUT"],
+    ["result({});", "INVALID_OUTPUT"],
+  ]) {
+    const f = await fixture(`${body} emit({type:"turn.completed"}); setInterval(() => {},1000);`)
+    await assert.rejects(f.run({ timeoutMs: 500 }), hasCode(code!))
+  }
+})
+
+test("completed JSON message survives CLI cleanup before final-file publication", async () => {
+  // 真实完成事件中的 JSON 可以交接结果，不能为缺少落盘文件再次付费。
+  const f = await fixture(`
+emit({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({summary:"完成消息中的结果"})}});
+emit({type:"turn.completed",usage:{input_tokens:20,output_tokens:4,cached_input_tokens:0}});
+setInterval(() => {},1000);`)
+  const response = await f.run({ timeoutMs: 800 })
+  assert.equal(response.result.summary, "完成消息中的结果")
+  assert.equal("outputText" in response, false)
+  const ledger = JSON.parse(
+    (await readFile(join(f.runtimeDir, "codex-usage.jsonl"), "utf8")).trim(),
+  )
+  assert.equal(ledger.resultSource, "jsonl")
+  assert.equal(ledger.status, "succeeded")
+})
+
+test("JSONL handoff rejects invalid and unfinished messages", async () => {
+  // 消息必须是已完成的最终响应，并且仍满足当前请求的完整契约。
+  for (const [type, text, code] of [
+    ["item.completed", JSON.stringify({ unexpected: "私有模型内容" }), "INVALID_OUTPUT"],
+    ["item.completed", "未返回结构化结果", "INVALID_OUTPUT"],
+    ["item.updated", JSON.stringify({ summary: "尚未完成的消息" }), "MISSING_OUTPUT"],
+  ]) {
+    const f = await fixture(
+      `emit({type:${JSON.stringify(type)},item:{type:"agent_message",text:${JSON.stringify(text)}}});emit({type:"turn.completed"});`,
+    )
+    await assert.rejects(f.run(), hasCode(code!))
+  }
+})
+
+test("completed turn does not mask a natural nonzero process exit", async () => {
+  // 只有本地发起的收尾终止可忽略退出码，CLI 自行失败仍须报错。
+  const f = await fixture(
+    'result({summary:"完整结果"}); emit({type:"turn.completed"}); process.exit(2);',
+  )
+  await assert.rejects(f.run(), hasCode("PROCESS_FAILED"))
+})
+
+test("cancellation during completed-turn cleanup still prevents publication", async () => {
+  // 用户取消始终优先于已完成的模型消息，避免取消后仍返回可发布结果。
+  const f = await fixture(`
+result({summary:"完整结果"}); emit({type:"turn.completed"});
+fs.writeFileSync(require("node:path").join(process.cwd(), "../../pid"), String(process.pid));
+setInterval(() => {},1000);`)
+  const controller = new AbortController()
+  const running = f.run({ signal: controller.signal })
+  const rejected = assert.rejects(running, hasCode("ABORTED"))
+  const pid = Number(await waitForFile(join(f.root, "pid")))
+  controller.abort()
+  await rejected
+  assertStopped(pid)
 })
 
 test("active cancellation kills a TERM-resistant child before cleaning its cwd", async () => {

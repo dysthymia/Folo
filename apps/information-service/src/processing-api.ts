@@ -1,4 +1,10 @@
-import { compileInstructions, ruleUsesAI, scheduleScopeSchema } from "@follow/information-core"
+import type { SemanticEntity, SemanticTagId } from "@follow/information-core"
+import {
+  compileInstructions,
+  ruleRequiresSemantics,
+  ruleUsesAI,
+  scheduleScopeSchema,
+} from "@follow/information-core"
 import { z } from "zod"
 
 import { AutomationError } from "./automation-store"
@@ -7,6 +13,7 @@ import { generatedFeedQuerySchema } from "./generated-feeds"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import { processingDuplicateGroup } from "./processing-duplicates"
+import { processingEventApi } from "./processing-event-api"
 import { processingFeedbackApi } from "./processing-feedback-api"
 import { processListLoaded } from "./processing-list-load"
 import type {
@@ -23,6 +30,7 @@ import type {
   ProcessingScheduleReadingStatus,
   ProcessingTriggerStatus,
 } from "./processing-schedule"
+import { processingSemanticApi } from "./processing-semantic-api"
 import { researchApi } from "./research-api"
 import { sourceText } from "./service"
 import type { Store } from "./store"
@@ -97,6 +105,8 @@ export type ProcessingEntryResultsResponse = {
     decisionId: string
     contentVersion: string
     releaseVersion: number
+    semanticTags?: SemanticTagId[]
+    semanticEntities?: SemanticEntity[]
   }>
 }
 export type ProcessingEntryDetailResponse = {
@@ -195,17 +205,20 @@ function readingSnapshotResponse(store: Store, snapshot: ReadingSnapshot): Readi
   }
 }
 
-function entryView(store: Store): ProcessingEntryListItem[] {
+function entryView(store: Store, inputSeqs?: readonly number[]): ProcessingEntryListItem[] {
   const decisions = new Map(
     store.processingState
-      .published()
+      .published(inputSeqs)
       .map(({ input, decisionId, decision }) => [input.seq, { decisionId, decision }]),
   )
   const overrides = new Map(
-    store.processingState.overrides().map((override) => [override.inputSeq, override]),
+    store.processingState.overrides(inputSeqs).map((override) => [override.inputSeq, override]),
   )
   const unsupportedCitationCounts = new Map<string, number>()
-  for (const feedback of store.feedback.list()) {
+  // 单条详情只查当前决定的反馈，避免解析整个账号的审阅历史。
+  for (const feedback of store.feedback.list(
+    inputSeqs ? [...decisions.values()].map((item) => item.decisionId) : undefined,
+  )) {
     if (
       feedback.kind !== "unsupported_citation" ||
       feedback.target.kind !== "entry" ||
@@ -218,7 +231,7 @@ function entryView(store: Store): ProcessingEntryListItem[] {
     )
   }
   // 完整 current input 集合交给 UI 筛选，服务端不按处理状态或数量截断。
-  return store.automation.inputs().map((input) => {
+  return store.automation.inputs(inputSeqs).map((input) => {
     const result = decisions.get(input.seq)
     const issueCount = result ? (unsupportedCitationCounts.get(result.decisionId) ?? 0) : 0
     return {
@@ -255,6 +268,10 @@ export function processingApi(
   path: string,
   body: unknown,
 ): object | undefined {
+  const events = processingEventApi(store, method, path, body)
+  if (events !== undefined) return events
+  const semantics = processingSemanticApi(store, method, path, body)
+  if (semantics !== undefined) return semantics
   const feedback = processingFeedbackApi(store, method, path, body)
   if (feedback !== undefined) return feedback
   const research = researchApi(store, method, path, body)
@@ -369,7 +386,9 @@ export function processingApi(
     owner(store)
     const availableSources = new Set(store.sources().map((source) => source.key))
     const releases = new Map<number, ReturnType<typeof store.automation.release>>()
-    // 时间线只轮询身份索引，正文与完整结果在用户点击后才读取。
+    const semanticTags = store.semantics.presentTagIdsByInput()
+    const semanticEntities = store.semantics.presentEntitiesByInput()
+    // 时间线只轮询身份和标签索引，正文与完整证据在用户点击后才读取。
     const entries = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
       if (
         input.releaseVersion === null ||
@@ -383,7 +402,11 @@ export function processingApi(
       if (!config) return []
       const instructions = compileInstructions(config, decision.context)
       // 处理状态取执行时实际命中的 AI 规则；仅摘要变换才暴露可打开的 AI 结果。
-      if (!instructions.matched.some(ruleUsesAI)) return []
+      if (
+        !instructions.matched.some((rule) => ruleUsesAI(rule) || ruleRequiresSemantics(rule)) &&
+        !decision.semanticProfile
+      )
+        return []
       return [
         {
           itemId: input.itemId,
@@ -399,7 +422,13 @@ export function processingApi(
           decisionId,
           contentVersion: input.contentVersion,
           releaseVersion: input.releaseVersion,
-          hasResult: !!decision.summary.trim() && instructions.transformations.length > 0,
+          ...(semanticTags.has(input.seq) ? { semanticTags: semanticTags.get(input.seq)! } : {}),
+          ...(semanticEntities.has(input.seq)
+            ? { semanticEntities: semanticEntities.get(input.seq)! }
+            : {}),
+          hasResult:
+            !!decision.semanticProfile ||
+            (!!decision.summary.trim() && instructions.transformations.length > 0),
         },
       ]
     })
@@ -439,12 +468,11 @@ export function processingApi(
   const entryDetailPath = /^\/processing\/entries\/(\d+)$/.exec(path)
   if (entryDetailPath && method === "GET") {
     const seq = positiveInteger.parse(Number(entryDetailPath[1]))
-    const item = entryView(store).find((entry) => entry.seq === seq)
-    const input = store.automation.inputs().find((candidate) => candidate.seq === seq)
-    const published = store.processingState
-      .published()
-      .find((candidate) => candidate.input.seq === seq)
+    // 将条目范围下推至数据库，详情保留列表字段及完整决定。
     owner(store)
+    const item = entryView(store, [seq])[0]
+    const input = store.automation.inputs([seq])[0]
+    const published = store.processingState.published([seq])[0]
     if (
       !item ||
       !input ||
@@ -467,10 +495,10 @@ export function processingApi(
   const explanationPath = /^\/processing\/entries\/(\d+)\/explanation$/.exec(path)
   if (explanationPath && method === "GET") {
     const seq = positiveInteger.parse(Number(explanationPath[1]))
-    const input = store.automation.inputs().find((item) => item.seq === seq && item.current)
+    const input = store.automation.inputs([seq]).find((item) => item.current)
     if (!input || !store.sources().some((source) => source.key === input.sourceKey))
       throw new AutomationError("invalid_target")
-    const published = store.processingState.published().find((item) => item.input.seq === seq)
+    const published = store.processingState.published([seq])[0]
     const release =
       input.releaseVersion === null ? null : store.automation.release(input.releaseVersion)
     // 已完成结果使用执行当时的上下文和发布版本解释，避免把新草稿伪装成旧决定的原因。

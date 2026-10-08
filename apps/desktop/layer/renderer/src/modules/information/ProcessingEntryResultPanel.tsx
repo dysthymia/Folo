@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { z } from "zod"
 
+import { EntryEventsPanel } from "./EntryEventsPanel"
+import { EntrySemanticPanel } from "./EntrySemanticPanel"
 import { readingRequest } from "./processing-reader-client"
+import { entrySemanticProfileSchema } from "./processing-semantic-client"
 
 const resultSchema = z.object({
   entry: z.object({
@@ -17,6 +20,7 @@ const resultSchema = z.object({
         title: z.string(),
         summary: z.string(),
         reason: z.string(),
+        semanticProfile: entrySemanticProfileSchema.optional(),
       })
       .nullable(),
   }),
@@ -54,7 +58,9 @@ export function ProcessingEntryResultPanel({
           entry.sourceKey !== sourceKey ||
           entry.itemId !== itemId ||
           entry.contentVersion !== contentVersion ||
-          entry.decisionId !== decisionId
+          entry.decisionId !== decisionId ||
+          (entry.decision?.semanticProfile &&
+            entry.decision.semanticProfile.contentVersion !== contentVersion)
         ) {
           setState("error")
           return
@@ -77,6 +83,20 @@ export function ProcessingEntryResultPanel({
       <p className="text-text-secondary">{t("processing.result.note")}</p>
       <h3 className="font-medium">{result.decision.title}</h3>
       <p className="whitespace-pre-wrap">{result.decision.summary}</p>
+      <EntryEventsPanel
+        key={`${inputSeq}:${contentVersion}:${decisionId}`}
+        inputSeq={inputSeq}
+        contentVersion={contentVersion}
+        decisionId={decisionId}
+      />
+      {result.decision.semanticProfile && (
+        <EntrySemanticPanel
+          key={`${inputSeq}:${contentVersion}`}
+          profile={result.decision.semanticProfile}
+          inputSeq={inputSeq}
+          contentVersion={contentVersion}
+        />
+      )}
       <details>
         <summary className="cursor-pointer text-text-secondary">
           {t("processing.result.reason")}

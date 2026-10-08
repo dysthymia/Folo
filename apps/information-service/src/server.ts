@@ -18,6 +18,7 @@ import { ExternalApiError } from "./external-api"
 import { ExternalConfigError } from "./external-config"
 import { FoloReadError } from "./folo"
 import { NotionExportError } from "./notion-export"
+import { EventRegistryError } from "./processing-event-registry"
 import { ProcessingFeedbackError } from "./processing-feedback"
 import { ProcessingReadingError } from "./processing-reading-store"
 import { ProcessingScheduleError } from "./processing-schedule"
@@ -195,6 +196,16 @@ export function createInformationServer(
             return json(response, error.code === "export_not_found" ? 404 : 400, {
               error: error.code,
             })
+          if (error instanceof EventRegistryError)
+            return json(
+              response,
+              error.code === "revision_conflict"
+                ? 409
+                : error.code === "invalid_target"
+                  ? 404
+                  : 403,
+              { error: error.code },
+            )
           if (error instanceof ProcessingScheduleError || error instanceof StoryStoreError)
             return json(response, error.code === "revision_conflict" ? 409 : 400, {
               error: error.code,

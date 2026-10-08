@@ -16,6 +16,7 @@ import {
   prepareSemanticDedupe,
   ProcessingDedupeStore,
   runSemanticDedupe,
+  semanticDedupeEvidenceKey,
 } from "./processing-dedupe"
 import type { ProcessingEntryRole } from "./processing-reading-store"
 import type { SemanticDuplicateModelOutput } from "./semantic-dedupe"
@@ -240,6 +241,180 @@ afterEach(() => {
   vi.useRealTimers()
   stores.splice(0).forEach((store) => store.close())
   tempDirs.splice(0).forEach((dir) => rmSync(dir, { force: true, recursive: true }))
+})
+
+describe("事件召回与扫描水位", () => {
+  it("同事件最近评测不遮住更早跨语言原件，一轮比较后只折叠转载", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishDecision(
+      store,
+      entry(
+        "A",
+        "正式公告",
+        "2026-01-10T00:00:00Z",
+        "OpenAI 发布 GPT 5.2，支持离线运行，价格为十元。",
+      ),
+    )
+    publishDecision(
+      store,
+      entry(
+        "B",
+        "评测：存在缺陷",
+        "2026-01-10T01:00:00Z",
+        "我实测 GPT 5.2，离线运行存在崩溃风险，这是公告中没有的反证。",
+      ),
+    )
+    publishDecision(
+      store,
+      entry(
+        "C",
+        "New model launch",
+        "2026-01-10T02:00:00Z",
+        "OpenAI released GPT 5.2 with offline operation at a price of ten yuan.",
+      ),
+    )
+    Object.assign(store, {
+      eventRecall: () => ({
+        eventIds: ["evt_11111111-1111-4111-8111-111111111111"],
+        identities: [],
+      }),
+    })
+    const plan = prepareSemanticDedupe({
+      store,
+      targets: [{ sourceKey: source.key, itemId: "C" }],
+    })[0]!
+    expect(plan.candidates.map((candidate) => candidate.pairKey)).toEqual(["B::C", "A::C"])
+    const execute = fakeExecute((pairKey) => ({
+      duplicate: pairKey === "A::C",
+      confidence: 0.99,
+      keep: "A",
+      hide: "C",
+    }))
+    const result = await runSemanticDedupe({
+      store,
+      aiConfig,
+      execute: execute as never,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+      targets: [{ sourceKey: source.key, itemId: "C" }],
+    })
+    expect(result).toMatchObject({ candidates: 2, batches: 1, duplicates: 1, pending: 0 })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(rolesOf(store).find((role) => role.itemId === "C")?.kind).toBe("merged")
+    expect(rolesOf(store).some((role) => role.itemId === "B")).toBe(false)
+    expect(store.dedupe.decidedPairKeys(fingerprintsOf(store))).toEqual(new Set(["B::C", "A::C"]))
+  })
+  it("迟到登记使旧无候选扫描失效，已有否定判定仍保留独立材料并且不重复比较", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishDecision(
+      store,
+      entry("zh", "新品来了", "2026-01-10T00:00:00Z", "产品发布报道，支持离线运行。"),
+    )
+    publishDecision(
+      store,
+      entry(
+        "en",
+        "Independent field review",
+        "2026-01-10T01:00:00Z",
+        "Independent review reports an incompatibility in offline usage.",
+      ),
+    )
+    let confirmed = false
+    let eventId = "evt_11111111-1111-4111-8111-111111111111"
+    Object.assign(store, {
+      eventRecall: () => ({ eventIds: confirmed ? [eventId] : [], identities: [] }),
+    })
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ candidates: 0, batches: 0 })
+    expect(store.dedupe.settledItemIds(fingerprintsOf(store)).size).toBe(2)
+    confirmed = true
+    const plan = prepareSemanticDedupe({ store })[0]!
+    expect(plan.candidates).toHaveLength(1)
+    expect(plan.recallWatermark).not.toBe("text-v1")
+    expect(store.dedupe.settledItemIds(fingerprintsOf(store), plan.recallWatermark).size).toBe(0)
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      candidates: 1,
+      duplicates: 0,
+      batches: 1,
+    })
+    expect(rolesOf(store)).toEqual([])
+    expect(store.processingState.published()).toHaveLength(2)
+    eventId = "evt_22222222-2222-4222-8222-222222222222"
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({ candidates: 0, batches: 0 })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(store.dedupe.decidedPairKeys(fingerprintsOf(store)).size).toBe(1)
+  })
+  it("召回依据更新不改变全文缓存key；人工保留、授权目标与规则范围仍先于召回", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishDecision(
+      store,
+      entry("older", "新品来了", "2026-01-10T00:00:00Z", "产品发布正式公告，价格为十元。"),
+    )
+    publishDecision(
+      store,
+      entry(
+        "newer",
+        "Independent field review",
+        "2026-01-10T01:00:00Z",
+        "Independent review finds additional limitations and a contrary conclusion.",
+      ),
+    )
+    Object.assign(store, {
+      eventRecall: () => ({
+        eventIds: ["evt_11111111-1111-4111-8111-111111111111"],
+        identities: [],
+      }),
+    })
+    const candidate = prepareSemanticDedupe({ store })[0]!.candidates[0]!
+    const evidenceKey = semanticDedupeEvidenceKey(candidate)
+    store.dedupe.saveRelation(candidate, {
+      model: "test-model",
+      provider: "qianwen",
+      evaluation: {
+        pairKey: candidate.pairKey,
+        duplicate: false,
+        confidence: 0.99,
+        keepEntryId: null,
+        hideEntryId: null,
+        reason: "新评测与反证独立",
+        status: "decided",
+        verdict: "different",
+      },
+    })
+    Object.assign(store, {
+      eventRecall: () => ({
+        eventIds: ["evt_22222222-2222-4222-8222-222222222222"],
+        identities: [],
+      }),
+    })
+    expect(semanticDedupeEvidenceKey(prepareSemanticDedupe({ store })[0]!.candidates[0]!)).toBe(
+      evidenceKey,
+    )
+    const execute = negativeExecute()
+    expect(await runFixture(store, aiConfig, execute)).toMatchObject({
+      candidates: 1,
+      relationCacheHits: 1,
+      batches: 0,
+      duplicates: 0,
+    })
+    expect(execute).not.toHaveBeenCalled()
+    const input = store.automation.inputs().find((item) => item.itemId === "newer")!
+    store.processingState.setOverride(input.seq, "restore", 0)
+    expect(prepareSemanticDedupe({ store })[0]!.participants).toHaveLength(1)
+    expect(
+      prepareSemanticDedupe({ store, targets: [{ sourceKey: source.key, itemId: "newer" }] })[0]!
+        .candidates,
+    ).toEqual([])
+    publishRules(store, [
+      dedupeRule({
+        anyOf: [{ allOf: [{ field: "source_id", operator: "in", value: ["outside"] }] }],
+      }),
+    ])
+    expect(prepareSemanticDedupe({ store })[0]!.participants).toEqual([])
+  })
 })
 
 describe("语义去重的服务端执行与角色落地", () => {

@@ -1,5 +1,5 @@
-// 单篇、批量和长文共享缓存版本；任一 prompt 语义变化都必须同步递增。
-export const ENTRY_PROMPT_VERSION = 12
+// 通用单篇、批量和长文共享基础缓存版本；语义实体协议另以独立版本隔离。
+export const ENTRY_PROMPT_VERSION = 14
 
 // 展示动作也是实际执行指令，不能只进入指纹和设置页。
 export function entryDisplayRequirements(display: {
@@ -39,8 +39,17 @@ export const EVENT_IDENTITY_REQUIREMENTS = `事件身份要求：
 - 必须返回 event:null 或结构化身份。主体subject、动作action、对象object、版本version、活动轮次round、发生锚点anchor中的每个已知字段都附本条输入目录的evidenceId；无法核实填null，不猜造。
 - kind=event用于具体真实事件；独立观点/预测/研究为analysis，教程为tutorial。不同作者观点、同工具教程不能因为主题相近变成一个真实事件。
 - subject/object.value优先采用原文明示的稳定URL/ID；没有ID时使用原文明示实体的官方规范名，保留拉丁技术名/缩写，不使用“加密监管”“AI新闻”等泛主题。不凭记忆编造URL或实体别名。跨语言引用同一官方原帖时使用同一原帖URL作anchor。
-- action.value只选schema中的动作类型。object须是具体公告对象/产品/法律案件/活动，不用来源标签充当对象。
+- action.value只选schema中的动作类型。object须是具体公告对象/产品/法律案件/活动的稳定实体名，不用来源标签或整句事件描述充当对象。例如某人评价某团队时，subject 为发言者，action=public_statement，object 为原文明示的团队名；评价内容、效率和速度等细节保留在 facts，不能使不同报道的 object 漂移。
 - anchor.kind=event_time仅使用原文明示发生时刻，value为带明确UTC offset的ISO8601（如2026-09-25T00:31:00+08:00）。event_date仅使用原文明示发生日（YYYY-MM-DD），timeZone只填原文明示时区对应的IANA名（如Asia/Shanghai）或UTC offset（如+08:00），未知填null。不能拿报道/发布时间替代、猜算相对日期，不能仅凭“美国”猜时区；event_time/时区必须与同一anchor.evidenceId原文相符。
 - official_reference仅用原文实际提供的官方公告或原帖URL，timeZone填null。没有发生日期但有明确模型版本/空投轮次或官方原帖，仍可识别事件。明确时区下的跨日发生时间由服务器归一，不按日期字符串机械拆事件。
 - 版本、活动轮次不同是不同事件。领取截止、资格和条件改变是同事件的新事实，不写进subject/object/anchor。不把截止日期冒充事件发生日期。
-- 无法明确主体、动作、对象及至少一种发生锚点/版本/轮次时返回event:null，保留有价值原文独立阅读，不盲目整合。`
+- 主体、动作和对象明确的具体主报道，即使发生锚点/版本/轮次均未知，也返回该主事件身份并将未知字段填null；这是候选身份，不代表已确认同一事件。服务端仍要求可核实发生身份才能自动归并。无法明确主体、动作或对象时返回event:null，不盲目整合。`
+
+// 事件提及与整篇内容类型分开，分析/教程的关联身份不会变成 Story 的事实报道资格。
+export const EVENT_MENTION_REQUIREMENTS = `事件提及要求：
+- 必须返回 eventMentions 数组，最多 4 项；没有原文可追溯的具体事件时返回 []。每项为 {identity,role,isPrimary}，identity 的每个已知字段选择本条证据目录的 evidenceId。
+- role 只取 reports（直接报道）、analysis_of（分析具体事件）、tutorial_for（与具体事件相关的教程）、mentions（附带提及）。独立分析和教程保留 identity.kind=analysis/tutorial，不伪装成 event 报道。
+- 最多一个 isPrimary=true，主提及 identity 必须逐字段等于 legacy event；event=null 时全部 isPrimary=false。标题与正文重点直接报道的具体事件设为主提及，不能因缺发生锚点或附带历史背景而丢掉主次关系。周报或并列多事件可以没有主事件，不能拿周报主题、领域标签或模糊主体制造主事件。
+- 只提取材料明确讨论的少量具体事件；没有可核实的发生锚点、版本或轮次时，可作为次要候选保留并令 anchor/version/round=null，不编造日期或官方URL。未知来源链接只能候选，不能冒充已确认事件。
+- subject/object/version/round 的值必须受各自选定的连续片段明确支持，官方URL必须来自该片段。不按相似拼写、简称或记忆中的别名合并实体。未读取链接、图片或引用内容不能被补成已确认身份。
+- 多事件身份只建立提及关系，不宣称整篇 facts 都属于主事件；不能将另一事件的事实注入主事件。主事件与背景事件选择各自独立的证据片段，facts 同样逐条选本事件片段；无法分开的混合片段不具备主事件综述资格。`

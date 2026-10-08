@@ -251,6 +251,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         runtimeDir: options.runtimeDir,
         sourceKeys: trigger.sourceKeys,
         inputSeqs: hydrated.inputSeqs,
+        allowClassification: trigger.kind === "list_loaded",
         sharedAnalysis,
         historySince: trigger.historySince,
         cutoffAt: trigger.cutoffAt,
@@ -309,6 +310,8 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         (source) => source.coverage === "budget",
       ).length
     }
+    // 当前单篇和旧格式身份都先经过事件登记核验，去重才能读取同一份确认归属。
+    store.synchronizeEvents()
     // 单篇发布后先落实覆盖关系，再把保留材料交给综述，重复报道不冒充独立证据。
     const dedupe = await (options.dedupe ?? runSemanticDedupe)({
       store,
@@ -376,9 +379,21 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
           runtimeDir: options.runtimeDir,
           signal,
           targets: trigger.targets,
+          sameEventEligible: (published) => {
+            const memberships = store.events.entryEvents(published.input)
+            return (
+              !memberships.length ||
+              store.events.confirmedEventIdsForMembers([
+                { inputSeq: published.input.seq, decisionId: published.decisionId },
+              ]).length > 0
+            )
+          },
+          registeredEventId: (members) =>
+            store.events.confirmedEventIdsForMembers(members)[0] ?? null,
         }),
       )
     }
+    store.synchronizeEvents()
     const failure =
       inventory.failure !== null ||
       repair.failures.length > 0 ||

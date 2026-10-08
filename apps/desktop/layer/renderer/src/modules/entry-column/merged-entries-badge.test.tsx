@@ -8,6 +8,7 @@ import type { Root } from "react-dom/client"
 import { createRoot } from "react-dom/client"
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
+import type { ProcessingEntryResult } from "~/modules/information/processing-entry-result-match"
 import { ReadingRequestError } from "~/modules/information/processing-reader-client"
 
 import { MergedEntriesBadge } from "./merged-entries-badge"
@@ -24,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   restore: vi.fn(),
   restoreFailed: false,
   navigate: vi.fn(),
+  result: null as ProcessingEntryResult | null,
 }))
 vi.mock("@follow/store/entry/processing-role", () => ({
   useEntryProcessingRole: () => mocks.role,
@@ -51,7 +53,7 @@ vi.mock("~/components/ui/modal/stacked/hooks", () => ({
   useModalStack: () => ({ present: vi.fn() }),
 }))
 vi.mock("~/modules/information/processing-entry-result-client", () => ({
-  useProcessingEntryResult: () => null,
+  useProcessingEntryResult: () => mocks.result,
 }))
 vi.mock("~/modules/information/ProcessingEntryExplanation", () => ({
   ProcessingEntryExplanation: () => null,
@@ -108,6 +110,7 @@ describe("重复角标与组明细", () => {
     mocks.cachedEntries = []
     mocks.owner = "owner"
     mocks.restoreFailed = false
+    mocks.result = null
     mocks.role = {
       kind: "keeper",
       source: "service",
@@ -146,6 +149,21 @@ describe("重复角标与组明细", () => {
   }
   const button = (key: string) =>
     [...document.querySelectorAll("button")].find((node) => node.textContent === key)!
+
+  it("普通条目已有 AI 结果时右侧不再生成独立按钮", async () => {
+    mocks.role = null
+    mocks.result = {
+      itemId: "a",
+      sourceKey: "feed/source",
+      sourceId: "feed/source",
+      inputSeq: 1,
+      decisionId: "decision",
+      contentVersion: "v1",
+      releaseVersion: 1,
+    }
+    await render()
+    expect(container.querySelector("button")).toBeNull()
+  })
 
   it("悬停立即预览本地内容且不请求，点击才读取完整详情", async () => {
     vi.useFakeTimers()

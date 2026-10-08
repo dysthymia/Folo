@@ -26,6 +26,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
+import { EntrySemanticTags } from "../entry-semantic-tags"
 import { MergedEntriesBadge } from "../merged-entries-badge"
 import { EntryProcessingStatusIcon } from "../processing-status-icon"
 import { EntryStarActionButton } from "../star-action-button"
@@ -203,6 +204,7 @@ export function ListItem({
           <MergedEntriesBadge entryId={entryId} />
           <span className="shrink-0">·</span>
           <span className="shrink-0">{!!displayTime && <RelativeTime date={displayTime} />}</span>
+          <EntrySemanticTags entryId={entryId} className="ml-1" />
         </div>
         <div
           className={cn(

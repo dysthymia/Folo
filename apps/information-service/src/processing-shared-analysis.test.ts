@@ -108,6 +108,7 @@ function executor(
   containment = false,
   malformedSide = false,
   dedupeProblem?: "missing_result" | "invalid_result",
+  allowEntryOnly = false,
 ) {
   return vi.fn(async <T>(request: CodexJsonOptions<T>) => {
     expect(request.purpose).toBe("entry")
@@ -118,6 +119,19 @@ function executor(
         return
       }
       const schema = node as Record<string, unknown>
+      if (typeof schema.$ref === "string" && schema.$ref.startsWith("#/")) {
+        expect(schema.$ref).toMatch(/^#\/\$defs\//u)
+        // 真实模型按信封根目录解析引用，验证嵌套单篇契约没有悬空的 $defs 路径。
+        let target: unknown = request.schema
+        for (const segment of schema.$ref.slice(2).split("/")) {
+          expect(typeof target).toBe("object")
+          expect(target).not.toBeNull()
+          target = (target as Record<string, unknown>)[
+            segment.replace(/~1/gu, "/").replace(/~0/gu, "~")
+          ]
+        }
+        expect(target).toBeDefined()
+      }
       if (
         schema.type === "object" &&
         typeof schema.properties === "object" &&
@@ -129,7 +143,8 @@ function executor(
       for (const child of Object.values(schema)) inspectSchema(child)
     }
     inspectSchema(request.schema)
-    expect(request.prompt).toContain("同时执行以下已命中的规则")
+    const shared = request.prompt.includes("同时执行以下已命中的规则")
+    if (!allowEntryOnly) expect(shared).toBe(true)
     const marker = "批内条目与独立证据目录：\n"
     const batch = request.prompt.includes(marker)
       ? (JSON.parse(request.prompt.split(marker)[1]!.split("\n\n同时")[0]!) as Array<{
@@ -138,9 +153,11 @@ function executor(
         }>)
       : [
           {
-            entryId: options.store.automation.inputs().find((input) => input.body.read === false)!
-              .itemId,
-            evidenceCatalog: [{ evidenceId: "E000001", text: "公司发布 Core 1.0，支持离线部署。" }],
+            // 拆批后的单篇请求也按真实 entryId 和证据目录返回，不能复用首篇夹具的正文。
+            entryId: /entryId=([^。\s]+)/u.exec(request.prompt)![1]!,
+            evidenceCatalog: JSON.parse(
+              request.prompt.split("编号原文证据目录：\n")[1]!.split("\n\n同时")[0]!,
+            ) as Array<{ evidenceId: string; text: string }>,
           },
         ]
     const items = batch.map((item) => ({
@@ -161,22 +178,26 @@ function executor(
         round: null,
         anchor: null,
       },
-      facts: item.evidenceCatalog.map((fragment) => ({
+      facts: item.evidenceCatalog.slice(0, 30).map((fragment) => ({
         text: fragment.text,
         evidenceId: fragment.evidenceId,
         kind: "fact",
       })),
     }))
-    const pairs = JSON.parse(
-      request.prompt
-        .split("去重候选（entries 的完整正文通过 itemId 查上面的证据目录或下面的只读参考）：\n")[1]!
-        .split("\n只读参考")[0]!,
-    ) as Array<{
-      pairKey: string
-      keepEntryId: string
-      testEntryId: string
-      entries: Array<{ itemId: string }>
-    }>
+    const pairs = shared
+      ? (JSON.parse(
+          request.prompt
+            .split(
+              "去重候选（entries 的完整正文通过 itemId 查上面的证据目录或下面的只读参考）：\n",
+            )[1]!
+            .split("\n只读参考")[0]!,
+        ) as Array<{
+          pairKey: string
+          keepEntryId: string
+          testEntryId: string
+          entries: Array<{ itemId: string }>
+        }>)
+      : []
     const sentences = batch.map((item) => ({
       text: item.evidenceCatalog[0]!.text,
       sources: [
@@ -239,12 +260,15 @@ function executor(
           },
       stories,
     }
-    expect(request.validate(output)).toBe(true)
+    const result = shared ? output : request.prompt.includes(marker) ? { items } : items[0]
+    expect(request.validate(result)).toBe(true)
     // 原文在联合请求里只出现一次，候选区不能再复制完整正文。
     for (const item of batch)
-      expect(request.prompt.split(item.evidenceCatalog[0]!.text).length - 1).toBe(1)
+      expect(
+        request.prompt.split(JSON.stringify(item.evidenceCatalog[0]!.text).slice(1, -1)).length - 1,
+      ).toBe(1)
     return {
-      result: output as T,
+      result: result as T,
       model: request.model,
       durationMs: 1,
       usage: { inputTokens: 100, outputTokens: 50, cachedInputTokens: 0 },
@@ -269,6 +293,102 @@ afterEach(() => {
 })
 
 describe("共享材料与规则分析", () => {
+  it("大量已读参考只选择有限比较，参考正文仍保持完整", async () => {
+    // 单个未读目标也可能拖入大量历史参考，预算必须约束真实请求而不只是目标篇数。
+    const options = fixture(false)
+    for (let index = 0; index < 10; index++)
+      save(
+        options,
+        `reference-${index}`,
+        `公司发布 Core 1.0，第${index + 1}项功能升级无需停机。`,
+        true,
+      )
+    save(options, "unread", "公司发布 Core 1.0，支持离线部署。")
+    settleReadStates(options.store)
+    const execute = executor(options, false, false, undefined, true)
+    expect(await process(options, execute)).toMatchObject({ completed: 1, failures: [] })
+    const request = execute.mock.calls[0]![0]
+    expect(request.telemetry?.pairCount).toBe(4)
+    expect(request.telemetry?.uniqueDocumentCount).toBeLessThanOrEqual(6)
+    const references = JSON.parse(
+      request.prompt
+        .split("只读参考（已有缓存，不是新的处理目标）：")[1]!
+        .split("\n当前条目身份")[0]!,
+    ) as Array<{ itemId: string; content: string }>
+    for (const reference of references)
+      expect(reference.content).toBe(options.store.entry("feed/1", reference.itemId)?.content)
+    expect(options.sharedAnalysis.dedupeEvaluations).toHaveLength(4)
+  })
+
+  it("动态证据契约过大时退出联合分析，保留完整单篇材料", async () => {
+    // 短正文也可含很多证据编号，不能只按正文字符数判断执行负担。
+    const options = fixture()
+    for (let entry = 0; entry < 2; entry++)
+      save(
+        options,
+        `entry-${entry}`,
+        Array.from(
+          { length: 220 },
+          (_, index) => `公司发布 Core 1.0，第${entry}-${index}项功能支持离线部署。`,
+        ).join("\n"),
+      )
+    const execute = executor(options, false, false, undefined, true)
+    const result = await process(options, execute)
+    await expect(execute.mock.results[0]!.value).resolves.toBeDefined()
+    expect(result).toMatchObject({ completed: 2, failures: [] })
+    expect(execute).toHaveBeenCalledTimes(2)
+    for (const [request] of execute.mock.calls) {
+      expect(request.telemetry?.tasks).toEqual(["entry"])
+      expect(request.prompt).not.toContain("同时执行以下已命中的规则")
+    }
+    const prompts = execute.mock.calls.map(([request]) => request.prompt).join("\n")
+    expect(prompts).toContain("第0-219项功能支持离线部署。")
+    expect(prompts).toContain("第1-219项功能支持离线部署。")
+    expect(
+      options.store.processingState.published().every((item) => item.decision.facts.length === 30),
+    ).toBe(true)
+    expect(options.sharedAnalysis.storyGroups).toEqual([])
+  })
+
+  it("大批次先完整发布单篇，去重与综述留给后续阶段", async () => {
+    // 五篇完整材料超出联合预算，但每篇事实仍完整保留，命中的规则继续运行。
+    const options = fixture()
+    for (let index = 0; index < 5; index++)
+      save(options, `entry-${index}`, `公司发布 Core 1.0，第${index + 1}项功能支持离线部署。`)
+    const execute = executor(options, false, false, undefined, true)
+    expect(await process(options, execute)).toMatchObject({ completed: 5, failures: [] })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute.mock.calls[0]![0].telemetry).toMatchObject({
+      tasks: ["entry"],
+      uniqueDocumentCount: 5,
+      pairCount: 0,
+    })
+    expect(
+      options.store.processingState.published().every((item) => item.decision.facts.length > 0),
+    ).toBe(true)
+    expect(options.sharedAnalysis.dedupeEvaluations).toEqual([])
+    expect(options.sharedAnalysis.storyGroups).toEqual([])
+    const storyExecute = vi.fn(async <T>(request: CodexJsonOptions<T>) => ({
+      result: { groups: [] } as T,
+      model: request.model,
+      durationMs: 1,
+      usage: null,
+      toolCalls: 0,
+    }))
+    const stories = await runStoryAggregation({
+      ...options,
+      decisions: options.store.processingState.published(),
+      currentEntry: options.store.entry.bind(options.store),
+      ruleSet: options.store.automation.effective().config!,
+      stories: options.store.stories,
+      sharedGroups: options.sharedAnalysis.storyGroups,
+      signal: new AbortController().signal,
+      execute: storyExecute as typeof runCodexJson,
+    })
+    expect(stories.failures).toEqual([])
+    expect(storyExecute).toHaveBeenCalled()
+  })
+
   it.each(["missing_result", "invalid_result"] as const)(
     "共享%s也计入补判次数，不复用异常产物或立即重复付费",
     async (status) => {

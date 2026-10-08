@@ -4,6 +4,12 @@ import type { AIChatExecution, AIConfig } from "./ai-config"
 import { aiReasoningEffort } from "./ai-reasoning"
 import type { CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
+import type { EventRecallMetadata, EventRecallReason } from "./processing-event-recall"
+import {
+  eventRecallPostingKeys,
+  eventRecallReasons,
+  validatedEventRecall,
+} from "./processing-event-recall"
 
 /**
  * 跨来源同事实转载判重（服务端）。
@@ -38,6 +44,8 @@ export type SemanticDuplicateEntry = {
   urlHost: string
   content?: string
   contentComplete?: boolean
+  /** 召回依据只扩展候选，不替代完整正文事实比较。 */
+  recall?: EventRecallMetadata
 }
 export type SemanticDuplicateCandidate = {
   pairKey: string
@@ -46,6 +54,7 @@ export type SemanticDuplicateCandidate = {
   testEntryId: string
   similarity: number
   entries: [SemanticDuplicateEntry, SemanticDuplicateEntry]
+  recallReasons?: EventRecallReason[]
 }
 export type SemanticDuplicateEvaluation = {
   pairKey: string
@@ -193,7 +202,7 @@ export function isWithinDedupeWindow(leftAt: number, rightAt: number) {
  * 倒排只排除没有任何共同 bigram 的条目，不降低相似度阈值或截断召回；
  * 不再保存、排序整个窗口的所有配对，时间相同和分数相同仍保留原有稳定顺序。
  */
-export function getSemanticDuplicateCandidates(
+function getTextDuplicateCandidates(
   entries: SemanticDuplicateEntry[],
   options: {
     maxCandidates?: number
@@ -309,16 +318,152 @@ export function getSemanticDuplicateCandidates(
   return selected
 }
 
+export type SemanticDuplicateCandidateOptions = NonNullable<
+  Parameters<typeof getTextDuplicateCandidates>[1]
+>
+
+/** 文本与事件倒排取并集；每八对为文本保留两个名额，过滤始终先于预算。 */
+export function getSemanticDuplicateCandidates(
+  entries: SemanticDuplicateEntry[],
+  options: SemanticDuplicateCandidateOptions = {},
+): SemanticDuplicateCandidate[] {
+  const limit = options.maxCandidates ?? MAX_SEMANTIC_DUPLICATE_CANDIDATES
+  if (limit <= 0 || options.targetItemIds?.size === 0) return []
+  const text = getTextDuplicateCandidates(entries, options)
+  // 旧结果没有事件/实体登记时直接沿用文本倒排，避免增加正文解析或第二次排序。
+  if (!entries.some((entry) => entry.recall?.eventIds.length || entry.recall?.identities.length))
+    return text
+  const ordered = entries
+    .map((entry) => ({
+      entry,
+      at: Date.parse(entry.publishedAt),
+      metadata: validatedEventRecall(entry),
+    }))
+    .filter((item) => Number.isFinite(item.at))
+    .sort((a, b) => b.at - a.at)
+  const postings = new Map<string, number[]>()
+  const targetPostings = new Map<string, number[]>()
+  for (const [index, item] of ordered.entries())
+    for (const key of new Set(eventRecallPostingKeys(item.metadata))) {
+      const values = postings.get(key) ?? []
+      values.push(index)
+      postings.set(key, values)
+      if (options.targetItemIds?.has(item.entry.itemId)) {
+        const targets = targetPostings.get(key) ?? []
+        targets.push(index)
+        targetPostings.set(key, targets)
+      }
+    }
+  function* candidatesForLeft(index: number): Generator<SemanticDuplicateCandidate> {
+    const left = ordered[index]!
+    const possible = new Set<number>()
+    const indexPostings =
+      options.targetItemIds && !options.targetItemIds.has(left.entry.itemId)
+        ? targetPostings
+        : postings
+    for (const key of eventRecallPostingKeys(left.metadata))
+      for (const rightIndex of indexPostings.get(key) ?? []) {
+        if (rightIndex > index) possible.add(rightIndex)
+      }
+    for (const rightIndex of [...possible].sort((a, b) => a - b)) {
+      const right = ordered[rightIndex]!
+      if (!isWithinDedupeWindow(left.at, right.at)) break
+      if (
+        left.entry.itemId === right.entry.itemId ||
+        (left.entry.originalIdentity &&
+          left.entry.originalIdentity === right.entry.originalIdentity)
+      )
+        continue
+      if (
+        options.targetItemIds &&
+        !options.targetItemIds.has(left.entry.itemId) &&
+        !options.targetItemIds.has(right.entry.itemId)
+      )
+        continue
+      const pairKey = semanticDuplicatePairKey(left.entry.itemId, right.entry.itemId)
+      if (options.decidedPairKeys?.has(pairKey)) continue
+      if (
+        options.settledItemIds?.has(left.entry.itemId) &&
+        options.settledItemIds.has(right.entry.itemId)
+      )
+        continue
+      const recallReasons = eventRecallReasons(left.metadata, right.metadata)
+      if (!recallReasons.length) continue
+      yield {
+        pairKey,
+        entries: [left.entry, right.entry],
+        keepEntryId: right.entry.itemId,
+        testEntryId: left.entry.itemId,
+        similarity: 0,
+        recallReasons,
+      }
+    }
+  }
+  // 每条轮流领取一对，再继续其更早材料；最近的独立评测不能永久遮住更早转载原件。
+  const recalled: SemanticDuplicateCandidate[] = []
+  const recalledPairs = new Set<string>()
+  let queues = ordered.map((_, index) => candidatesForLeft(index))
+  while (queues.length && recalled.length < limit) {
+    const remaining: Generator<SemanticDuplicateCandidate>[] = []
+    for (const queue of queues) {
+      const next = queue.next()
+      if (next.done) continue
+      remaining.push(queue)
+      if (recalledPairs.has(next.value.pairKey)) continue
+      recalled.push(next.value)
+      recalledPairs.add(next.value.pairKey)
+      if (recalled.length >= limit) break
+    }
+    queues = remaining
+  }
+  if (!recalled.length) return text
+  const selected = new Map<string, SemanticDuplicateCandidate>()
+  let textIndex = 0,
+    recallIndex = 0
+  const append = (candidate: SemanticDuplicateCandidate, fromText: boolean) => {
+    const previous = selected.get(candidate.pairKey)
+    const reasons = fromText ? [{ type: "text" as const }] : (candidate.recallReasons ?? [])
+    if (previous) previous.recallReasons = [...(previous.recallReasons ?? []), ...reasons]
+    else selected.set(candidate.pairKey, { ...candidate, recallReasons: reasons })
+  }
+  while (selected.size < limit && (textIndex < text.length || recallIndex < recalled.length)) {
+    for (
+      let slots = 0;
+      slots < 2 && textIndex < text.length && selected.size < limit;
+      textIndex++
+    ) {
+      const candidate = text[textIndex]!
+      if (!selected.has(candidate.pairKey)) slots++
+      append(candidate, true)
+    }
+    for (
+      let slots = 0;
+      slots < 6 && recallIndex < recalled.length && selected.size < limit;
+      recallIndex++
+    ) {
+      const candidate = recalled[recallIndex]!
+      if (!selected.has(candidate.pairKey)) slots++
+      append(candidate, false)
+    }
+  }
+  return [...selected.values()]
+}
+
 export function createSemanticDuplicatePrompt(candidates: SemanticDuplicateCandidate[]) {
   // 同批正文按 itemId 去重，配对仅保留身份引用；不截断事实，也不改变模型输出协议。
   const documents = [
     ...new Map(
-      candidates.flatMap((candidate) => candidate.entries).map((entry) => [entry.itemId, entry]),
+      candidates
+        .flatMap((candidate) => candidate.entries)
+        .map(({ recall: _recall, ...entry }) => [entry.itemId, entry]),
     ).values(),
   ]
-  const pairs = candidates.map((candidate) => ({
+  // 召回线索只用于解释候选来源，不改变已验证的全文比较证据或暗示模型判重。
+  const pairs = candidates.map(({ recallReasons: _recallReasons, ...candidate }) => ({
     ...candidate,
-    entries: candidate.entries.map(({ content: _content, ...metadata }) => metadata),
+    entries: candidate.entries.map(
+      ({ content: _content, recall: _recall, ...metadata }) => metadata,
+    ),
   }))
   return `你是严格的重复新闻分类器。判断每一对候选是否为同一组事实的转载，或一篇完整覆盖另一篇的重复报道。
 

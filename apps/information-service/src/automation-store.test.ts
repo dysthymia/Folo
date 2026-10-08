@@ -145,6 +145,51 @@ describe("发布范围与输入版本", () => {
     expect(db.prepare("SELECT count(*) AS n FROM entry_decisions").get()?.n).toBe(2)
   })
 
+  it("无模型策略重算换代并保留历史，陈旧材料/代际/发布引用不能覆盖", () => {
+    const { repository, db } = fixture()
+    const seq = repository.capture(entry)
+    const release = repository.publish(0, { mode: "future" }, randomUUID())
+    const target = repository.assign(seq)
+    const original = repository.complete(target, { answer: "原始语义" })
+    const before = repository.current(entry.sourceKey, entry.id)!
+    const nextRelease = repository.publish(0, { mode: "future" }, randomUUID())
+    const result = repository.recalculate(
+      before,
+      { answer: "重新应用显示策略" },
+      nextRelease.version,
+    )
+    expect(result.published).toBe(true)
+    expect(result.input).toMatchObject({
+      seq,
+      contentVersion: before.contentVersion,
+      body: before.body,
+      generation: before.generation + 1,
+      releaseVersion: nextRelease.version,
+      status: "succeeded",
+    })
+    expect(result.id).not.toBe(original.id)
+    expect(db.prepare("SELECT count(*) AS n FROM entry_decisions").get()?.n).toBe(2)
+    expect(db.prepare("SELECT body FROM entry_decisions WHERE id=?").get(original.id)?.body).toBe(
+      JSON.stringify({ answer: "原始语义" }),
+    )
+    expect(() => repository.recalculate(before, {})).toThrow("revision_conflict")
+    const current = repository.current(entry.sourceKey, entry.id)!
+    expect(() => repository.recalculate({ ...current, contentVersion: "过期材料" }, {})).toThrow(
+      "revision_conflict",
+    )
+    expect(() =>
+      repository.recalculate({ ...current, releaseVersion: release.version }, {}),
+    ).toThrow("revision_conflict")
+    expect(() => repository.recalculate(current, {}, 999)).toThrow("invalid_target")
+    expect(repository.current(entry.sourceKey, entry.id)).toEqual(current)
+    expect(repository.recalculate(current, { answer: "只改策略" }).input.releaseVersion).toBe(
+      nextRelease.version,
+    )
+    const replaced = repository.current(entry.sourceKey, entry.id)!
+    repository.capture({ ...entry, content: "新版原文" })
+    expect(() => repository.recalculate(replaced, {})).toThrow("revision_conflict")
+  })
+
   it("指定目标与重发请求冻结范围，重发不会增加发布或 generation", () => {
     const { repository } = fixture()
     const seq = repository.capture(entry)

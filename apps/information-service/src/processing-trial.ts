@@ -18,6 +18,12 @@ import {
   sourceRole,
 } from "./processing-engine"
 import { inputReadState } from "./processing-read-state"
+import {
+  createSemanticProfile,
+  projectSemanticDecision,
+  semanticAnalysisInstructions,
+} from "./processing-semantic-decision"
+import { applySemanticTransforms } from "./processing-semantic-transform"
 import { sourceText } from "./service"
 import type { Store } from "./store"
 
@@ -110,7 +116,7 @@ export class ProcessingTrial {
       const common = {
         entryId: input.itemId,
         text,
-        instructions,
+        instructions: semanticAnalysisInstructions(instructions),
         sourceRole: sourceRole(store, context.source_id),
         historySince: store.schedule.snapshot().config?.historySince ?? input.body.publishedAt,
         model: ai.model,
@@ -131,6 +137,84 @@ export class ProcessingTrial {
         : await runSingleEntryModel(common)
       if ("status" in response && response.status === "pending")
         throw new ProcessingTrialError(response.reason)
+      const output = response.output
+      let decision: ProcessingDecision = {
+        schemaVersion: instructions.semanticTagIds.length ? 2 : 1,
+        fingerprint: `trial:${input.seq}:${input.generation}`,
+        provider: ai.provider,
+        model: ai.model,
+        generatedAt: new Date().toISOString(),
+        durationMs: "durationMs" in response ? response.durationMs : 0,
+        usage: response.usage,
+        status: resolvedStatus(instructions, output),
+        policy: resolvedPolicy(instructions, output, text.length > 60_000),
+        title: output.title,
+        summary: output.summary,
+        reason: output.reason,
+        labels: output.labels,
+        sourceRole: common.sourceRole,
+        context,
+        facts: output.facts,
+        semantic: output,
+        semanticProfile: createSemanticProfile({
+          contentVersion: input.contentVersion,
+          text,
+          output,
+          evidence: response.semanticEvidence ?? {},
+          coverage: "semanticCoverage" in response ? response.semanticCoverage : undefined,
+        }),
+        reused: false,
+      }
+      if (decision.semanticProfile) {
+        const assessments = decision.semanticProfile.assessments
+        // 后置变换只用本次试运行内存缓存，不能写入正式模型缓存或发布语义档案。
+        const cache = new Map<string, ProcessingDecision>()
+        const transformed = await applySemanticTransforms({
+          store: {
+            processingState: {
+              cache: (key) => cache.get(key) ?? null,
+              saveCache: (value) => {
+                cache.set(value.fingerprint, value)
+              },
+            },
+          },
+          config: request.config,
+          context,
+          assessments,
+          instructions,
+          decision,
+          runModel: async (postInstructions) => {
+            if (temporary) {
+              const transformedResponse = await processLongEntry({
+                ...common,
+                instructions: semanticAnalysisInstructions(postInstructions),
+                runtimeDir: temporary,
+                provider: ai.provider,
+              })
+              if (transformedResponse.status === "pending")
+                throw new ProcessingTrialError(transformedResponse.reason)
+              return {
+                output: transformedResponse.output,
+                usage: transformedResponse.usage,
+                durationMs: 0,
+              }
+            }
+            return runSingleEntryModel({
+              ...common,
+              instructions: postInstructions,
+              semanticAssessments: assessments,
+            })
+          },
+        })
+        decision = projectSemanticDecision(
+          transformed.decision,
+          request.config,
+          context,
+          assessments,
+        )
+        // 长文仍保留原文阅读，不把试运行综合产物变成替代正文。
+        if (temporary) decision.policy.rewrite = "deny"
+      }
       const current = store.automation.current(request.sourceKey, request.entryId)
       // 模型返回前账号、正文或标签已变化时丢弃结果，不能展示旧授权范围的试运行。
       if (
@@ -141,16 +225,14 @@ export class ProcessingTrial {
         store.subscriptionTags.snapshot().revision !== metadataVersion
       )
         throw new ProcessingTrialError("stale_target")
-      const output = response.output
-      const after = displayResult({
-        ...output,
-        status: resolvedStatus(instructions, output),
-        policy: resolvedPolicy(instructions, output, text.length > 60_000),
-      })
-      const aggregation = instructions.aggregates.map((rule) => {
+      const after = displayResult(decision)
+      const evaluated = decision.semanticProfile
+        ? compileInstructions(request.config, decision.context)
+        : instructions
+      const aggregation = evaluated.aggregates.map((rule) => {
         const candidates =
           after.policy.aggregation === "deny" ||
-          matchConditions(rule.scope, context).state !== "match"
+          matchConditions(rule.scope, decision.context).state !== "match"
             ? []
             : published.filter(
                 (item) =>
@@ -181,7 +263,7 @@ export class ProcessingTrial {
         beforeReleaseVersion: before?.input.releaseVersion ?? null,
         after,
         model: ai.model,
-        usage: response.usage,
+        usage: decision.usage,
         aggregation,
       }
     } finally {

@@ -71,6 +71,9 @@ export class ProcessingFeedbackStore {
       );
       CREATE INDEX IF NOT EXISTS processing_feedback_owner_created
         ON processing_feedback(owner_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS processing_feedback_entry_decision
+        ON processing_feedback(owner_id, json_extract(target_body, '$.decisionId'))
+        WHERE target_kind='entry';
     `)
   }
 
@@ -106,10 +109,20 @@ export class ProcessingFeedbackStore {
     return row ? this.row(row as Record<string, unknown>) : null
   }
 
-  list(): ProcessingFeedback[] {
+  list(decisionIds?: readonly string[]): ProcessingFeedback[] {
+    const owner = this.requireOwner()
+    if (decisionIds && !decisionIds.length) return []
+    // 单条结果反馈通过决定索引定位，旧决定和 Story 反馈不会进入详情。
+    if (decisionIds)
+      return this.db
+        .prepare(
+          `SELECT * FROM processing_feedback WHERE owner_id=? AND target_kind='entry' AND json_extract(target_body, '$.decisionId') IN (${decisionIds.map(() => "?").join(",")}) ORDER BY created_at DESC`,
+        )
+        .all(owner, ...decisionIds)
+        .map((row) => this.row(row as Record<string, unknown>))
     return this.db
       .prepare("SELECT * FROM processing_feedback WHERE owner_id=? ORDER BY created_at DESC")
-      .all(this.requireOwner())
+      .all(owner)
       .map((row) => this.row(row as Record<string, unknown>))
   }
 

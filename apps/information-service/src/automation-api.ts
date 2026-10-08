@@ -8,7 +8,7 @@ import {
 } from "@follow/information-core"
 import { z } from "zod"
 
-import { AutomationError } from "./automation-store"
+import { AutomationError, promoteSemanticRuleSet } from "./automation-store"
 import { processingApi } from "./processing-api"
 import { processingRuleInput } from "./processing-engine"
 import { nextProcessingRunAt } from "./processing-next-run"
@@ -26,7 +26,7 @@ export function automationApi(store: Store, method: string, path: string, body: 
   const repository = store.automation
   const draft = repository.draft()
   const save = (config: typeof draft.config, expectedRevision: number) =>
-    repository.saveDraft(config, expectedRevision)
+    repository.saveDraft(promoteSemanticRuleSet(config), expectedRevision)
   // 首屏和独立接口共用来源快照结构，避免汇总接口与旧接口的字段逐渐漂移。
   const readSourceMetadata = () => ({
     sources: store.sources(),
@@ -372,13 +372,29 @@ export function automationApi(store: Store, method: string, path: string, body: 
     const current = repository.current(source.key, entry.id)
     const complete = current !== null && store.processingState.material(current) === "complete"
     const input = processingRuleInput(store, source.key, entry, content, complete)
+    // 仅复用当前材料的已发布语义；未分析样本保持 unknown，不伪造零命中。
+    const decision = current
+      ? store.processingState.published([current.seq])[0]?.decision
+      : undefined
+    const profile =
+      decision?.semanticProfile ?? (current ? store.semantics.view(current).profile : null)
+    input.entry_tag =
+      current && profile
+        ? store.semantics.assessments(current, profile)
+        : (decision?.semantic?.tagAssessments ?? null)
+    const compiled = compileInstructions(config, input)
     return {
       entryId: entry.id,
       sourceKey: source.key,
       material: content ? "source_text" : "missing",
       input,
       metadataVersion: store.subscriptionTags.snapshot().revision,
-      ...compileInstructions(config, input),
+      ...compiled,
+      counts: {
+        matched: compiled.matches.filter((match) => match.state === "match").length,
+        unknown: compiled.matches.filter((match) => match.state === "unknown").length,
+        noMatch: compiled.matches.filter((match) => match.state === "no_match").length,
+      },
     }
   }
   if (path === "/rule-set-releases/preview" && method === "POST") {

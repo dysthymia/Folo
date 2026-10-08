@@ -17,7 +17,6 @@ import { runnableReleasedConfig } from "./processing-rule-scope"
 import type { SemanticDuplicateCandidate } from "./semantic-dedupe"
 import {
   createSemanticDuplicatePrompt,
-  MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   normalizeSemanticDuplicateOutput,
   semanticDuplicateEvaluationStatus,
   semanticDuplicateEvaluationStatuses,
@@ -105,8 +104,13 @@ const cachedStorySchema = z
     output: storyModelOutputSchema,
   })
   .strict()
-const MAX_SHARED_REFERENCE_CHARS = 32_000
-const MAX_SHARED_PROMPT_CHARS = 100_000
+// 高推理强度下，正文长度不足以衡量联合任务；同时限制目标、参考、比较和动态契约。
+const MAX_SHARED_TARGETS = 4
+const MAX_SHARED_DOCUMENTS = 6
+const MAX_SHARED_PAIRS = 4
+const MAX_SHARED_REFERENCE_CHARS = 12_000
+const MAX_SHARED_PROMPT_CHARS = 40_000
+const MAX_SHARED_SCHEMA_CHARS = 16_000
 const identity = (input: ProcessingInput): InputIdentity => ({
   seq: input.seq,
   generation: input.generation,
@@ -146,6 +150,20 @@ export class SharedAnalysisSession {
     execute: typeof runCodexJson = runCodexJson,
   ) {
     const { store } = this.options
+    const materialIds = new Set(materials.map((item) => item.input.itemId))
+    const executeEntry = () =>
+      execute({
+        ...request,
+        telemetry: {
+          ...request.telemetry,
+          triggerId: this.options.triggerId,
+          tasks: ["entry"],
+          uniqueDocumentCount: materialIds.size,
+          pairCount: 0,
+        },
+      })
+    // 超预算的派生任务交给后续去重/综述阶段；原文和单篇事实保持完整，不截断材料。
+    if (materialIds.size > MAX_SHARED_TARGETS) return executeEntry()
     const plans = prepareSemanticDedupe({
       store,
       sourceKeys: this.options.sourceKeys,
@@ -153,7 +171,6 @@ export class SharedAnalysisSession {
       targets: materials.map(({ input }) => input),
       pendingInputs: materials.map(({ input }) => input),
     })
-    const materialIds = new Set(materials.map((item) => item.input.itemId))
     const references = new Map<string, SemanticDuplicateCandidate["entries"][number]>()
     const pairs: SemanticDuplicateCandidate[] = []
     // 候选正文只在共享目录出现一次；额外参考材料也有单独的字符与候选数预算。
@@ -166,12 +183,13 @@ export class SharedAnalysisSession {
       for (const candidate of plan.candidates) {
         if (exactPairs.has(candidate.pairKey) || store.dedupe.relation(candidate)) continue
         if (pairs.some((item) => item.pairKey === candidate.pairKey)) continue
-        if (pairs.length >= MAX_SEMANTIC_DUPLICATE_CANDIDATES) break
+        if (pairs.length >= MAX_SHARED_PAIRS) break
         if (!candidate.entries.every((item) => item.contentComplete && item.content?.trim()))
           continue
         const additions = candidate.entries.filter(
           (item) => !materialIds.has(item.itemId) && !references.has(item.itemId),
         )
+        if (materialIds.size + references.size + additions.length > MAX_SHARED_DOCUMENTS) continue
         const addedChars = additions.reduce((sum, item) => sum + (item.content?.length ?? 0), 0)
         if (referenceChars + addedChars > MAX_SHARED_REFERENCE_CHARS) continue
         referenceChars += addedChars
@@ -179,8 +197,50 @@ export class SharedAnalysisSession {
         pairs.push(candidate)
       }
     }
-    const storyPlans = this.storyPlans(materials)
-    if (!pairs.length && !storyPlans.length) return execute(request)
+    // 综述输出也占执行时间；只在小批次共享一条规则，其余使用后续已提取的事实生成。
+    const storyPlans =
+      materials.length <= 3 && pairs.length <= 3 ? this.storyPlans(materials).slice(0, 1) : []
+    if (!pairs.length && !storyPlans.length) return executeEntry()
+    // 模型约束只使用根目录 $defs 引用；把单篇定义提升并加命名空间，避免嵌套引用被拒绝。
+    const { $defs, ...entrySchema } = request.schema as Record<string, unknown>
+    const entryDefinitions =
+      typeof $defs === "object" && $defs !== null && !Array.isArray($defs)
+        ? ($defs as Record<string, unknown>)
+        : {}
+    const qualifyEntryReferences = (schema: unknown): unknown =>
+      JSON.parse(
+        JSON.stringify(schema, (key, value: unknown) =>
+          key === "$ref" && typeof value === "string" && value.startsWith("#/$defs/")
+            ? `#/$defs/entry_${value.slice("#/$defs/".length)}`
+            : value,
+        ),
+      )
+    const envelopeSchema = {
+      type: "object",
+      properties: {
+        entry: qualifyEntryReferences(entrySchema),
+        // 输出容量也按本次实际任务收紧，避免模型生成未请求的比较或多余综述。
+        dedupe: z.toJSONSchema(
+          semanticDuplicateOutputSchema.extend({
+            results: semanticDuplicateOutputSchema.shape.results.max(pairs.length),
+          }),
+        ),
+        stories: z.toJSONSchema(sharedStoriesSchema.max(storyPlans.length)),
+      },
+      required: ["entry", "dedupe", "stories"],
+      additionalProperties: false,
+      ...(Object.keys(entryDefinitions).length
+        ? {
+            $defs: Object.fromEntries(
+              Object.entries(entryDefinitions).map(([name, schema]) => [
+                `entry_${name}`,
+                qualifyEntryReferences(schema),
+              ]),
+            ),
+          }
+        : {}),
+    }
+    if (JSON.stringify(envelopeSchema).length > MAX_SHARED_SCHEMA_CHARS) return executeEntry()
     const comparisonRules = createSemanticDuplicatePrompt([]).split("\n候选（")[0]
     const prompt = `${request.prompt}
 
@@ -220,18 +280,7 @@ sentences 必须拼成 body，facts.sentenceIndexes 从0开始，inference 必�
 已有同事件综述的更新由后续使用已提取事实推进；这里仅生成新事件草稿。
 `
     // 长文及复杂上下文仍走已有分块/事实综合路径，不能截断正文后声称完成统一判重。
-    if (prompt.length > MAX_SHARED_PROMPT_CHARS) return execute(request)
-    const originalSchema = request.schema
-    const envelopeSchema = {
-      type: "object",
-      properties: {
-        entry: originalSchema,
-        dedupe: z.toJSONSchema(semanticDuplicateOutputSchema),
-        stories: z.toJSONSchema(sharedStoriesSchema),
-      },
-      required: ["entry", "dedupe", "stories"],
-      additionalProperties: false,
-    }
+    if (prompt.length > MAX_SHARED_PROMPT_CHARS) return executeEntry()
     const recordUsage = (usage: CodexUsage | null) => {
       if (!pairs.length) return
       this.dedupeCosts.requests++

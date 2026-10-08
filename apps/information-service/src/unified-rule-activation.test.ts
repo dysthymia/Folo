@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto"
 
-import type { AutomationRule, Condition, RuleSet } from "@follow/information-core"
+import type { AutomationRule, Condition, RuleInput, RuleSet } from "@follow/information-core"
 import { compileInstructions } from "@follow/information-core"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { automationApi } from "./automation-api"
 import type { Source } from "./folo"
-import { resolveAIRuleSourceKeys, runnableReleasedConfig } from "./processing-rule-scope"
+import {
+  matchesAIRule,
+  resolveAIRuleSourceKeys,
+  runnableReleasedConfig,
+} from "./processing-rule-scope"
 import { Store } from "./store"
 
 const stores: Store[] = []
@@ -461,5 +465,227 @@ describe("根据规则保守解析选源", () => {
       "2026-09-29T00:00:00.000Z",
     )
     expect(resolveAIRuleSourceKeys(store, config)).toEqual([])
+  })
+})
+
+// 定向验证首次分类的授权边界，所有规则只保存在内存测试库中。
+function semanticRule(id = "semantic", extra: Partial<AutomationRule> = {}) {
+  return rule(id, {
+    when: {
+      anyOf: [
+        {
+          allOf: [
+            { field: "source_id", operator: "in", value: [source.key] },
+            { field: "entry_tag", operator: "contains_any", value: ["signal:social_chatter"] },
+          ],
+        },
+      ],
+    },
+    actions: [{ type: "reading_decision", visibility: "hide", aggregationEligibility: "deny" }],
+    ...extra,
+  })
+}
+
+describe("语义阅读规则首次分类与 v5 激活", () => {
+  it("单条语义动作从空 v4 草稿升级有效配置并建立明确来源计划", () => {
+    const store = fixture()
+    activate(store, semanticRule())
+    expect(store.automation.draft().config.formatVersion).toBe(5)
+    expect(effective(store).formatVersion).toBe(5)
+    expect(store.schedule.snapshot().config?.sourceKeys).toEqual([source.key])
+    expect(resolveAIRuleSourceKeys(store)).toEqual([source.key])
+    activate(store, semanticRule("semantic", { enabled: false }))
+    expect(store.schedule.snapshot().config?.sourceKeys).toEqual([])
+    expect(effective(store).formatVersion).toBe(5)
+  })
+  it("批量语义激活升级旧有效 v4，不改变既有普通规则", () => {
+    const store = fixture()
+    activate(store, rule("legacy"))
+    expect(effective(store).formatVersion).toBe(4)
+    automationApi(store, "POST", "/rules/activate-batch", {
+      expectedRevision: store.automation.draft().revision,
+      requestId: randomUUID(),
+      rules: [semanticRule()],
+    })
+    expect(effective(store).formatVersion).toBe(5)
+    expect(effective(store).rules.map((item) => item.id)).toEqual(["legacy", "semantic"])
+    expect(effective(store).rules[0]?.actions).toEqual([{ type: "ai_transform", prompt: "摘要" }])
+  })
+  it("未知语义需要分类，明确来源范围外和已有确定判断不重复请求模型", () => {
+    const store = fixture()
+    const config: RuleSet = {
+      ...store.automation.draft().config,
+      formatVersion: 5,
+      rules: [semanticRule()],
+    }
+    const context: RuleInput = { contextId: source.key, source_id: source.key, entry_tag: null }
+    expect(matchesAIRule(config, context)).toBe(true)
+    expect(matchesAIRule(config, { ...context, source_id: "feed/outside" })).toBe(false)
+    expect(resolveAIRuleSourceKeys(store, config)).toEqual([source.key])
+    const assessment = {
+      tagId: "signal:social_chatter" as const,
+      definitionVersion: 1,
+      state: "present" as const,
+      confidence: 0.95,
+      reason: "已检查原文",
+      evidenceIds: ["body"],
+    }
+    expect(matchesAIRule(config, { ...context, entry_tag: [assessment] })).toBe(false)
+    expect(
+      matchesAIRule(config, { ...context, entry_tag: [{ ...assessment, state: "absent" }] }),
+    ).toBe(false)
+    expect(
+      matchesAIRule(config, { ...context, entry_tag: [{ ...assessment, state: "unknown" }] }),
+    ).toBe(true)
+    expect(
+      matchesAIRule(config, { ...context, entry_tag: [{ ...assessment, definitionVersion: 2 }] }),
+    ).toBe(true)
+  })
+  it("历史语义动作保留未知条件的基础分类，仅拒绝当前已停用或确定范围外", () => {
+    const store = fixture()
+    const historical: RuleSet = {
+      ...store.automation.draft().config,
+      formatVersion: 5,
+      rules: [semanticRule()],
+    }
+    const current: RuleSet = {
+      ...historical,
+      rules: [
+        semanticRule("semantic", {
+          actions: [
+            { type: "reading_decision", visibility: "show" },
+            { type: "ai_transform", prompt: "先判断内容" },
+          ],
+        }),
+      ],
+    }
+    const context = { contextId: source.key, source_id: source.key }
+    expect(runnableReleasedConfig(historical, current, context).rules).toHaveLength(1)
+    expect(
+      runnableReleasedConfig(historical, current, { ...context, source_id: "feed/outside" }).rules,
+    ).toEqual([])
+    expect(
+      runnableReleasedConfig(
+        historical,
+        { ...current, rules: [{ ...current.rules[0]!, enabled: false }] },
+        context,
+      ).rules,
+    ).toEqual([])
+    const withAI = {
+      ...historical,
+      rules: [
+        semanticRule("semantic", { actions: [{ type: "ai_transform", prompt: "历史要求" }] }),
+      ],
+    }
+    expect(runnableReleasedConfig(withAI, current, context).rules[0]?.actions).toEqual([
+      { type: "ai_transform", prompt: "历史要求" },
+    ])
+  })
+  it("预览使用当前语义及人工纠正，不复用未经确认的自由 labels", () => {
+    const store = fixture()
+    activate(store, semanticRule())
+    store.saveEntry({
+      id: "classified",
+      sourceKey: source.key,
+      title: "原文",
+      url: null,
+      publishedAt: new Date().toISOString(),
+      read: false,
+      content: "GM",
+      description: null,
+    })
+    const target = store.automation.assign(store.automation.current(source.key, "classified")!.seq)
+    store.semantics.publish(target, {
+      schemaVersion: 2,
+      fingerprint: "preview-profile",
+      provider: "qianwen",
+      model: "test",
+      generatedAt: new Date().toISOString(),
+      durationMs: 1,
+      usage: null,
+      status: "keep",
+      title: "原文",
+      summary: "摘要",
+      reason: "未命中",
+      labels: ["纯闲聊"],
+      policy: { standalone: "auto", aggregation: "allow", rewrite: "allow" },
+      sourceRole: "source",
+      context: { contextId: source.key, source_id: source.key },
+      facts: [],
+      semantic: null,
+      reused: false,
+      semanticProfile: {
+        schemaVersion: 2,
+        contentVersion: target.contentVersion,
+        materialDigest: "material",
+        definitionDigest: "definitions",
+        assessedTagIds: ["signal:social_chatter"],
+        assessments: [
+          {
+            tagId: "signal:social_chatter",
+            definitionVersion: 1,
+            state: "absent",
+            confidence: 0.95,
+            reason: "自动判断",
+            evidenceIds: [],
+          },
+        ],
+        evidence: {},
+        coverage: "complete",
+      },
+    })
+    const preview = () =>
+      automationApi(store, "POST", "/rules/preview", {
+        sourceKey: source.key,
+        entryId: "classified",
+      })
+    expect(preview()).toMatchObject({ counts: { matched: 0, unknown: 0, noMatch: 1 } })
+    store.semantics.correct(
+      target,
+      {
+        expectedRevision: 0,
+        expectedContentVersion: target.contentVersion,
+        requestId: randomUUID(),
+        changes: [{ tagId: "signal:social_chatter", state: "present" }],
+      },
+      () => {},
+    )
+    expect(preview()).toMatchObject({
+      counts: { matched: 1, unknown: 0, noMatch: 0 },
+      policy: { standalone: "never", aggregation: "deny" },
+    })
+  })
+
+  it("预览明确返回未知命中及所需标签，不发布规则也不创建模型任务", () => {
+    const store = fixture()
+    store.saveEntry({
+      id: "preview",
+      sourceKey: source.key,
+      title: "待分析",
+      url: null,
+      publishedAt: new Date().toISOString(),
+      read: false,
+      content: "GM",
+      description: null,
+    })
+    const config: RuleSet = {
+      ...store.automation.draft().config,
+      formatVersion: 5,
+      rules: [semanticRule()],
+    }
+    const result = automationApi(store, "POST", "/rules/preview", {
+      sourceKey: source.key,
+      entryId: "preview",
+      config,
+    })
+    expect(result).toMatchObject({
+      pendingRuleIds: ["semantic"],
+      semanticTagIds: ["signal:social_chatter"],
+      counts: { matched: 0, unknown: 1, noMatch: 0 },
+      pendingPolicyFields: ["standalone", "aggregation"],
+    })
+    expect(store.automation.effective().config).toBeNull()
+    expect(store.schedule.snapshot().config).toBeNull()
+    expect(store.schedule.pendingTriggers()).toEqual([])
   })
 })

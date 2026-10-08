@@ -1,3 +1,5 @@
+import type { SemanticEntity, SemanticTagId } from "@follow/information-core"
+
 export type ProcessingEntryResult = {
   itemId: string
   sourceKey: string
@@ -6,6 +8,10 @@ export type ProcessingEntryResult = {
   decisionId: string
   contentVersion: string
   releaseVersion: number
+  // 标签随当前决定的批量索引加载；旧服务没有此字段时保持原列表布局。
+  semanticTags?: readonly SemanticTagId[]
+  // 具体名称与标签共用批量索引，列表渲染无需逐条查询。
+  semanticEntities?: readonly SemanticEntity[]
 }
 
 export type ProcessingEntryIdentity = Pick<

@@ -217,7 +217,7 @@ export class ProcessingStateStore {
         .get(input.seq)
       if (row) {
         const decision = JSON.parse(String(row.body)) as ProcessingDecision
-        if (decision.schemaVersion === 1)
+        if (decision.schemaVersion === 1 || decision.schemaVersion === 2)
           result.push({ input, decisionId: String(row.id), decision })
       }
     }

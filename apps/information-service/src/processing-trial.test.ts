@@ -127,6 +127,115 @@ describe("规则 AI 试运行", () => {
     })
     expect(dump()).toBe(before)
   })
+  it.each([false, true])(
+    "v5 标签隐藏预览正确投影，后置变换=%s 且不写正式状态",
+    async (transform) => {
+      store.saveEntry({ ...entry, content: "<p>GM，大家早上好。</p>" })
+      const input = store.automation.current(entry.sourceKey, entry.id)!
+      store.processingState.setMaterial(input, "complete")
+      const body = request()
+      body.config.formatVersion = 5
+      body.config.rules = [
+        {
+          ...body.config.rules[0]!,
+          name: "隐藏纯闲聊",
+          when: {
+            anyOf: [
+              {
+                allOf: [
+                  {
+                    field: "entry_tag",
+                    operator: "contains_any",
+                    value: ["signal:social_chatter"],
+                    minConfidence: 0.9,
+                  },
+                ],
+              },
+            ],
+          },
+          actions: [
+            { type: "reading_decision", visibility: "hide", aggregationEligibility: "deny" },
+            ...(transform
+              ? [{ type: "ai_transform" as const, prompt: "把问候说明为一句简短摘要" }]
+              : []),
+          ],
+        },
+      ]
+      const dump = () =>
+        JSON.stringify({
+          snapshot: store.snapshot(),
+          draft: store.automation.draft(),
+          releases: store.automation.releases(),
+          inputs: store.automation.inputs(),
+          published: store.processingState.published(),
+          semantics: store.semantics.view(input),
+          stories: store.stories.list(),
+        })
+      const before = dump()
+      const cache = vi.spyOn(store.processingState, "cache")
+      const saveCache = vi.spyOn(store.processingState, "saveCache")
+      const publish = vi.spyOn(store.semantics, "publish")
+      const prompts: string[] = []
+      const preview = new ProcessingTrial({
+        store,
+        aiConfig,
+        runtimeDir: directory,
+        execute: async <T>(options: CodexJsonOptions<T>) => {
+          prompts.push(options.prompt)
+          expect(options.purpose).toBe("preview")
+          const selected = {
+            ...output,
+            disposition: "keep",
+            facts: [],
+            summary: prompts.length === 1 ? "简单问候" : "二次变换摘要",
+            eventMentions: [],
+            entities: [],
+            tagAssessments: [
+              {
+                tagId: "signal:social_chatter",
+                definitionVersion: 1,
+                state: "present",
+                confidence: 0.98,
+                reason: "全文只有问候",
+                evidenceIds: ["E000001"],
+              },
+            ],
+          }
+          if (!options.validate(selected)) throw new Error("bad_semantic_trial_fixture")
+          return {
+            result: selected,
+            model: options.model,
+            durationMs: 1,
+            usage: {
+              inputTokens: prompts.length * 10,
+              outputTokens: prompts.length,
+              cachedInputTokens: 0,
+            },
+            toolCalls: 0,
+          }
+        },
+      })
+      const result = await preview.run(body, new AbortController().signal)
+      expect(result.after).toMatchObject({
+        status: "hide",
+        policy: { standalone: "never", aggregation: "deny" },
+        reason: "命中规则「隐藏纯闲聊」：全文只有问候",
+        summary: transform ? "二次变换摘要" : "简单问候",
+      })
+      expect(prompts).toHaveLength(transform ? 2 : 1)
+      if (transform) expect(prompts[1]).toContain("把问候说明为一句简短摘要")
+      expect(result.usage).toEqual({
+        inputTokens: transform ? 30 : 10,
+        outputTokens: transform ? 3 : 1,
+        cachedInputTokens: 0,
+      })
+      expect(cache).not.toHaveBeenCalled()
+      expect(saveCache).not.toHaveBeenCalled()
+      expect(publish).not.toHaveBeenCalled()
+      expect(dump()).toBe(before)
+    },
+  )
+
   it("拒绝跨账号及正文缺失请求，不静默改成摘要试运行", async () => {
     const body = request()
     await expect(
