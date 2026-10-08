@@ -136,3 +136,43 @@ describe("ProcessingConditionEditor List options", () => {
     expect(html).toContain("processing.list_owner_unknown")
   })
 })
+
+describe("ProcessingConditionEditor semantic tags", () => {
+  it("文章语义标签不混用订阅标签，并显示未知处理和置信度", () => {
+    const html = renderToStaticMarkup(
+      <ProcessingConditionEditor
+        value={{
+          anyOf: [
+            {
+              allOf: [
+                {
+                  field: "entry_tag",
+                  operator: "not_contains_any",
+                  value: ["topic:ai"],
+                  minConfidence: 0.9,
+                },
+              ],
+            },
+          ],
+        }}
+        onChange={vi.fn()}
+        sources={[]}
+        tags={[
+          {
+            id: "subscription-ai",
+            name: "Subscription AI",
+            createdAt: "2026-10-06T00:00:00Z",
+            updatedAt: "2026-10-06T00:00:00Z",
+          },
+        ]}
+      />,
+    )
+    expect(html).toContain("semantic.tag.topic:ai")
+    expect(html).not.toContain('multiple=""')
+    expect(html).toContain('value="0.9"')
+    expect(html).toContain("processing.semantic_unknown_note")
+    expect(html).toContain("processing.operator.contains_all")
+    expect(html).not.toContain("Subscription AI")
+    expect(html).not.toContain("processing.preserved_condition")
+  })
+})

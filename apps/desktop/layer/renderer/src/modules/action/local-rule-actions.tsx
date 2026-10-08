@@ -9,6 +9,7 @@ import {
   ProcessingConditionEditor,
   processingInputClass,
 } from "./processing-condition-editor"
+import { SemanticTagPicker } from "./semantic-tag-picker"
 
 type Action = AutomationRule["actions"][number]
 type NewAction =
@@ -121,9 +122,11 @@ export function LocalRuleActions({
             <h4 className="text-sm font-medium">
               {action.type === "local_filter"
                 ? t(`automation.action.${action.mode}`)
-                : action.type === "ai_transform" && action.preset?.id === "P13"
-                  ? t("automation.action.translation")
-                  : t(`automation.action.${action.type}`)}
+                : action.type === "ai_classify"
+                  ? t("processing.type.ai_classify")
+                  : action.type === "ai_transform" && action.preset?.id === "P13"
+                    ? t("automation.action.translation")
+                    : t(`automation.action.${action.type}`)}
             </h4>
             <button
               type="button"
@@ -134,6 +137,16 @@ export function LocalRuleActions({
               {t("automation.action.remove")}
             </button>
           </div>
+          {/* 当前统一规则编辑器也使用同一多选入口，完整保留分类动作的其他字段。 */}
+          {action.type === "ai_classify" && (
+            <>
+              <p className="text-sm text-text-secondary">{t("processing.classify_hint")}</p>
+              <SemanticTagPicker
+                value={action.tagIds}
+                onChange={(tagIds) => update(index, { ...action, tagIds })}
+              />
+            </>
+          )}
           {action.type === "ai_transform" && (
             <label className="block space-y-1 text-sm">
               {t("automation.action.requirement")}

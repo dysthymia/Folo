@@ -2,6 +2,7 @@ import type { Condition, ConditionSet } from "@follow/information-core"
 import { useTranslation } from "react-i18next"
 
 import type { ProcessingEditor } from "./processing-client"
+import { SemanticTagPicker } from "./semantic-tag-picker"
 
 export const processingInputClass =
   "w-full rounded-lg border border-fill-secondary bg-material-opaque px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
@@ -18,6 +19,7 @@ const viewLabels = [
 const fields = [
   "source_id",
   "subscription_tag",
+  "entry_tag",
   "list_id",
   "category_ref",
   "view",
@@ -41,6 +43,8 @@ const fields = [
 type EditableField = (typeof fields)[number]
 const defaultCondition = (field: EditableField): Condition => {
   switch (field) {
+    case "entry_tag":
+      return { field, operator: "contains_any", value: [], minConfidence: 0.8 }
     case "subscription_tag":
     case "list_id":
     case "source_id":
@@ -202,21 +206,25 @@ function ConditionRow({
       </p>
     )
   const operators: Condition["operator"][] =
-    value.field === "source_id" || value.field === "list_id" || value.field === "subscription_tag"
-      ? ["in", "not_in", "contains_any", "contains_all", "not_contains_any"]
-      : value.field === "category_ref" || value.field === "status" || value.field === "view"
-        ? ["eq", "not_eq"]
-        : [
-              "visible_length",
-              "entry_media_length",
-              "entry_attachments_duration",
-              "updated_at",
-            ].includes(value.field)
-          ? ["lt", "lte", "gt", "gte", "eq", "not_eq"]
-          : ["contains", "not_contains", "eq", "not_eq", "regex"]
+    value.field === "entry_tag"
+      ? ["contains_any", "contains_all", "not_contains_any"]
+      : value.field === "source_id" ||
+          value.field === "list_id" ||
+          value.field === "subscription_tag"
+        ? ["in", "not_in", "contains_any", "contains_all", "not_contains_any"]
+        : value.field === "category_ref" || value.field === "status" || value.field === "view"
+          ? ["eq", "not_eq"]
+          : [
+                "visible_length",
+                "entry_media_length",
+                "entry_attachments_duration",
+                "updated_at",
+              ].includes(value.field)
+            ? ["lt", "lte", "gt", "gte", "eq", "not_eq"]
+            : ["contains", "not_contains", "eq", "not_eq", "regex"]
   // 字段切换创建对应类型的空条件；保存与预览前仍由共享 Schema 完整校验。
   return (
-    <div className="grid flex-1 gap-2 sm:grid-cols-3">
+    <div className="grid flex-1 items-start gap-2 sm:grid-cols-3">
       <select
         className={processingInputClass}
         aria-label={t("processing.field_label")}
@@ -241,9 +249,35 @@ function ConditionRow({
           </option>
         ))}
       </select>
-      {value.field === "source_id" ||
-      value.field === "list_id" ||
-      value.field === "subscription_tag" ? (
+      {value.field === "entry_tag" ? (
+        <div className="space-y-2">
+          <SemanticTagPicker
+            value={value.value}
+            onChange={(tagIds) => onChange({ ...value, value: tagIds })}
+          />
+          <label className="block space-y-1 text-xs text-text-secondary">
+            {t("processing.semantic_confidence")}
+            <input
+              className={processingInputClass}
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={value.minConfidence ?? 0.8}
+              onChange={(event) =>
+                onChange({
+                  ...value,
+                  minConfidence:
+                    event.target.value === "" ? Number.NaN : Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <p className="text-xs text-text-secondary">{t("processing.semantic_unknown_note")}</p>
+        </div>
+      ) : value.field === "source_id" ||
+        value.field === "list_id" ||
+        value.field === "subscription_tag" ? (
         <select
           multiple
           className={processingInputClass}

@@ -39,6 +39,7 @@ import {
   isoFromDate,
   ProcessingRunSettings,
 } from "./processing-run-settings"
+import { createSemanticNoiseDraft, upgradeSemanticDraft } from "./processing-semantic-draft"
 import { ProcessingTrialPanel } from "./processing-trial-panel"
 import { resolveLiveReleaseVersion } from "./release-version"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
@@ -256,8 +257,9 @@ export function ProcessingSetting({
   }, [refresh])
 
   const change = (next: RuleSet) => {
-    draftRef.current = next
-    setDraft(next)
+    const upgraded = upgradeSemanticDraft(next)
+    draftRef.current = upgraded
+    setDraft(upgraded)
     setPreview(null)
     setSaved(false)
     setRelease(null)
@@ -609,6 +611,25 @@ export function ProcessingSetting({
                       ...draft,
                       rules: [
                         ...draft.rules,
+                        createSemanticNoiseDraft(
+                          draft,
+                          crypto.randomUUID(),
+                          t("processing.semantic_noise_name"),
+                        ),
+                      ],
+                    })
+                  }
+                >
+                  {t("processing.semantic_noise_prepare")}
+                </button>
+                <button
+                  type="button"
+                  className={processingButtonClass}
+                  onClick={() =>
+                    change({
+                      ...draft,
+                      rules: [
+                        ...draft.rules,
                         {
                           id: crypto.randomUUID(),
                           ownerId: draft.ownerId,
@@ -627,6 +648,7 @@ export function ProcessingSetting({
                   {t("processing.add_rule")}
                 </button>
               </div>
+              <p className="text-xs text-text-secondary">{t("processing.semantic_noise_note")}</p>
               {draft.rules.map((rule, index) => (
                 <article
                   key={rule.id}

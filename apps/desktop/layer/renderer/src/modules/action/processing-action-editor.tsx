@@ -1,4 +1,5 @@
 import type { AutomationRule, ConditionSet } from "@follow/information-core"
+import { semanticTagIds } from "@follow/information-core"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -10,6 +11,7 @@ import {
   processingInputClass,
 } from "./processing-condition-editor"
 import { ProcessingPresetPicker } from "./processing-preset-picker"
+import { SemanticTagPicker } from "./semantic-tag-picker"
 
 type Action = AutomationRule["actions"][number]
 
@@ -51,6 +53,15 @@ export function ProcessingActionEditor({
               {t("processing.remove")}
             </button>
           </div>
+          {action.type === "ai_classify" && (
+            <>
+              <p className="text-sm text-text-secondary">{t("processing.classify_hint")}</p>
+              <SemanticTagPicker
+                value={action.tagIds}
+                onChange={(tagIds) => update(index, { ...action, tagIds })}
+              />
+            </>
+          )}
           {action.type === "ai_transform" && (
             <>
               <ProcessingPresetPicker
@@ -71,6 +82,46 @@ export function ProcessingActionEditor({
                 onChange={(e) => update(index, { ...action, prompt: e.target.value })}
               />
             </>
+          )}
+          {action.type === "reading_decision" && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1 text-sm">
+                {t("processing.reading_visibility")}
+                <select
+                  className={processingInputClass}
+                  value={action.visibility ?? ""}
+                  onChange={(event) => {
+                    // 删除空值才能保留继承语义，标签判断本身不受阅读动作影响。
+                    const next = { ...action }
+                    delete next.visibility
+                    if (event.target.value) next.visibility = event.target.value as "show" | "hide"
+                    update(index, next)
+                  }}
+                >
+                  <option value="">{t("processing.inherit")}</option>
+                  <option value="show">{t("processing.reading_show")}</option>
+                  <option value="hide">{t("processing.reading_hide")}</option>
+                </select>
+              </label>
+              <label className="space-y-1 text-sm">
+                {t("processing.reading_aggregation")}
+                <select
+                  className={processingInputClass}
+                  value={action.aggregationEligibility ?? ""}
+                  onChange={(event) => {
+                    const next = { ...action }
+                    delete next.aggregationEligibility
+                    if (event.target.value)
+                      next.aggregationEligibility = event.target.value as "allow" | "deny"
+                    update(index, next)
+                  }}
+                >
+                  <option value="">{t("processing.inherit")}</option>
+                  <option value="allow">{t("processing.policy_value.allow")}</option>
+                  <option value="deny">{t("processing.policy_value.deny")}</option>
+                </select>
+              </label>
+            </div>
           )}
           {action.type === "presentation" && (
             <div className="grid gap-3 sm:grid-cols-3">
@@ -275,6 +326,29 @@ export function ProcessingActionEditor({
         </div>
       ))}
       <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={actions.some((action) => action.type === "reading_decision")}
+          onClick={() =>
+            onChange([
+              ...actions,
+              { type: "reading_decision", visibility: "hide", aggregationEligibility: "deny" },
+            ])
+          }
+        >
+          {t("processing.add_reading_decision")}
+        </button>
+        <button
+          type="button"
+          className={processingButtonClass}
+          disabled={actions.some((action) => action.type === "ai_classify")}
+          onClick={() =>
+            onChange([...actions, { type: "ai_classify", tagIds: [...semanticTagIds] }])
+          }
+        >
+          {t("processing.add_classify")}
+        </button>
         <button
           type="button"
           className={processingButtonClass}
