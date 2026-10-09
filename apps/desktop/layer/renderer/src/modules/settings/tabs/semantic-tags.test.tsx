@@ -46,7 +46,8 @@ describe("标签定义设置", () => {
       definitions: [...semanticTagDefinitions],
     })
     const container = await show()
-    expect(container.querySelectorAll("article")).toHaveLength(22)
+    // 目录由服务端定义驱动，新增标签不能使展示验收依赖旧的固定数量。
+    expect(container.querySelectorAll("article")).toHaveLength(semanticTagDefinitions.length)
     const product = Array.from(container.querySelectorAll("article")).find((article) =>
       article.textContent?.includes("semantic.tag.topic:product"),
     )!
@@ -61,7 +62,9 @@ describe("标签定义设置", () => {
       select.value = "event"
       select.dispatchEvent(new Event("change", { bubbles: true }))
     })
-    expect(container.querySelectorAll("article")).toHaveLength(7)
+    expect(container.querySelectorAll("article")).toHaveLength(
+      semanticTagDefinitions.filter((tag) => tag.kind === "event").length,
+    )
     expect(container.textContent).not.toContain("semantic.tag.topic:product")
     expect(loadSemanticTagCatalog).toHaveBeenCalledTimes(1)
   })
@@ -96,7 +99,7 @@ describe("标签定义设置", () => {
     const container = await show()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("tags.load_failed")
     await act(async () => container.querySelector("button")!.click())
-    expect(container.querySelectorAll("article")).toHaveLength(22)
+    expect(container.querySelectorAll("article")).toHaveLength(semanticTagDefinitions.length)
     const signal = vi.mocked(loadSemanticTagCatalog).mock.calls[1]![0]
     await act(async () => roots.pop()!.unmount())
     expect(signal.aborted).toBe(true)

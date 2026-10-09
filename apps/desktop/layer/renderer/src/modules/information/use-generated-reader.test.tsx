@@ -143,6 +143,8 @@ vi.mock("./GeneratedEntryControls", () => ({ GeneratedEntryControls: () => null 
 vi.mock("./InformationIntegration", () => ({ InformationIntegration: () => null }))
 vi.mock("./ResearchPanel", () => ({ ResearchPanel: () => null }))
 vi.mock("./StoryDigestPanel", () => ({ StoryDigestPanel: () => null }))
+// 查询与回执测试隔离纠错组件的认证请求，纠错深链行为由其专用测试覆盖。
+vi.mock("./StoryReadingActions", () => ({ StoryReadingActions: () => null }))
 vi.mock("./generated-feed-client", () => ({
   loadGeneratedFeedPage: mocks.page,
   loadGeneratedEntryState: mocks.entryState,
