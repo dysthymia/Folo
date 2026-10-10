@@ -7,6 +7,7 @@
         "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。\n\n阅读贡献要求：短公告、数据、反证、教程、评测和具体经验同样可以有价值；缺少图片、串文、音视频或外链材料时说明缺口。AI 工具、产品与成长内容若原文包含实操步骤、失败经验、适用条件或成本，可在事实摘要中提炼，不能自行生成建议或收益承诺。多事件文章按对应片段与事实引用参与综述，保留各事件区别与原文阅读入口。重点关注只提示阅读优先级，不代表持仓建议，不强制原文独立展示。",
         "attention": {
           "enabled": true,
+          "interests": ["blockchain", "ai", "personal_growth", "macro"],
           "watchlist": [],
           "nearDeadlineHours": 48
         },
@@ -577,133 +578,6 @@
             }
           ],
           "version": 2,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "reading-security-attention-v1",
-          "name": "安全事件重点关注",
-          "enabled": true,
-          "order": 2,
-          "when": {
-            "anyOf": [
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "Blockchain"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 1,
-                      "name": "X"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "AI"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "个人成长"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 1,
-                      "name": "个人成长"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "创业"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "attention",
-              "level": "urgent",
-              "reason": "原文支持的安全事件，请核对影响范围与官方说明。"
-            }
-          ],
-          "version": 1,
           "executionLocation": "processing_service"
         },
         {
@@ -1359,6 +1233,7 @@
         "markdown": "你帮助我把订阅内容变成更易阅读、可追溯的信息。\n用中文提供辅助标题、要点或摘要，保留专有名称、关键数值、条件、单位、时间及原始来源。\n原文事实、来源自述、作者判断与你的推断要分开，缺失信息保持缺失，不编造。\n没有更具体的隐藏或整合要求时保留独立条目；不要自动只推荐少量Top-N。\n按已解析的规则顺序处理冲突；无冲突要求继续适用。\n仅调整个人阅读展示，不删除原文、不改订阅、不自动改已读或外发内容。\n\n原文忠实要求：\n- 标题、摘要和 facts 中的每项事实都必须受原文明确支持；不得只给 facts.quote 正确，却在标题或摘要加入无依据结论。\n- 转述消息、观点、估算或第三方数据时必须保留来源归属，不得改写成已独立证实的事实。\n- 不得主动从市值、成交额、涨跌幅等原始数据派生换手率、流动性、操纵风险或其他新的市场判断。\n- 相对日期若没有文中明确年份或日期锚点，保留“周四”“昨日”等原词；任何日期换算或其他推断不得混入事实标题或事实摘要。\n- 用户明确要求单独分析时可以给出推断，但必须标记为推断，并放在与事实摘要分开的独立段落。\n\n阅读贡献要求：短公告、数据、反证、教程、评测和具体经验同样可以有价值；缺少图片、串文、音视频或外链材料时说明缺口。AI 工具、产品与成长内容若原文包含实操步骤、失败经验、适用条件或成本，可在事实摘要中提炼，不能自行生成建议或收益承诺。多事件文章按对应片段与事实引用参与综述，保留各事件区别与原文阅读入口。重点关注只提示阅读优先级，不代表持仓建议，不强制原文独立展示。",
         "attention": {
           "enabled": true,
+          "interests": ["blockchain", "ai", "personal_growth", "macro"],
           "watchlist": [],
           "nearDeadlineHours": 48
         },
@@ -1929,133 +1804,6 @@
             }
           ],
           "version": 2,
-          "executionLocation": "processing_service"
-        },
-        {
-          "id": "reading-security-attention-v1",
-          "name": "安全事件重点关注",
-          "enabled": true,
-          "order": 2,
-          "when": {
-            "anyOf": [
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "Blockchain"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 1,
-                      "name": "X"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "AI"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "个人成长"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 1,
-                      "name": "个人成长"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              },
-              {
-                "allOf": [
-                  {
-                    "field": "category_ref",
-                    "operator": "eq",
-                    "value": {
-                      "view": 0,
-                      "name": "创业"
-                    }
-                  },
-                  {
-                    "field": "entry_tag",
-                    "operator": "contains_any",
-                    "value": ["event:security_incident"],
-                    "minConfidence": 0.9
-                  }
-                ]
-              }
-            ]
-          },
-          "actions": [
-            {
-              "type": "attention",
-              "level": "urgent",
-              "reason": "原文支持的安全事件，请核对影响范围与官方说明。"
-            }
-          ],
-          "version": 1,
           "executionLocation": "processing_service"
         },
         {
