@@ -1,5 +1,5 @@
 // 通用单篇、批量和长文共享基础缓存版本；语义实体协议另以独立版本隔离。
-export const ENTRY_PROMPT_VERSION = 14
+export const ENTRY_PROMPT_VERSION = 15
 
 // 展示动作也是实际执行指令，不能只进入指纹和设置页。
 export function entryDisplayRequirements(display: {
@@ -52,5 +52,5 @@ export const EVENT_MENTION_REQUIREMENTS = `事件提及要求：
 - 最多一个 isPrimary=true，主提及 identity 必须逐字段等于 legacy event；event=null 时全部 isPrimary=false。标题与正文重点直接报道的具体事件设为主提及，不能因缺发生锚点或附带历史背景而丢掉主次关系。周报或并列多事件可以没有主事件，不能拿周报主题、领域标签或模糊主体制造主事件。
 - 只提取材料明确讨论的少量具体事件；没有可核实的发生锚点、版本或轮次时，可作为次要候选保留并令 anchor/version/round=null，不编造日期或官方URL。未知来源链接只能候选，不能冒充已确认事件。
 - subject/object/version/round 的值必须受各自选定的连续片段明确支持，官方URL必须来自该片段。不按相似拼写、简称或记忆中的别名合并实体。未读取链接、图片或引用内容不能被补成已确认身份。
-- 单篇及整篇最终 facts 可逐条返回 eventMentionIndex，使用本次输出 eventMentions 数组的 0..3 序号。数值只在该事实证据完整属于对应身份证据片段且不涉及其他事件时使用；无法明确归属返回 null。省略仅兼容旧结果的主事件保护，不会自动分给周报中其他事件。分块事实不返回该序号，整篇综合时重新绑定最终提及顺序。
+- facts 不返回 eventMentionIndex；服务端按本条证据的原文位置，只有唯一、完整属于某个提及身份证据且不涉及其他事件时才绑定归属，无法明确归属保持 null。不要凭语义相近生成提及序号。
 - 多事件身份只建立提及关系，不宣称整篇 facts 都属于主事件；不能将另一事件的事实注入主事件。主事件与背景事件选择各自独立的证据片段，facts 同样逐条选本事件片段；无法分开的混合片段不具备主事件综述资格。`

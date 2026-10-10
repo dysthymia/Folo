@@ -12,7 +12,11 @@ import { reasoningFingerprint } from "./ai-reasoning"
 import type { CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import type { EntryModelOutput, EntryModelSelection } from "./processing-decision"
-import { applyEntryDisplay, createEntryModelSelectionSchema } from "./processing-decision"
+import {
+  applyEntryDisplay,
+  createEntryModelSelectionSchema,
+  entryModelSelectionJSONSchema,
+} from "./processing-decision"
 import { materializeEvent } from "./processing-event"
 import {
   eventMentionEvidenceIds,
@@ -235,7 +239,7 @@ export async function processLongEntry(options: LongEntryOptions): Promise<LongE
       sourceRole: options.sourceRole,
       historySince: options.historySince,
     }),
-    schema: z.toJSONSchema(finalSelectionSchema),
+    schema: entryModelSelectionJSONSchema(finalSelectionSchema),
     validate: (value): value is EntryModelSelection =>
       finalSelectionSchema.safeParse(value).success,
     model: options.model,

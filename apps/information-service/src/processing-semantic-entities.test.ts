@@ -75,12 +75,13 @@ describe("具体实体的证据与当前结果索引", () => {
     expect(schema.safeParse([entity]).success).toBe(true)
     for (const change of [
       { name: "Revolut Pro" },
-      { aliases: ["Revo"] },
       { parentName: "Unmentioned" },
       { evidenceIds: ["E000002"] },
       { evidenceIds: ["otherE000001"] },
     ])
       expect(schema.safeParse([{ ...entity, ...change }]).success).toBe(false)
+    // 模型附加的无据别名不进入实体；有据名称与所属关系仍须通过原来的严格校验。
+    expect(schema.parse([{ ...entity, aliases: ["Revo"] }])[0]!.aliases).toEqual([])
     const asset = { ...entity, kind: "asset", name: "ETH" }
     expect(
       semanticEntitiesForCatalog(createEvidenceCatalog("买入 BETH 和 ETHW。")).safeParse([asset])

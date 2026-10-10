@@ -23,6 +23,7 @@ import {
 } from "./processing-event-mentions"
 import type { EvidenceCatalog } from "./processing-evidence"
 import { evidenceFactSelectionSchema, evidenceFactsSelectionSchema } from "./processing-evidence"
+import { assignFactsToEventMentions } from "./processing-fact-assignments"
 import { semanticEntitiesForCatalog } from "./processing-semantic-entities"
 import {
   createTagAssessmentsSelectionSchema,
@@ -109,7 +110,7 @@ export function createEntryModelSelectionSchema(
   entryId: string,
   catalog: EvidenceCatalog,
   requiredTagIds: readonly string[] = [],
-) {
+): z.ZodType<EntryModelSelection> {
   const base = entryModelBaseSchema
     .extend({
       entryId: z.enum([entryId]),
@@ -126,11 +127,29 @@ export function createEntryModelSelectionSchema(
           entities: semanticEntitiesForCatalog(catalog),
           eventMentions: eventMentionsSelectionForCatalog(catalog),
         })
+        // 旧响应可带序号，但当前请求不再让模型生成；统一按已选证据重新绑定。
+        .overwrite((value) => ({
+          ...value,
+          facts: assignFactsToEventMentions(value.facts, value.eventMentions, catalog),
+        }))
         .refine(validateEventMentionRelationship, { message: "inconsistent_primary_event" })
         .refine((value) => validateFactEventAssignments(value, catalog), {
           message: "invalid_fact_event_assignment",
         })
     : base
+}
+
+// 保留旧响应解析能力，同时从模型协议移除程序拥有的归属字段，避免 optional 违反严格输出。
+export function entryModelSelectionJSONSchema(schema: z.ZodType) {
+  return z.toJSONSchema(schema, {
+    reused: "ref",
+    override: ({ jsonSchema }) => {
+      if (!jsonSchema.properties?.eventMentionIndex) return
+      delete jsonSchema.properties.eventMentionIndex
+      if (jsonSchema.required)
+        jsonSchema.required = jsonSchema.required.filter((key) => key !== "eventMentionIndex")
+    },
+  })
 }
 export type EntrySemanticProfile = {
   schemaVersion: 2

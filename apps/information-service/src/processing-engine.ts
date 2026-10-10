@@ -22,6 +22,7 @@ import {
   applyEntryDisplay,
   createEntryModelSelectionSchema,
   entryModelOutputSchema,
+  entryModelSelectionJSONSchema,
 } from "./processing-decision"
 import { materializeEvent } from "./processing-event"
 import { materializeEventMentions } from "./processing-event-mentions"
@@ -873,7 +874,7 @@ async function runPreparedBatch(
       purpose: "entry",
       prompt: promptForEntryBatch(eligible, options.historySince),
       // 同一字段和证据枚举通过 $defs 复用，保留完整约束而不重复展开到每篇文章。
-      schema: z.toJSONSchema(batchContractSchema, { reused: "ref" }),
+      schema: entryModelSelectionJSONSchema(batchContractSchema),
       validate: (value): value is z.infer<typeof batchEnvelopeSchema> =>
         batchEnvelopeSchema.safeParse(value).success,
       model: eligible[0]!.target.snapshot.model,
@@ -1414,7 +1415,7 @@ export async function runSingleEntryModel(input: {
     purpose: "entry",
     prompt: promptForEntry({ ...input, instructions, evidence: renderEvidenceCatalog(evidence) }),
     // 单篇同样复用标签、主事件与提及中的重复字段，减少无意义的模型上下文。
-    schema: z.toJSONSchema(selectionSchema, { reused: "ref" }),
+    schema: entryModelSelectionJSONSchema(selectionSchema),
     validate: (value): value is EntryModelSelection => selectionSchema.safeParse(value).success,
     model: input.model,
     reasoningEffort: input.reasoningEffort ?? "low",
@@ -1426,7 +1427,11 @@ export async function runSingleEntryModel(input: {
     input.sharedAnalysis && input.material
       ? await input.sharedAnalysis.execute(request, [{ ...input.material, evidence }], execute)
       : await execute(request)
-  const { facts, eventMentions, ...selection } = response.result
+  // 校验后的解析结果包含证据驱动的实体字面名及程序计算的事实归属。
+  const parsedSelection: EntryModelSelection = instructions.semanticTagIds.length
+    ? selectionSchema.parse(response.result)
+    : response.result
+  const { facts, eventMentions, ...selection } = parsedSelection
   const output: EntryModelOutput = entryModelOutputSchema.parse({
     ...selection,
     event: materializeEvent(evidence, selection.event),

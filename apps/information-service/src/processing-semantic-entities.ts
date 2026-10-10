@@ -38,6 +38,23 @@ export function entitiesHaveEvidence(
   })
 }
 
+// 名称只从模型已提出且被所选原文逐字支持的候选中解析，不补充翻译或常识别名。
+export function resolveEntitySurfaceNames(
+  entities: readonly SemanticEntity[],
+  resolve: EvidenceCatalog["resolve"],
+): SemanticEntity[] {
+  return entities.map((entity) => {
+    const supported = (name: string) =>
+      entity.evidenceIds.some((id) => {
+        const quote = resolve(id)
+        return quote !== null && containsName(quote, name)
+      })
+    const aliases = entity.aliases.filter(supported)
+    const name = supported(entity.name) ? entity.name : (aliases[0] ?? entity.name)
+    return { ...entity, name, aliases: [...new Set(aliases.filter((alias) => alias !== name))] }
+  })
+}
+
 // 输出 schema 绑定当前条目证据；其它条目的编号、无据名称与重复身份均被拒绝。
 export function semanticEntitiesForCatalog(catalog: EvidenceCatalog) {
   const ids = catalog.fragments.map((fragment) => fragment.evidenceId)
@@ -53,10 +70,12 @@ export function semanticEntitiesForCatalog(catalog: EvidenceCatalog) {
         )
         .max(8)
     : semanticEntitiesSchema.max(0)
-  return schema.superRefine((entities, context) => {
-    if (!entitiesHaveEvidence(entities, catalog.resolve))
-      context.addIssue({ code: "custom", message: "unsupported_entity_name" })
-    if (new Set(entities.map(semanticEntityId)).size !== entities.length)
-      context.addIssue({ code: "custom", message: "duplicate_semantic_entity" })
-  })
+  return schema
+    .overwrite((entities) => resolveEntitySurfaceNames(entities, catalog.resolve))
+    .superRefine((entities, context) => {
+      if (!entitiesHaveEvidence(entities, catalog.resolve))
+        context.addIssue({ code: "custom", message: "unsupported_entity_name" })
+      if (new Set(entities.map(semanticEntityId)).size !== entities.length)
+        context.addIssue({ code: "custom", message: "duplicate_semantic_entity" })
+    })
 }
