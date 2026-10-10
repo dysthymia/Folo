@@ -254,6 +254,37 @@ describe("来源增量同步", () => {
     expect(sources.map((source) => state.state(source.key))).not.toContain(null)
   })
 
+  it("新计划从最新页刷新，之后的预算续采仍沿用该计划游标", async () => {
+    const { state, store } = fixture()
+    const historySince = "2026-01-01T00:00:00.000Z"
+    state.savePage({
+      sourceKey: feed.key,
+      cursor: "2026-01-15T00:00:00.000Z",
+      historySince,
+      coverage: "budget",
+      pending: true,
+      now: historySince,
+    })
+    const client = reader({
+      sources: [feed],
+      pages: async (_source, cursor) =>
+        cursor ? page([]) : page([entry("new-head")], { pageFull: true }),
+    })
+    const input = {
+      store,
+      state,
+      reader: async () => client,
+      sourceKeys: [feed.key],
+      historySince,
+      pageBudget: 1,
+    }
+    await acquireSources({ ...input, refreshHeadSourceKeys: [feed.key] })
+    expect(vi.mocked(client.page).mock.calls[0]?.[1].cursor).toBeUndefined()
+    await acquireSources(input)
+    expect(vi.mocked(client.page).mock.calls[1]?.[1].cursor).toBe(entry("new-head").publishedAt)
+    expect(state.state(feed.key)?.coverage).toBe("end")
+  })
+
   it("已覆盖来源超过页预算时，下一轮优先刷新未轮到的旧来源", async () => {
     const { state, store } = fixture()
     const sources: Source[] = Array.from({ length: 22 }, (_, index) => ({
@@ -287,8 +318,12 @@ describe("来源增量同步", () => {
       historySince,
       pageBudget: 20,
     }
-    await acquireSources(input)
+    const first = await acquireSources(input)
     expect(calls).toEqual(sources.slice(0, 20).map((source) => source.key))
+    // 历史已覆盖不代表本轮已刷新；未轮到的两项必须作为续采目标返回。
+    expect(
+      first.filter((item) => item.coverage === "budget").map((item) => item.sourceKey),
+    ).toEqual(sources.slice(20).map((source) => source.key))
     // 尾部保持原覆盖事实，但其较旧的采集时间让它们在下轮先执行。
     expect(state.state(sources[21]!.key)).toMatchObject({
       coverage: "end",
@@ -297,6 +332,38 @@ describe("来源增量同步", () => {
     await acquireSources(input)
     expect(calls.slice(20, 22)).toEqual(sources.slice(20).map((source) => source.key))
     expect(new Set(calls).size).toBe(22)
+  })
+
+  it("预算外的旧网络失败改报待续采，本轮实际失败保留错误且不立即重试", async () => {
+    const { state, store } = fixture()
+    const sources = Array.from({ length: 3 }, (_, index) => ({
+      ...feed,
+      key: `feed/${index + 1}`,
+      id: String(index + 1),
+    }))
+    const historySince = "2026-01-01T00:00:00.000Z"
+    for (const source of sources) state.fail(source.key, historySince, historySince, "network")
+    const client = reader({
+      sources,
+      pages: async (source) => {
+        if (source.id === "1") throw new FoloReadError("network")
+        return page([])
+      },
+    })
+    const result = await acquireSources({
+      store,
+      state,
+      reader: async () => client,
+      sourceKeys: sources.map((source) => source.key),
+      historySince,
+      pageBudget: 1,
+    })
+    expect(result).toEqual([
+      expect.objectContaining({ sourceKey: "feed/1", coverage: "failed", failure: "network" }),
+      expect.objectContaining({ sourceKey: "feed/2", coverage: "end", failure: null }),
+      expect.objectContaining({ sourceKey: "feed/3", coverage: "budget", failure: null }),
+    ])
+    expect(client.page).toHaveBeenCalledTimes(2)
   })
 
   it("List 成员每轮只拉取一次，失败保留 unknown 而不当成空集合", async () => {

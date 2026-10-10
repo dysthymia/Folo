@@ -148,9 +148,15 @@ export class SourceSyncStore {
     return row ? sourceFromRow(row) : null
   }
 
-  begin(sourceKey: string, historySince: string, now: string): SourceSyncState {
+  begin(
+    sourceKey: string,
+    historySince: string,
+    now: string,
+    refreshHead = false,
+  ): SourceSyncState {
     const previous = this.state(sourceKey)
-    if (previous?.pending && previous.historySince === historySince) return previous
+    // 新计划先取最新一页；同一计划的分批续采才沿用游标，避免积压期间漏掉新内容。
+    if (!refreshHead && previous?.pending && previous.historySince === historySince) return previous
     const state: SourceSyncState = {
       sourceKey,
       cursor: null,
@@ -431,6 +437,7 @@ export async function acquireSources(
     historySince: string
     pageBudget?: number
     pageSize?: number
+    refreshHeadSourceKeys?: readonly string[]
   },
   signal?: AbortSignal,
 ): Promise<SourceSyncResult[]> {
@@ -516,6 +523,7 @@ export async function acquireSources(
   }
 
   let remaining = pageBudget
+  const attempted = new Set<string>()
   // 每轮每个来源最多先取一页；来源多于预算时，下一轮会优先未取到页的 budget 状态。
   while (remaining > 0 && ready.some((item) => !item.done)) {
     let progressed = false
@@ -523,9 +531,17 @@ export async function acquireSources(
       if (remaining === 0) break
       if (item.done) continue
       const { sourceKey, source } = item
-      const current = item.current ?? input.state.begin(sourceKey, historySince, now)
+      const current =
+        item.current ??
+        input.state.begin(
+          sourceKey,
+          historySince,
+          now,
+          input.refreshHeadSourceKeys?.includes(sourceKey),
+        )
       try {
         abort()
+        attempted.add(sourceKey)
         const page = await reader.page(source, {
           cursor: current.cursor ?? undefined,
           limit: pageSize,
@@ -579,18 +595,24 @@ export async function acquireSources(
     for (const { sourceKey } of ready) {
       const state = input.state.state(sourceKey)
       // 未轮到的来源写成 budget；已完整覆盖的旧状态必须保留，不能伪装为待补。
-      if (!state || state.coverage === "pending") input.state.budget(sourceKey, historySince, now)
+      if (!state || (state.pending && !attempted.has(sourceKey)) || state.coverage === "pending")
+        input.state.budget(sourceKey, historySince, now)
     }
   }
   return selected.map(({ sourceKey }) => {
     const state = input.state.state(sourceKey)
     const value = progress.get(sourceKey) ?? { pages: 0, entries: 0 }
+    // 旧覆盖状态仍是真实历史，但本轮未采集的来源必须明确交给续采，不能算成本轮完成。
+    const deferred =
+      remaining === 0 &&
+      !attempted.has(sourceKey) &&
+      ready.some((item) => item.sourceKey === sourceKey)
     return {
       sourceKey,
       pages: value.pages,
       entries: value.entries,
-      coverage: state?.coverage ?? "failed",
-      failure: state ? state.failure : "source_missing",
+      coverage: deferred ? "budget" : (state?.coverage ?? "failed"),
+      failure: deferred ? null : state ? state.failure : "source_missing",
     }
   })
 }

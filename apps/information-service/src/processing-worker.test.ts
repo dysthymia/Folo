@@ -6,6 +6,7 @@ import { AIConfigStore } from "./ai-config"
 import type { Source, SourceEntry } from "./folo"
 import { FoloReader } from "./folo"
 import { processListLoaded } from "./processing-list-load"
+import { acquireSources } from "./processing-source-sync"
 import { runProcessingWorker } from "./processing-worker"
 import { PublicArticleError } from "./public-article"
 import { Store } from "./store"
@@ -634,6 +635,79 @@ describe("调度到处理的后台链路", () => {
       expect(
         await runProcessingWorker({ ...options, acquire }, new AbortController().signal),
       ).toMatchObject({ status: "deferred_budget" })
+    } finally {
+      options.store.close()
+    }
+  })
+  it("同一计划续采超过20个来源，先覆盖旧失败来源，再执行模型", async () => {
+    const options = fixture()
+    try {
+      const sources: Source[] = Array.from({ length: 22 }, (_, index) => ({
+        key: `feed/${index + 1}`,
+        kind: "feed",
+        id: String(index + 1),
+        title: `来源${index + 1}`,
+        view: 0,
+        category: null,
+      }))
+      const historySince = "2026-01-01T00:00:00.000Z"
+      for (const source of sources)
+        options.store.sourceSync.savePage({
+          sourceKey: source.key,
+          historySince,
+          now: historySince,
+          cursor: "2026-01-15T00:00:00.000Z",
+          coverage: "budget",
+          pending: true,
+        })
+      vi.mocked(options.sourceReader.sources).mockResolvedValue(sources)
+      options.store.schedule.save(
+        {
+          sourceKeys: sources.map((source) => source.key),
+          historySince,
+          timeZone: "UTC",
+          enabled: false,
+        },
+        0,
+      )
+      options.store.automation.publish(0, { mode: "future" }, randomUUID())
+      options.store.schedule.manual(randomUUID(), new Date())
+      const processEntries = vi.fn(async () => {
+        // 模型阶段开始时，尾部来源已经获得采集机会，不再等下个定时时点。
+        expect(options.sourceReader.page).toHaveBeenCalledTimes(22)
+        expect(
+          vi
+            .mocked(options.sourceReader.page)
+            .mock.calls.every(([, page]) => page.cursor === undefined),
+        ).toBe(true)
+        return {
+          completed: 0,
+          pending: 0,
+          failures: [],
+          usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+        }
+      })
+      expect(
+        await runProcessingWorker(
+          { ...options, acquire: acquireSources, processEntries },
+          new AbortController().signal,
+        ),
+      ).toMatchObject({ status: "succeeded" })
+      expect(
+        new Set(vi.mocked(options.sourceReader.page).mock.calls.map(([source]) => source.key)).size,
+      ).toBe(22)
+      expect(options.store.processingState.reports()[0]?.report).toMatchObject({
+        sources: expect.arrayContaining(
+          sources.map((source) =>
+            expect.objectContaining({
+              sourceKey: source.key,
+              pages: 1,
+              coverage: "end",
+              failure: null,
+            }),
+          ),
+        ),
+      })
     } finally {
       options.store.close()
     }

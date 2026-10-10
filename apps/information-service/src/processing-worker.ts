@@ -18,6 +18,7 @@ import {
 } from "./processing-rule-scope"
 import type { ProcessingTriggerStatus } from "./processing-schedule"
 import { SharedAnalysisSession } from "./processing-shared-analysis"
+import type { SourceSyncResult } from "./processing-source-sync"
 import { acquireSources, refreshSourceSnapshot } from "./processing-source-sync"
 import { errorCode, sourceText } from "./service"
 import type { Store } from "./store"
@@ -125,20 +126,58 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     const foloSourceKeys = listTargets
       ? []
       : trigger.sourceKeys.filter((key) => !key.startsWith("x/search/"))
-    const sources = foloSourceKeys.length
-      ? await (options.acquire ?? acquireSources)(
-          {
-            store,
-            reader: options.reader,
-            state: store.sourceSync,
-            inventory,
-            sourceKeys: foloSourceKeys,
-            membershipListKeys: referencedListKeys(store),
-            historySince: trigger.historySince,
-          },
-          signal,
-        )
-      : []
+    const sourceProgress = new Map<string, SourceSyncResult>()
+    let remainingSourceKeys = foloSourceKeys
+    // 页预算只切分网络采集，不结束整个计划；先覆盖本轮来源，再运行付费模型。
+    // 续采只包含尚未覆盖的来源，已失败的请求留待下轮，避免网络故障形成重试风暴。
+    while (remainingSourceKeys.length && !signal.aborted) {
+      const previousKeys = remainingSourceKeys
+      const before = new Map(
+        previousKeys.map((key) => [key, JSON.stringify(store.sourceSync.state(key))]),
+      )
+      const pageResults = await (options.acquire ?? acquireSources)(
+        {
+          store,
+          reader: options.reader,
+          state: store.sourceSync,
+          inventory,
+          sourceKeys: previousKeys,
+          membershipListKeys: referencedListKeys(store),
+          historySince: trigger.historySince,
+          // 每个来源在本计划首次真正取得页时刷新头部；排在预算后的来源也不能沿用旧游标。
+          refreshHeadSourceKeys: previousKeys.filter((key) => !sourceProgress.get(key)?.pages),
+        },
+        signal,
+      )
+      for (const source of pageResults) {
+        const previous = sourceProgress.get(source.sourceKey)
+        sourceProgress.set(source.sourceKey, {
+          ...source,
+          pages: (previous?.pages ?? 0) + source.pages,
+          entries: (previous?.entries ?? 0) + source.entries,
+        })
+      }
+      remainingSourceKeys = pageResults
+        .filter((source) => source.coverage === "budget" || source.coverage === "pending")
+        .map((source) => source.sourceKey)
+      store.processingState.report(trigger.id, {
+        inventory: {
+          snapshot: inventory.snapshot,
+          failure: inventory.failure,
+          syncedAt: inventory.syncedAt,
+        },
+        sources: [...sourceProgress.values()],
+        phase: "sources",
+        progressAt: new Date().toISOString(),
+      })
+      // 游标和范围都没有推进时停止；异常分页实现不能令后台无限循环。
+      if (
+        remainingSourceKeys.length === previousKeys.length &&
+        previousKeys.every((key) => before.get(key) === JSON.stringify(store.sourceSync.state(key)))
+      )
+        break
+    }
+    const sources = [...sourceProgress.values()]
     // X 抓取由显式搜索操作负责；处理计划可读取已保存结果，但不能暗中产生外部搜索费用。
     for (const key of (listTargets ? [] : trigger.sourceKeys).filter((key) =>
       key.startsWith("x/search/"),
