@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { DatabaseSync } from "node:sqlite"
 
 import { join } from "pathe"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { Store } from "./store"
 
@@ -26,6 +26,42 @@ function fixture(path = ":memory:") {
 }
 
 describe("后台目标与用户纠偏", () => {
+  it("批量读取只解析有效发布原文，覆盖查询不读取正文且保持范围与版本归属", () => {
+    const store = fixture()
+    try {
+      const first = store.automation.assign(store.automation.inputs()[0]!.seq)
+      store.automation.complete(first, { schemaVersion: 1 })
+      store.processingState.setOverride(first.seq, "restore", 0)
+      store.saveEntry({ ...first.body, id: "pending", content: "未处理原文" })
+      const pending = store.automation.current(first.sourceKey, "pending")!
+      const inputs = vi.spyOn(store.automation, "inputs")
+      // 大量 pending/skipped 输入不能令发布读取退化成解析全库正文。
+      expect(store.processingState.published().map((item) => item.input.seq)).toEqual([first.seq])
+      expect(inputs.mock.calls).toEqual([[[first.seq]]])
+      inputs.mockClear()
+      expect(store.processingState.overrides()).toEqual([
+        { inputSeq: first.seq, mode: "restore", revision: 1 },
+        { inputSeq: pending.seq, mode: "automatic", revision: 0 },
+      ])
+      expect(inputs).not.toHaveBeenCalled()
+      expect(store.processingState.published([pending.seq])).toEqual([])
+      expect(store.processingState.published([])).toEqual([])
+      expect(store.processingState.overrides([pending.seq])).toEqual([
+        { inputSeq: pending.seq, mode: "automatic", revision: 0 },
+      ])
+      expect(store.processingState.overrides([])).toEqual([])
+      store.saveEntry({ ...first.body, content: "换代后的原文" })
+      const current = store.automation.current(first.sourceKey, first.itemId)!
+      expect(store.processingState.published()).toEqual([])
+      expect(store.processingState.overrides([first.seq])).toEqual([])
+      expect(store.processingState.overrides([current.seq])).toEqual([
+        { inputSeq: current.seq, mode: "restore", revision: 1 },
+      ])
+    } finally {
+      store.close()
+    }
+  })
+
   it("暂时性失败退避五分钟，重启保留两次上限，显式重试重置额度", () => {
     const directory = mkdtempSync(join(tmpdir(), "folo-retry-test-"))
     const path = join(directory, "test.sqlite")

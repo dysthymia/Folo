@@ -667,7 +667,10 @@ describe("原生收藏与深链投影", () => {
       refresh: true,
     }
     const base = store.reading.generatedPage(query)
+    // 带筛选的新快照只读一次发布数据；空态库存与当前页复用同一批核验结果。
+    const published = vi.spyOn(store.processingState, "published")
     const empty = store.reading.generatedPage({ ...query, search: "不存在的词", unreadOnly: true })
+    expect(published).toHaveBeenCalledTimes(1)
     expect(empty.total).toBe(0)
     expect(empty.counts).toEqual(base.counts)
     expect(empty.counts).toMatchObject({
@@ -682,6 +685,34 @@ describe("原生收藏与深链投影", () => {
       store.reading.generatedPage({ ...query, sourceKeys: ["feed/other"] }).counts,
     ).toMatchObject({ inputs: 0, uncovered: 0, hidden: 0, folded: 0, pending: 0, needsContext: 0 })
   })
+  it("同一快照多页轮询复用投影，写入后重新计算但不替换冻结成员", () => {
+    const store = fixture()
+    publishRelease(store)
+    publishDecision(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    publishDecision(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const first = store.reading.generatedPage(
+      generatedFeedQuerySchema.parse({ mode: "smart", refresh: true, limit: 1 }),
+    )
+    const query = generatedFeedQuerySchema.parse({
+      mode: "smart",
+      snapshotId: first.snapshotId,
+      limit: 1,
+    })
+    const published = vi.spyOn(store.processingState, "published")
+    store.reading.generatedPage(query)
+    store.reading.generatedPage({ ...query, cursor: first.nextCursor! })
+    expect(published).toHaveBeenCalledTimes(1)
+    publishDecision(store, entry("three", "2026-01-03T00:00:00.000Z"))
+    const afterWrite = store.reading.generatedPage(query)
+    expect(published).toHaveBeenCalledTimes(2)
+    expect(afterWrite).toMatchObject({ latestAvailable: true, total: 2 })
+    expect(afterWrite.items.map((item) => item.id)).toEqual(["two"])
+    // 人工覆盖也必须立即生效，不能被缓存伪装成仍可见。
+    const two = store.automation.current("feed/f1", "two")!
+    store.processingState.setOverride(two.seq, "hide", 0)
+    expect(store.reading.generatedPage(query).items.map((item) => item.id)).toEqual(["one"])
+  })
+
   it("保留未处理、待补、隐藏和已并入 Story 的全部显式收藏原文", () => {
     const store = fixture()
     publishRelease(store)

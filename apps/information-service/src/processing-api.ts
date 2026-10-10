@@ -297,6 +297,8 @@ export function generatedPageWithAttention(store: Store, query: GeneratedFeedQue
         : [],
     ),
   )
+  // 普通原文页或空 Story 页没有关注度成员，不应为每次轮询扫描全部语义索引。
+  if (snapshots.size === 0) return page
   const seqs = [
     ...new Set(
       [...snapshots.values()].flatMap(

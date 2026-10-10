@@ -281,6 +281,11 @@ export class ProcessingReadingStore {
     version: string
     roles: ProcessingEntryRole[]
   }
+  // 同一数据库版本的多页轮询共享投影；限制范围数量，避免长期保留历史分类结果。
+  private generatedProjections?: {
+    version: string
+    pages: Map<string, GeneratedReaderProjection>
+  }
   constructor(
     private readonly db: DatabaseSync,
     private readonly ownerId: () => string | null,
@@ -571,12 +576,49 @@ export class ProcessingReadingStore {
 
   // 原文与 Story 在同一个范围内排序、过滤和折叠，不在浏览器拼接两个分页结果。
   private generatedProjection(query: GeneratedFeedScope): GeneratedReaderProjection {
+    const version = JSON.stringify([
+      this.requireOwner(),
+      this.db.prepare("SELECT total_changes() AS count").get()?.count,
+      this.db.prepare("PRAGMA data_version").get()?.data_version,
+    ])
+    const key = JSON.stringify(query)
+    const cached = this.generatedProjections
+    if (!this.db.isTransaction && cached?.version === version && cached.pages.has(key))
+      return cached.pages.get(key)!
+    const projection = this.computeGeneratedProjection(query)
+    // 事务内不复用；本连接写入、外部写入和账号变化均立即使旧投影失效。
+    if (!this.db.isTransaction) {
+      const pages = cached?.version === version ? cached.pages : new Map()
+      if (pages.size >= 8) pages.delete(pages.keys().next().value!)
+      pages.set(key, projection)
+      this.generatedProjections = { version, pages }
+    }
+    return projection
+  }
+
+  private computeGeneratedProjection(
+    query: GeneratedFeedScope,
+    inventory?: {
+      sourceByKey: Map<string, Source>
+      inputs: ProcessingInput[]
+      allDecisions: Map<number, PublishedDecision>
+      overrides: Map<number, ReturnType<ProcessingStateStore["overrides"]>[number]>
+    },
+  ): GeneratedReaderProjection {
     const ownerId = this.requireOwner()
-    const sources = this.db
-      .prepare("SELECT body FROM sources WHERE active=1")
-      .all()
-      .map((row) => JSON.parse(String(row.body)) as Source)
-    const sourceByKey = new Map(sources.map((source) => [source.key, source]))
+    // 空态库存只改变阅读筛选，复用当前请求的原文和决定，避免递归重扫同一批数据。
+    const sourceByKey =
+      inventory?.sourceByKey ??
+      new Map(
+        this.db
+          .prepare("SELECT body FROM sources WHERE active=1")
+          .all()
+          .map((row) => {
+            const source = JSON.parse(String(row.body)) as Source
+            return [source.key, source] as const
+          }),
+      )
+    const sourceAvailability = new Map<string, boolean>()
     const scoped = (sourceKey: string) => {
       if (sourceKey.startsWith("generated:")) return false
       if (query.sourceKeys && !query.sourceKeys.includes(sourceKey)) return false
@@ -594,14 +636,19 @@ export class ProcessingReadingStore {
         const source = sourceByKey.get(sourceKey)
         if (!source || source.view !== query.view) return false
       }
-      return this.sourceAvailable(sourceKey)
+      if (!sourceAvailability.has(sourceKey))
+        sourceAvailability.set(sourceKey, this.sourceAvailable(sourceKey))
+      return sourceAvailability.get(sourceKey)!
     }
-    const inputs = this.automation
-      .inputs()
-      .filter((input) => input.current && scoped(input.sourceKey))
-    const published = this.processingState.published().filter((item) => item.input.current)
-    const allDecisions = new Map(published.map((item) => [item.input.seq, item]))
-    const overrides = new Map(this.processingState.overrides().map((item) => [item.inputSeq, item]))
+    const inputs =
+      inventory?.inputs ??
+      this.automation.inputs().filter((input) => input.current && scoped(input.sourceKey))
+    const allDecisions =
+      inventory?.allDecisions ??
+      new Map(this.processingState.published().map((item) => [item.input.seq, item]))
+    const overrides =
+      inventory?.overrides ??
+      new Map(this.processingState.overrides().map((item) => [item.inputSeq, item]))
     const scopedSeqs = new Set(inputs.map((input) => input.seq))
     const storyIdsBySeq = new Map<number, string[]>()
     const storyItems: GeneratedReaderItem[] = []
@@ -706,7 +753,8 @@ export class ProcessingReadingStore {
         entries.flatMap((item) => (item.kind === "entry" ? [item.inputSeq] : [])),
       )
       const merged = new Set(
-        this.currentDedupeMerges()
+        // 本次投影已核验全部决定，去重沿用同一批数据，避免重复读取原文和发布指针。
+        this.currentDedupeMerges(undefined, allDecisions)
           .filter(
             (merge) =>
               (visibleSeqs.has(merge.keep.seq) ||
@@ -739,15 +787,18 @@ export class ProcessingReadingStore {
       query.collectedOnly ||
       query.since ||
       query.until
-        ? this.generatedProjection({
-            ...query,
-            search: undefined,
-            topic: undefined,
-            unreadOnly: false,
-            collectedOnly: false,
-            since: undefined,
-            until: undefined,
-          }).counts
+        ? this.computeGeneratedProjection(
+            {
+              ...query,
+              search: undefined,
+              topic: undefined,
+              unreadOnly: false,
+              collectedOnly: false,
+              since: undefined,
+              until: undefined,
+            },
+            { sourceByKey, inputs, allDecisions, overrides },
+          ).counts
         : null
     const counts = inventoryCounts ?? {
       inputs: inputs.length,

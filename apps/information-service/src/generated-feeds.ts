@@ -180,9 +180,12 @@ export class GeneratedFeedStore {
     if (requestedId && !row) throw new Error("generated_snapshot_not_found")
     // 分页不能把另一个筛选范围的游标误用于当前列表。
     if (row && String(row.scope_key) !== scopeKey) throw new Error("invalid_generated_cursor")
+    let current: GeneratedReaderProjection | undefined
     if (!row) {
       const id = randomUUID()
       const projection = this.project(scope)
+      // 新快照就是当前投影；同一同步请求中无需再次扫描全库计算同一份结果。
+      current = projection
       const snapshot = { scope, projection }
       this.db
         .prepare("INSERT INTO generated_reader_snapshots VALUES(?,?,?,?,?)")
@@ -193,7 +196,7 @@ export class GeneratedFeedStore {
       scope: GeneratedFeedScope
       projection: GeneratedReaderProjection
     }
-    const current = this.project(saved.scope)
+    current ??= this.project(saved.scope)
     // 只人工纠错和来源资格能改变冻结成员；后台新决定不能令正在阅读的旧行跳位。
     const frozen = saved.projection.reservoir ?? saved.projection.items
     const capturedVisible = new Set(saved.projection.items.map((item) => this.itemKey(item)))

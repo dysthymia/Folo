@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { SourceEntry } from "./folo"
-import { processingApi } from "./processing-api"
+import { generatedFeedQuerySchema } from "./generated-feeds"
+import { generatedPageWithAttention, processingApi } from "./processing-api"
 import type { ProcessingDecision } from "./processing-decision"
 import { Store } from "./store"
 import type { Story, StoryRevision } from "./story-store"
@@ -35,6 +36,23 @@ function fixture() {
   store.replaceSources([source])
   return store
 }
+
+it("空 Story 页不扫描语义索引或再次读取发布原文", () => {
+  const store = fixture()
+  const page = vi.spyOn(store.reading, "generatedPage")
+  const tags = vi.spyOn(store.semantics, "tagAssessmentsByInput")
+  const entities = vi.spyOn(store.semantics, "presentEntitiesByInput")
+  const published = vi.spyOn(store.processingState, "published")
+  const result = generatedPageWithAttention(
+    store,
+    generatedFeedQuerySchema.parse({ mode: "stories", limit: 30 }),
+  )
+  expect(result.items).toEqual([])
+  expect(result).toBe(page.mock.results[0]!.value)
+  expect(tags).not.toHaveBeenCalled()
+  expect(entities).not.toHaveBeenCalled()
+  expect(published).toHaveBeenCalledTimes(1)
+})
 
 function schedule(store: Store) {
   return processingApi(store, "PUT", "/schedule", {

@@ -337,6 +337,28 @@ describe("共享原生阅读查询与异步归属", () => {
     expect(location.search).toContain("story=deep")
   })
 
+  it("分页暂时失败后成功读回同一快照会清除错误，保留原有阅读位置", async () => {
+    mocks.page.mockResolvedValueOnce(page([entry("one")], "fixed", "next"))
+    await render()
+    reader.scrollRef.current!.scrollTop = 123
+    mocks.page.mockRejectedValueOnce(new Error("request_timeout"))
+    await act(async () => reader.loadMore())
+    expect(reader.failed).toBe(true)
+    expect(reader.items.map((item) => item.id)).toEqual(["one"])
+    // 后台成功恢复当前快照时，旧失败不能继续阻止综述展示和后续分页。
+    mocks.page.mockResolvedValueOnce({
+      ...page([entry("one")], "fixed", "next"),
+      latestAvailable: true,
+    })
+    await act(async () => window.dispatchEvent(new Event("processing-reading-invalidated")))
+    expect(reader.failed).toBe(false)
+    expect(reader.page?.latestAvailable).toBe(true)
+    expect(reader.scrollRef.current!.scrollTop).toBe(123)
+    mocks.page.mockResolvedValueOnce(page([entry("two")], "fixed"))
+    await act(async () => reader.loadMore())
+    expect(reader.items.map((item) => item.id)).toEqual(["one", "two"])
+  })
+
   it("关闭 AI 不发投影请求，重新开启复用分页与滚动会话", async () => {
     await render(false)
     expect(mocks.page).not.toHaveBeenCalled()

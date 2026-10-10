@@ -207,6 +207,8 @@ export function useGeneratedReader({
       setPage(next)
       setItems(sessionRef.current.session.items)
       setPageVersion((value) => value + 1)
+      // 读取恢复后清除旧失败，避免轮询已成功却持续报错并停用原生综述。
+      setFailed(false)
     },
     [itemChanges],
   )

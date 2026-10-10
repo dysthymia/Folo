@@ -304,19 +304,26 @@ export class ProcessingStateStore {
   }
 
   published(inputSeqs?: readonly number[]): PublishedDecision[] {
+    // 在 SQL 中一次筛出有效发布指针，避免逐条解析未处理原文并查询决定而阻塞 HTTP。
+    const rows = this.db
+      .prepare(
+        `SELECT inputs.seq,decisions.id,decisions.body FROM processing_inputs inputs
+        JOIN entry_decisions decisions ON inputs.decision_id=decisions.id
+        WHERE inputs.current=1 AND inputs.status='succeeded'
+          AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version
+          ${inputSeqs ? "AND inputs.seq IN (SELECT value FROM json_each(?))" : ""}
+        ORDER BY inputs.seq`,
+      )
+      .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
+    const inputs = new Map(
+      this.automation.inputs(rows.map((row) => Number(row.seq))).map((input) => [input.seq, input]),
+    )
     const result: PublishedDecision[] = []
-    // 详情只核验本组发布指针，避免每次展开理由都解析全部当前原文。
-    for (const input of this.automation.inputs(inputSeqs)) {
-      const row = this.db
-        .prepare(
-          "SELECT decisions.id,decisions.body FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.decision_id=decisions.id WHERE inputs.seq=? AND inputs.status='succeeded' AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version",
-        )
-        .get(input.seq)
-      if (row) {
-        const decision = JSON.parse(String(row.body)) as ProcessingDecision
-        if (decision.schemaVersion === 1 || decision.schemaVersion === 2)
-          result.push({ input, decisionId: String(row.id), decision })
-      }
+    for (const row of rows) {
+      const input = inputs.get(Number(row.seq))!
+      const decision = JSON.parse(String(row.body)) as ProcessingDecision
+      if (decision.schemaVersion === 1 || decision.schemaVersion === 2)
+        result.push({ input, decisionId: String(row.id), decision })
     }
     return result
   }
@@ -357,19 +364,21 @@ export class ProcessingStateStore {
   }
 
   overrides(inputSeqs?: readonly number[]) {
-    // 用户纠偏绑定来源与原文身份，正文版本变化后仍有效。
-    return this.automation.inputs(inputSeqs).map((input) => {
-      const row = this.db
-        .prepare(
-          "SELECT mode,revision FROM processing_source_item_overrides WHERE source_key=? AND item_id=?",
-        )
-        .get(input.sourceKey, input.itemId)
-      return {
-        inputSeq: input.seq,
-        mode: String(row?.mode ?? "automatic") as "restore" | "hide" | "automatic",
-        revision: Number(row?.revision ?? 0),
-      }
-    })
+    // 覆盖只需要身份与版本；批量关联保留正文换代后的纠偏，不读取或解析原文正文。
+    return this.db
+      .prepare(
+        `SELECT inputs.seq,overrides.mode,overrides.revision FROM processing_inputs inputs
+        LEFT JOIN processing_source_item_overrides overrides
+          ON overrides.source_key=inputs.source_key AND overrides.item_id=inputs.item_id
+        WHERE inputs.current=1 ${inputSeqs ? "AND inputs.seq IN (SELECT value FROM json_each(?))" : ""}
+        ORDER BY inputs.seq`,
+      )
+      .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
+      .map((row) => ({
+        inputSeq: Number(row.seq),
+        mode: String(row.mode ?? "automatic") as "restore" | "hide" | "automatic",
+        revision: Number(row.revision ?? 0),
+      }))
   }
 
   setOverride(seq: number, mode: "restore" | "hide" | "automatic", expectedRevision: number) {
