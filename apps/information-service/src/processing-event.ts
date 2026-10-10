@@ -205,9 +205,47 @@ export function occurrenceRange(
   return start === null || end === null || start >= end ? null : [start, end]
 }
 
+// 仅规范同一句已完成融资公告中明示的金额和轮次，不从标题、相邻事件或常识补身份。
+export function normalizeFinancingEvent(identity: EventIdentity): EventIdentity {
+  if (identity.kind !== "event" || !["announcement", "transaction"].includes(identity.action.value))
+    return identity
+  const quote = identity.action.quote
+  if (!supportsIdentityValue(identity.subject.value, quote) || !/融资/u.test(identity.object.value))
+    return identity
+  if (
+    !/(?:完成|获)[^。！？\n]{0,100}融资/u.test(quote) ||
+    /(?:拟|计划|寻求|扩展|追加|延长)[^。！？\n]{0,60}融资/u.test(quote)
+  )
+    return identity
+  const matches = [
+    ...quote
+      .replace(/\s+/gu, "")
+      .matchAll(/(\d+(?:\.\d+)?(?:亿|万)?(?:美元|人民币|欧元))([A-Z](?:[+＋]|\d+)?轮)融资/gu),
+  ]
+  if (matches.length !== 1) return identity
+  const match = matches[0]!
+  const round = match[2]!.replace(/\s+/gu, "")
+  if (identity.round && canonical(identity.round.value).replace(/\s+/gu, "") !== canonical(round))
+    return identity
+  return {
+    ...identity,
+    action: { value: "transaction", quote },
+    object: { value: match[0].replace(/\s+/gu, ""), quote },
+    round: { value: round, quote },
+  }
+}
+
+function financingValuation(identity: EventIdentity) {
+  if (!identity.object.value.endsWith("轮融资")) return undefined
+  return /估值(?:达|为)?(\d+(?:\.\d+)?(?:亿|万)?(?:美元|人民币|欧元))/u
+    .exec(identity.action.quote.replace(/\s+/gu, ""))?.[1]
+    ?.replace(/\s+/gu, "")
+}
+
 export function traceableEvent(event: unknown, text: string): EventIdentity | null {
   const parsed = eventIdentitySchema.safeParse(event)
   if (!parsed.success || parsed.data.kind !== "event") return null
+  parsed.data = normalizeFinancingEvent(parsed.data)
   const fields = [
     parsed.data.subject,
     parsed.data.action,
@@ -237,7 +275,13 @@ export function traceableEvent(event: unknown, text: string): EventIdentity | nu
 
 // 已知版本/轮次/发生区间冲突一律拒绝；截止、资格和领取条件不属于事件身份，允许更新。
 export function compatibleEvents(left: EventIdentity, right: EventIdentity): boolean {
+  left = normalizeFinancingEvent(left)
+  right = normalizeFinancingEvent(right)
   if (left.kind !== "event" || right.kind !== "event") return false
+  // 同轮次但估值冲突的报道不能自动拼成无冲突综述。
+  const a = financingValuation(left)
+  const b = financingValuation(right)
+  if (a && b && a !== b) return false
   if (
     ["subject", "action", "object"].some((key) => {
       const field = key as "subject" | "action" | "object"
@@ -254,6 +298,23 @@ export function compatibleEvents(left: EventIdentity, right: EventIdentity): boo
   const sharedOccurrence =
     !!leftRange && !!rightRange && leftRange[0] < rightRange[1] && rightRange[0] < leftRange[1]
   if (leftRange && rightRange && !sharedOccurrence) return false
+  // 两份材料明示不同日期但缺时区时不能靠相同轮次抹掉冲突。
+  if (
+    (!leftRange || !rightRange) &&
+    left.anchor?.kind === "event_date" &&
+    right.anchor?.kind === "event_date" &&
+    left.anchor.value !== right.anchor.value
+  )
+    return false
+  if (left.object.value.endsWith("轮融资") && right.object.value.endsWith("轮融资")) {
+    const planned = (event: EventIdentity) =>
+      /(?:拟|计划|寻求)[^。！？\n]{0,60}融资/u.test(event.action.quote)
+    if (planned(left) !== planned(right)) return false
+    if (
+      /(?:扩展|追加|延长)[^。！？\n]{0,60}融资/u.test(`${left.action.quote}\n${right.action.quote}`)
+    )
+      return false
+  }
   // 必须共享至少一种发生锚点，不能靠“同主体同动作”拼接不同次公告。
   return (
     sharedOccurrence ||
@@ -297,7 +358,7 @@ export function hasConfirmedEvent(event: unknown): boolean {
 export function traceableRelatedEvent(event: unknown, text: string): EventIdentity | null {
   const parsed = eventIdentitySchema.safeParse(event)
   if (!parsed.success) return null
-  const identity = parsed.data
+  const identity = normalizeFinancingEvent(parsed.data)
   if (!traceableEvent({ ...identity, kind: "event" }, text)) return null
   // 名称、版本和轮次必须受其本身的连续证据支持，不借相邻片段或记忆中的别名补足。
   for (const field of [identity.subject, identity.object, identity.version, identity.round]) {

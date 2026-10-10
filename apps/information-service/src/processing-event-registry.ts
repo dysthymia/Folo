@@ -6,7 +6,12 @@ import { z } from "zod"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import type { ProcessingDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
-import { compatibleEvents, eventIdentitySchema, traceableRelatedEvent } from "./processing-event"
+import {
+  compatibleEvents,
+  eventIdentitySchema,
+  normalizeFinancingEvent,
+  traceableRelatedEvent,
+} from "./processing-event"
 import { normalizeEventMentions } from "./processing-event-mentions"
 import { sourceText } from "./service"
 
@@ -165,7 +170,8 @@ function canonicalReference(value: string): string | null {
     return null
   }
 }
-function identityKey(identity: EventIdentity) {
+function identityKey(identity: EventIdentity, normalizeFinancing = true) {
+  if (normalizeFinancing) identity = normalizeFinancingEvent(identity)
   const normalize = (value: string) =>
     canonicalReference(value) ?? value.trim().normalize("NFKC").toLowerCase()
   return JSON.stringify([
@@ -253,7 +259,30 @@ export class ProcessingEventRegistry {
           "SELECT decision_id FROM processing_event_publications WHERE input_seq=? AND content_version=?",
         )
         .get(input.seq, input.contentVersion)
-      if (publication?.decision_id === decisionId) {
+      // 已有决定无需重跑模型；只在可证实融资身份发生规范化时刷新派生关系。
+      const normalizedKeys = decision.semantic
+        ? normalizeEventMentions(decision.semantic)
+            .filter(
+              (mention) =>
+                JSON.stringify(normalizeFinancingEvent(mention.identity)) !==
+                JSON.stringify(mention.identity),
+            )
+            .map((mention) => identityKey(mention.identity))
+        : []
+      const storedKeys = normalizedKeys.length
+        ? new Set(
+            this.db
+              .prepare(
+                "SELECT identity_key FROM processing_event_members WHERE input_seq=? AND decision_id=?",
+              )
+              .all(input.seq, decisionId)
+              .map((row) => String(row.identity_key)),
+          )
+        : new Set<string>()
+      if (
+        publication?.decision_id === decisionId &&
+        normalizedKeys.every((key) => storedKeys.has(key))
+      ) {
         // 按当前指针定向返回关系，批量幂等同步不能逐篇扫描全部成员。
         const eventIds = this.db
           .prepare(
@@ -274,7 +303,7 @@ export class ProcessingEventRegistry {
         allRows
           .filter((row) => row.membership.eventId === eventId && currentKeys.has(row.key))
           .every((row) => {
-            const known = identityFromKey(row.identityKey)
+            const known = this.identityForMember(row) ?? identityFromKey(row.identityKey)
             return (
               known !== null &&
               compatibleEvents(known, identity) &&
@@ -306,7 +335,7 @@ export class ProcessingEventRegistry {
       for (const mention of mentions) {
         const parsed = eventIdentitySchema.safeParse(mention.identity)
         if (!parsed.success) continue
-        const identity: EventIdentity = { ...parsed.data, kind: "event" }
+        const identity: EventIdentity = normalizeFinancingEvent({ ...parsed.data, kind: "event" })
         const evidence = [
           ...new Set(
             [
@@ -321,7 +350,10 @@ export class ProcessingEventRegistry {
         ]
         if (!evidence.length || evidence.some((quote) => !text.includes(quote))) continue
         const key = identityKey(identity)
-        const existing = previous.find((member) => member.identityKey === key)
+        const existing = previous.find(
+          (member) =>
+            member.identityKey === key || member.identityKey === identityKey(parsed.data, false),
+        )
         if (existing?.membership.origin === "manual") continue
         // 同正文已有人工纠错时，身份漂移产生的新提及只能等待确认；重复重跑也不能提升候选。
         const needsIdentityReview =
@@ -480,7 +512,12 @@ export class ProcessingEventRegistry {
           const saved = this.db
             .prepare("SELECT identity_key FROM processing_event_members WHERE member_key=?")
             .get(membershipKey(member, member.mentionId))
-          return saved?.identity_key === selectedKey && member.role === mention.role
+          return (
+            (saved?.identity_key === selectedKey ||
+              (member.origin === "manual" &&
+                saved?.identity_key === identityKey(mention.identity, false))) &&
+            member.role === mention.role
+          )
         })
       }
       if (mentions.length !== 1 || mentions[0]!.state !== "confirmed") return []
@@ -971,7 +1008,9 @@ export class ProcessingEventRegistry {
       const decision = JSON.parse(String(saved.body)) as ProcessingDecision
       if (!decision.semantic) continue
       const mention = normalizeEventMentions(decision.semantic).find(
-        (item) => identityKey(item.identity) === row.identityKey,
+        (item) =>
+          identityKey(item.identity) === row.identityKey ||
+          identityKey(item.identity, false) === row.identityKey,
       )
       if (mention) return { ...mention.identity, kind: "event" }
     }

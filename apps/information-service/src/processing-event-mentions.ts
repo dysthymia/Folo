@@ -6,6 +6,7 @@ import {
   eventSelectionForCatalog,
   eventSelectionSchema,
   materializeEvent,
+  traceableRelatedEvent,
 } from "./processing-event"
 import type { EvidenceCatalog } from "./processing-evidence"
 
@@ -336,4 +337,39 @@ export function remapEventMentionEvidence(
       },
     }
   })
+}
+
+// 同一融资公告附带同主体产品发布时，整份公告可贡献事实；周报、分析和无桥接证据的事件仍分开。
+export function isJointAnnouncement(
+  semantic: { event?: EventIdentity | null; eventMentions?: readonly EventMention[] },
+  text: string,
+  primaryIndex: number,
+): boolean {
+  const mentions = normalizeEventMentions(semantic)
+  if (mentions.length !== 2 || text.length > 12000) return false
+  const primary = mentions[primaryIndex]
+  if (!primary?.isPrimary || primary.role !== "reports" || primary.identity.kind !== "event")
+    return false
+  const event = traceableRelatedEvent(primary.identity, text)
+  if (!event || event.action.value !== "transaction" || !event.object.value.endsWith("轮融资"))
+    return false
+  const secondary = mentions.find((_, index) => index !== primaryIndex)!
+  if (
+    secondary.isPrimary ||
+    secondary.role !== "reports" ||
+    secondary.identity.kind !== "event" ||
+    secondary.identity.action.value !== "product_release" ||
+    secondary.identity.subject.value.normalize("NFKC").toLowerCase() !==
+      event.subject.value.normalize("NFKC").toLowerCase()
+  )
+    return false
+  const quote = secondary.identity.action.quote
+  const included = (quote: string) =>
+    text.replace(/\s+/gu, " ").includes(quote.replace(/\s+/gu, " "))
+  return (
+    included(quote) &&
+    /融资同时|同时[，,\s]*(?:推出|发布)/u.test(quote) &&
+    quote.includes(secondary.identity.object.value) &&
+    [secondary.identity.subject, secondary.identity.object].every((field) => included(field.quote))
+  )
 }

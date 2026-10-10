@@ -24,7 +24,11 @@ import {
 } from "./semantic-dedupe"
 import type { Store } from "./store"
 import type { SharedStoryGroup } from "./story-engine"
-import { sharedStoryRuleFingerprint, storyModelOutputSchema } from "./story-engine"
+import {
+  sharedStoryModelOutputSchema,
+  sharedStoryRuleFingerprint,
+  storyModelOutputSchema,
+} from "./story-engine"
 
 export type SharedEntryMaterial = {
   input: ProcessingInput
@@ -42,7 +46,7 @@ type SharedEnvelope<T> = {
   stories: unknown
 }
 const sharedStoriesSchema = z
-  .array(z.object({ ruleId: z.string().min(1), output: storyModelOutputSchema }).strict())
+  .array(z.object({ ruleId: z.string().min(1), output: sharedStoryModelOutputSchema }).strict())
   .max(20)
 const identitySchema = z
   .object({

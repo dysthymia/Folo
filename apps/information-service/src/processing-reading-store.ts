@@ -23,6 +23,7 @@ import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
 import type { ProcessingDedupeStore } from "./processing-dedupe"
 import { activeDedupeActions } from "./processing-dedupe"
+import { isJointAnnouncement } from "./processing-event-mentions"
 import type { ProcessingScheduleConfig } from "./processing-schedule"
 import type { ProcessingStateStore } from "./processing-state"
 import { dedupeContentEvidence, SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD } from "./semantic-dedupe"
@@ -692,7 +693,7 @@ export class ProcessingReadingStore {
         storyMembers.set(
           story.id,
           members
-            .filter((member) => storyRepresentsWholeEntry(member))
+            .filter((member) => storyRepresentsWholeEntry(member, revision))
             .map((member) => member.input.seq),
         )
       }
@@ -889,7 +890,7 @@ export class ProcessingReadingStore {
     const represented = new Set(
       snapshots.flatMap(({ revision }) =>
         revision.members
-          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq)))
+          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq), revision))
           .map((member) => member.inputSeq),
       ),
     )
@@ -1424,7 +1425,7 @@ export class ProcessingReadingStore {
             (seq) =>
               inputBySeq.has(seq) &&
               !hiddenBySeq.get(seq) &&
-              storyRepresentsWholeEntry(publishedBySeq.get(seq)),
+              storyRepresentsWholeEntry(publishedBySeq.get(seq), revision),
           )
           .sort((left, right) => left - right),
       }))
@@ -1646,7 +1647,7 @@ export class ProcessingReadingStore {
     return new Set(
       this.currentStories(decisions).flatMap(({ revision }) =>
         revision.members
-          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq)))
+          .filter((member) => storyRepresentsWholeEntry(decisions.get(member.inputSeq), revision))
           .map((member) => member.inputSeq),
       ),
     )
@@ -2011,10 +2012,39 @@ export class ProcessingReadingStore {
 }
 
 // 分事件事实贡献不等于全篇被覆盖；周报、分析和教程仍在原来的独立阅读流保留。
-function storyRepresentsWholeEntry(published: PublishedDecision | undefined) {
+function storyRepresentsWholeEntry(
+  published: PublishedDecision | undefined,
+  revision?: StoryRevision,
+) {
   if (!published || published.decision.policy.standalone === "always") return false
   const semantic = published.decision.semantic
   const mentions = semantic?.eventMentions
+  const member = revision?.members.find(
+    (item) => item.inputSeq === published.input.seq && item.decisionId === published.decisionId,
+  )
+  if (
+    member?.announcementCoverage &&
+    member.eventMentionIndex !== undefined &&
+    isJointAnnouncement(
+      semantic ?? {},
+      sourceText(published.input.body.content ?? ""),
+      member.eventMentionIndex,
+    )
+  ) {
+    const covered = new Set(
+      member.announcementCoverage
+        .filter(
+          (coverage) =>
+            coverage.storyFactIds.length > 0 &&
+            coverage.storyFactIds.every((id) => revision!.facts.some((fact) => fact.id === id)),
+        )
+        .map((coverage) => coverage.factIndex),
+    )
+    return (
+      published.decision.facts.length > 0 &&
+      published.decision.facts.every((_, index) => covered.has(index))
+    )
+  }
   if (
     (mentions?.length ?? 0) > 1 ||
     mentions?.some(

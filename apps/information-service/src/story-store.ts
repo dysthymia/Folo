@@ -8,6 +8,7 @@ import { compatibleEvents, traceableEvent, traceableRelatedEvent } from "./proce
 import {
   factsForEvent,
   factsForPrimaryEvent,
+  isJointAnnouncement,
   normalizeEventMentions,
 } from "./processing-event-mentions"
 import { unchangedStoryMaterial } from "./story-material"
@@ -22,6 +23,8 @@ export type StoryMemberReference = {
   decisionId: string
   /** 对应不可变决定中的事件片段；不指定时保留旧主事件兼容。 */
   eventMentionIndex?: number
+  /** 同公告每个原事实到综述事实的覆盖许可证；不可用于无关事件、分析或教程。 */
+  announcementCoverage?: Array<{ factIndex: number; storyFactIds: string[] }>
 }
 export type StorySourceSpan = {
   id: string
@@ -1011,12 +1014,16 @@ export class StoryStore {
           !mention ||
           !["reports", "analysis_of", "tutorial_for"].includes(mention.role) ||
           !original ||
-          !factsForEvent(
-            decision.facts,
-            decision.semantic ?? {},
-            original,
-            member.eventMentionIndex,
-          ).length
+          (!(
+            member.announcementCoverage &&
+            isJointAnnouncement(decision.semantic ?? {}, original, member.eventMentionIndex)
+          ) &&
+            !factsForEvent(
+              decision.facts,
+              decision.semantic ?? {},
+              original,
+              member.eventMentionIndex,
+            ).length)
         )
           return null
       } else if (
@@ -1338,12 +1345,15 @@ export class StoryStore {
             member.eventMentionIndex !== undefined
               ? original === null
                 ? []
-                : factsForEvent(
-                    decision.facts,
-                    decision.semantic ?? {},
-                    original,
-                    member.eventMentionIndex,
-                  )
+                : member.announcementCoverage &&
+                    isJointAnnouncement(decision.semantic ?? {}, original, member.eventMentionIndex)
+                  ? decision.facts
+                  : factsForEvent(
+                      decision.facts,
+                      decision.semantic ?? {},
+                      original,
+                      member.eventMentionIndex,
+                    )
               : (decision.semantic?.eventMentions?.length ?? 0) > 1
                 ? original === null
                   ? []
@@ -1400,6 +1410,83 @@ export class StoryStore {
         (fact.kind === "inference" && fact.dependsOnFactIds.length === 0)
       )
         throw new StoryStoreError("invalid_reference")
+    }
+    // 不信任调用方传入的覆盖许可证；必须逐事实校验原决定、公告范围、类型及引用归属。
+    for (const member of input.members) {
+      if (!member.announcementCoverage) continue
+      const row = this.db
+        .prepare(
+          "SELECT decisions.body AS decision, inputs.body AS input FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.seq=decisions.input_seq WHERE decisions.id=? AND inputs.seq=?",
+        )
+        .get(member.decisionId, member.inputSeq)!
+      const decision = JSON.parse(String(row.decision)) as ProcessingDecision
+      const original = sourceTextFromInputBody(String(row.input))
+      if (
+        !original ||
+        member.eventMentionIndex === undefined ||
+        !isJointAnnouncement(decision.semantic ?? {}, original, member.eventMentionIndex)
+      )
+        throw new StoryStoreError("invalid_reference")
+      const indexes = new Set<number>()
+      for (const coverage of member.announcementCoverage) {
+        const sourceFact = decision.facts[coverage.factIndex]
+        if (
+          !Number.isInteger(coverage.factIndex) ||
+          !sourceFact ||
+          indexes.has(coverage.factIndex) ||
+          !coverage.storyFactIds.length ||
+          new Set(coverage.storyFactIds).size !== coverage.storyFactIds.length
+        )
+          throw new StoryStoreError("invalid_reference")
+        indexes.add(coverage.factIndex)
+        for (const id of coverage.storyFactIds) {
+          const fact = input.facts.find((item) => item.id === id)
+          if (
+            !fact ||
+            (fact.kind !== sourceFact.kind &&
+              !(fact.kind === "source_claim" && sourceFact.kind === "fact") &&
+              !(
+                fact.kind === "fact" &&
+                sourceFact.kind === "source_claim" &&
+                input.members.some((other) => {
+                  if (other.inputSeq === member.inputSeq) return false
+                  const supporting = this.db
+                    .prepare("SELECT body FROM entry_decisions WHERE id=? AND input_seq=?")
+                    .get(other.decisionId, other.inputSeq)
+                  const known = supporting
+                    ? (JSON.parse(String(supporting.body)) as ProcessingDecision)
+                    : null
+                  return (other.announcementCoverage ?? []).some((item) => {
+                    const originalFact = known?.facts[item.factIndex]
+                    return (
+                      item.storyFactIds.includes(id) &&
+                      originalFact?.kind === "fact" &&
+                      fact.citationIds.some((citationId) => {
+                        const citation = input.citations.find((value) => value.id === citationId)
+                        const span = input.sourceSpans.find(
+                          (value) => value.id === citation?.sourceSpanId,
+                        )
+                        return (
+                          span?.inputSeq === other.inputSeq &&
+                          normalizeQuote(span.quote) === normalizeQuote(originalFact.quote)
+                        )
+                      })
+                    )
+                  })
+                })
+              )) ||
+            !fact.citationIds.some((citationId) => {
+              const citation = input.citations.find((item) => item.id === citationId)
+              const span = input.sourceSpans.find((item) => item.id === citation?.sourceSpanId)
+              return (
+                span?.inputSeq === member.inputSeq &&
+                normalizeQuote(span.quote) === normalizeQuote(sourceFact.quote)
+              )
+            })
+          )
+            throw new StoryStoreError("invalid_reference")
+        }
+      }
     }
     if (hasFactDependencyCycle(input.facts)) throw new StoryStoreError("invalid_reference")
   }

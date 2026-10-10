@@ -16,7 +16,11 @@ import { contentIdentity } from "./content-identity"
 import type { PublishedDecision } from "./processing-decision"
 import type { EventIdentity } from "./processing-event"
 import { compatibleEvents, traceableEvent, traceableRelatedEvent } from "./processing-event"
-import { factsForEvent, normalizeEventMentions } from "./processing-event-mentions"
+import {
+  factsForEvent,
+  isJointAnnouncement,
+  normalizeEventMentions,
+} from "./processing-event-mentions"
 import type { EvidenceFragment } from "./processing-evidence"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
@@ -41,6 +45,19 @@ export const storyModelOutputSchema = z
       .array(
         z
           .object({
+            // 旧缓存可缺省；缺少逐事实覆盖声明时不能折叠多事件原文。
+            factCoverage: z
+              .array(
+                z
+                  .object({
+                    inputSeq: z.number().int().positive(),
+                    evidenceId: z.string().min(1).max(80),
+                    factIndexes: z.array(z.number().int().nonnegative()).min(1).max(100),
+                  })
+                  .strict(),
+              )
+              .max(200)
+              .optional(),
             existingStoryId: z.string().uuid().nullable(),
             title: z.string().min(1).max(500),
             body: z.string().min(1).max(12000),
@@ -86,6 +103,7 @@ type Candidate = PublishedDecision & {
   text: string
   eventMentionIndex?: number
   selectedEvent?: EventIdentity
+  announcementFacts?: PublishedDecision["decision"]["facts"]
 }
 type PendingReason =
   | "aggregation_denied"
@@ -137,6 +155,8 @@ export function sharedStoryRuleFingerprint(
 export type StoryAggregationOptions = {
   /** 旧材料可作同事件上下文，只有含本次目标的批次才允许推进。 */
   targets?: readonly { sourceKey: string; itemId: string }[]
+  /** 显式修复只复用指定已缓存结果，不抓取、不重算单篇，也不改变已读状态。 */
+  cachedReadInputSeqs?: readonly number[]
   decisions: PublishedDecision[]
   currentEntry?: ProcessingReadStateLookup
   ruleSet: RuleSet
@@ -206,6 +226,7 @@ export async function runStoryAggregation(
       blocked,
       claimedContributions,
       claimedThemeInputs,
+      new Set(options.cachedReadInputSeqs ?? []),
     )
     result.pending.push(...pending)
     if (candidates.length === 0) continue
@@ -335,7 +356,7 @@ export async function runStoryAggregation(
         model: config.model,
         endpointFingerprint: aiEndpointFingerprint(config),
         reasoningEffort: reasoningFingerprint(aiReasoningEffort(config)),
-        promptVersion: 9,
+        promptVersion: 11,
         runtimeDir: options.runtimeDir,
         ruleId: rule.id,
         ruleVersion: rule.version,
@@ -360,6 +381,7 @@ export async function runStoryAggregation(
           policy: candidate.decision.policy,
           event: candidate.selectedEvent ?? candidate.decision.semantic?.event,
           eventMentionIndex: candidate.eventMentionIndex,
+          wholeAnnouncement: !!candidate.announcementFacts,
         })),
       })
       let output = modelCache.get(cacheKey) ?? (await readStoryCache(options.runtimeDir, cacheKey))
@@ -444,6 +466,8 @@ function sharedStoryOutput(
     )
   })
   if (!draft) return undefined
+  // 旧统一草稿只声明原文片段，不能证明该片段中的每项事实均已保留；联合公告需逐事实重新综合。
+  if (candidates.some((candidate) => candidate.announcementFacts)) return undefined
   const parsed = storyModelOutputSchema.safeParse(draft.output)
   if (!parsed.success) return undefined
   const candidateBySeq = new Map(candidates.map((candidate) => [candidate.input.seq, candidate]))
@@ -500,6 +524,7 @@ function candidatesForAction(
   blocked = new Set<number>(),
   claimedContributions = new Set<string>(),
   claimedThemeInputs = new Set<number>(),
+  cachedReadInputSeqs = new Set<number>(),
 ) {
   const pending: PendingStory[] = []
   const grouped = new Map<string, Candidate[]>()
@@ -511,7 +536,11 @@ function candidatesForAction(
     )
       continue
     // 已成功单篇不代表仍未读；综述资格必须查当前读态，保留既有结果但不重复付费。
-    if (inputReadState(published.input, currentEntry) !== false) continue
+    if (
+      inputReadState(published.input, currentEntry) !== false &&
+      !cachedReadInputSeqs.has(published.input.seq)
+    )
+      continue
     const reason = ineligibleReason(published)
     if (reason) {
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason })
@@ -573,14 +602,18 @@ function candidatesForAction(
         continue
       }
       const selectedEvent = { ...verified, kind: "event" as const }
+      const announcement = isJointAnnouncement(semantic ?? {}, text, mentionIndex)
       const scoped: Candidate = {
         ...published,
         text,
         selectedEvent,
+        ...(announcement ? { announcementFacts: published.decision.facts } : {}),
         ...(explicit ? { eventMentionIndex: mentionIndex } : {}),
         decision: {
           ...published.decision,
-          facts: factsForEvent(published.decision.facts, semantic ?? {}, text, mentionIndex),
+          facts: announcement
+            ? published.decision.facts
+            : factsForEvent(published.decision.facts, semantic ?? {}, text, mentionIndex),
         },
       }
       scoped.decision.facts = scoped.decision.facts.filter(
@@ -619,6 +652,7 @@ function candidateMember(candidate: Candidate): StoryMemberReference {
   return {
     inputSeq: candidate.input.seq,
     decisionId: candidate.decisionId,
+    ...(candidate.announcementFacts ? { announcementCoverage: [] } : {}),
     ...(candidate.eventMentionIndex === undefined
       ? {}
       : { eventMentionIndex: candidate.eventMentionIndex }),
@@ -850,7 +884,13 @@ function draftFromGroup(
   )
   for (const inputSeq of newMemberSeqs) {
     const candidate = candidateBySeq.get(inputSeq)!
-    memberByInput.set(inputSeq, candidateMember(candidate))
+    const previous = memberByInput.get(inputSeq)
+    memberByInput.set(inputSeq, {
+      ...candidateMember(candidate),
+      ...(previous?.decisionId === candidate.decisionId && previous.announcementCoverage
+        ? { announcementCoverage: previous.announcementCoverage }
+        : {}),
+    })
   }
   const memberSeqs = [...memberByInput.keys()].sort((left, right) => left - right)
   // 不信任模型指定existingStoryId或缓存分组：创建/更新在正式发布前再次核验所有成员。
@@ -984,6 +1024,9 @@ function draftFromGroup(
       throw new Error("quote_only_fact_rewritten")
   }
   const allFacts = [...retainedFacts, ...facts]
+  applyFactCoverage(group, input.candidates, memberByInput, allFacts, citations, [
+    ...spans.values(),
+  ])
   const appliedRuleSetVersion = Math.max(
     existing?.revision.appliedRuleSetVersion ?? 0,
     ...newMemberSeqs.map((inputSeq) => candidateBySeq.get(inputSeq)!.input.releaseVersion ?? 0),
@@ -1006,6 +1049,108 @@ function draftFromGroup(
     citations,
     sentences,
     facts: allFacts,
+  }
+}
+
+// 覆盖声明必须落到同一材料的实际引用，不能凭模型声明把遗漏、推断或别篇证据当作已覆盖。
+function applyFactCoverage(
+  group: StoryModelOutput["groups"][number],
+  candidates: Candidate[],
+  members: Map<number, StoryMemberReference>,
+  facts: StoryRevisionDraft["facts"],
+  citations: StoryRevisionDraft["citations"],
+  spans: StoryRevisionDraft["sourceSpans"],
+) {
+  const factById = new Map(facts.map((fact) => [fact.id, fact]))
+  // 续写删除旧事实时同时撤销覆盖许可证，原文自动恢复占位。
+  for (const [seq, member] of members) {
+    if (member.announcementCoverage)
+      members.set(seq, {
+        ...member,
+        announcementCoverage: member.announcementCoverage.filter((coverage) =>
+          coverage.storyFactIds.every((id) => factById.has(id)),
+        ),
+      })
+  }
+  const coverageBySeq = new Map<number, NonNullable<StoryMemberReference["announcementCoverage"]>>()
+  for (const coverage of group.factCoverage ?? []) {
+    const candidate = candidates.find((item) => item.input.seq === coverage.inputSeq)
+    if (!candidate) throw new Error("invalid_fact_coverage")
+    const factIndex = candidate.decision.facts.findIndex(
+      (_, index) => evidenceId(candidate.input.seq, index) === coverage.evidenceId,
+    )
+    const sourceFact = candidate.decision.facts[factIndex]
+    if (!sourceFact) throw new Error("invalid_fact_coverage")
+    const mapped = coverage.factIndexes.map((index) => {
+      const generated = group.facts[index]
+      if (!generated) throw new Error("invalid_fact_coverage")
+      if (
+        (generated.kind !== sourceFact.kind &&
+          !(generated.kind === "source_claim" && sourceFact.kind === "fact") &&
+          // 共同事实可由另一份已认可的 fact 支撑，不能用同篇来源主张或推断自证。
+          !(
+            generated.kind === "fact" &&
+            sourceFact.kind === "source_claim" &&
+            (group.factCoverage ?? []).some((other) => {
+              if (other.inputSeq === coverage.inputSeq || !other.factIndexes.includes(index))
+                return false
+              const supporting = candidates.find((item) => item.input.seq === other.inputSeq)
+              const known = supporting?.decision.facts.find(
+                (_, factIndex) => evidenceId(other.inputSeq, factIndex) === other.evidenceId,
+              )
+              return (
+                known?.kind === "fact" &&
+                generated.sentenceIndexes.some((sentenceIndex) =>
+                  group.sentences[sentenceIndex]?.sources.some(
+                    (source) =>
+                      source.inputSeq === other.inputSeq && source.evidenceId === other.evidenceId,
+                  ),
+                )
+              )
+            })
+          )) ||
+        !generated.sentenceIndexes.some((sentenceIndex) =>
+          group.sentences[sentenceIndex]?.sources.some(
+            (source) =>
+              source.inputSeq === coverage.inputSeq && source.evidenceId === coverage.evidenceId,
+          ),
+        )
+      )
+        throw new Error("invalid_fact_coverage")
+      const stored = facts.slice(-group.facts.length)[index]
+      return stored?.citationIds.some((id) => {
+        const citation = citations.find((item) => item.id === id)
+        const span = spans.find((item) => item.id === citation?.sourceSpanId)
+        return (
+          span?.inputSeq === coverage.inputSeq &&
+          normalize(span.quote) === normalize(sourceFact.quote)
+        )
+      })
+        ? stored.id
+        : undefined
+    })
+    if (mapped.some((id) => !id)) throw new Error("invalid_fact_coverage")
+    if (!candidate.announcementFacts) continue
+    const originalIndex = candidate.announcementFacts.indexOf(sourceFact)
+    const list = coverageBySeq.get(coverage.inputSeq) ?? []
+    if (originalIndex < 0 || list.some((item) => item.factIndex === originalIndex))
+      throw new Error("invalid_fact_coverage")
+    list.push({ factIndex: originalIndex, storyFactIds: mapped as string[] })
+    coverageBySeq.set(coverage.inputSeq, list)
+  }
+  for (const [seq, announcementCoverage] of coverageBySeq) {
+    const member = members.get(seq)
+    if (!member) throw new Error("invalid_fact_coverage")
+    const updatedIndexes = new Set(announcementCoverage.map((item) => item.factIndex))
+    members.set(seq, {
+      ...member,
+      announcementCoverage: [
+        ...(member.announcementCoverage ?? []).filter(
+          (item) => !updatedIndexes.has(item.factIndex),
+        ),
+        ...announcementCoverage,
+      ],
+    })
   }
 }
 
@@ -1102,6 +1247,7 @@ ${input.mode === "same_event" ? "只把确实同一事件的多来源材料分�
 新建 Story 指令：\n${input.action.createPrompt}\n更新既有 Story 指令：\n${input.action.updatePrompt || input.action.createPrompt}
 新建 group 至少引用两份仍有独立信息贡献的候选，不能用不同URL的同源事实转载冒充独立来源；至少两个不同 inputSeq，且 retainedSentenceIds、retainedFactIds 必须为空。更新既有 Story 时，group 描述目标 current revision：retainedSentenceIds 和 retainedFactIds 只列仍然有效、需要逐字保留的既有对象；被反驳、修正或不再成立的旧对象不要列入。没有明确新增更正、限制或反证时，逐字保留仍有效的旧句段和事实及原有来源。保留 fact 时必须同时保留其引用句段和全部依赖 fact。新增 fact 的 dependsOnFactIndexes 指向本组新增 facts，dependsOnRetainedFactIds 指向本组明确保留的既有 facts；inference 至少依赖其中一种 fact。既有成员和原文证据目录仍由服务端保留，因此 group 可以只引用一条新增候选材料。
 sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId，绝不能输出 quote、citationId、fragmentId 或 sourceSpanId。服务端会从该 inputSeq 的 evidenceId 精确还原原文并验证它们。facts 的 sentenceIndexes 指向本组新增 sentences，下标从 0 开始。
+factCoverage 逐项声明候选 facts 的 evidenceId 已完整保留在哪些新增 facts 下标中；每项必须有相同材料和 evidenceId 的引用，保持事实类型；仅允许将 fact 保守降为 source_claim，共同事实若有另一篇已认可的 fact 和对应引用支持，可沿用 fact；不能把独有来源主张或推断提升为事实。共同事实可合并，但不能遗漏各篇独有事实、数字或限制。同一公告的融资与同时发布的产品已由服务端验证关联，可综合成一条。要替代完整原文，必须覆盖该候选的每个 evidenceId；未覆盖材料仍会独立显示。无覆盖声明时输出空数组。
 候选的 quoteOnly=true 表示该材料禁止改写：引用它的 sentence.text 必须逐字等于该 sentence 的每个 evidenceId 对应原文；对应 fact.text 也必须逐字等于引用 sentence，且不得使用 inference。无法满足时不要输出该 group。
 候选材料：\n${JSON.stringify(
     input.candidates.map((candidate) => ({
@@ -1145,8 +1291,24 @@ sources 每项只能输出候选的 inputSeq 与对应 facts 中的 evidenceId�
   )}`
 }
 
-// CLI 的输出约束与服务端校验必须来自同一份 Zod 定义，避免模型只看到无元素类型的数组。
-const storyModelJsonSchema = z.toJSONSchema(storyModelOutputSchema)
+// 新的逐事实请求必须携带覆盖数组；共享请求仍使用原片段契约，历史缓存保持可读。
+const storyGroupSchema = storyModelOutputSchema.shape.groups.element
+export const sharedStoryModelOutputSchema = z
+  .object({
+    groups: z.array(storyGroupSchema.omit({ factCoverage: true })).max(20),
+  })
+  .strict()
+const storyModelJsonSchema = z.toJSONSchema(
+  z
+    .object({
+      groups: z
+        .array(
+          storyGroupSchema.extend({ factCoverage: storyGroupSchema.shape.factCoverage.unwrap() }),
+        )
+        .max(20),
+    })
+    .strict(),
+)
 
 function fingerprint(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")

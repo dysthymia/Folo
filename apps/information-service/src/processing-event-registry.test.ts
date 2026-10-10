@@ -1028,3 +1028,58 @@ it("分析教程只有指定已确认片段才可贡献，旧全篇角色和背�
     ]),
   ).toEqual([])
 })
+
+// 已发布缓存也要刷新可证实的融资身份，同时保留原提及 ID 和人工关系边界。
+it("旧融资关系只刷新派生身份，不重算决定或重复创建提及", () => {
+  const f = fixture()
+  const text = "Arena 完成 2 亿美元 B 轮融资，估值 31 亿美元。"
+  const event: EventIdentity = {
+    kind: "event",
+    subject: { value: "Arena", quote: text },
+    action: { value: "transaction", quote: text },
+    object: { value: "Arena B 轮融资", quote: text },
+    version: null,
+    round: null,
+    anchor: null,
+  }
+  const first = save(f, "funding", event, { text })
+  const row = f.db
+    .prepare("SELECT member_key,body FROM processing_event_members WHERE input_seq=?")
+    .get(first.input.seq)!
+  const member = JSON.parse(String(row.body)) as { mentionId: string }
+  f.db
+    .prepare("UPDATE processing_event_members SET identity_key=? WHERE member_key=?")
+    .run(
+      JSON.stringify(["arena", "transaction", "arena b 轮融资", null, null, null]),
+      String(row.member_key),
+    )
+  const result = f.registry.publish(first.input, first.decision, first.decisionId)
+  expect(result.affectedInputSeqs).toEqual([first.input.seq])
+  expect(f.registry.entryEvents(first.input)).toHaveLength(1)
+  expect(f.registry.entryEvents(first.input)[0]!.membership.mentionId).toBe(member.mentionId)
+  expect(f.registry.entryEvents(first.input)[0]!.membership.state).toBe("confirmed")
+  expect(
+    f.registry.publish(first.input, first.decision, first.decisionId).affectedInputSeqs,
+  ).toEqual([])
+})
+
+it("未知估值不能桥接两篇已知估值冲突的融资报道", () => {
+  const f = fixture()
+  const funding = (text: string): EventIdentity => ({
+    kind: "event",
+    subject: { value: "Arena", quote: text },
+    action: { value: "transaction", quote: text },
+    object: { value: "Arena B 轮融资", quote: text },
+    version: null,
+    round: null,
+    anchor: null,
+  })
+  const texts = [
+    "Arena 完成 2 亿美元 B 轮融资。",
+    "Arena 完成 2 亿美元 B 轮融资，估值 31 亿美元。",
+    "Arena 完成 2 亿美元 B 轮融资，估值 35 亿美元。",
+  ]
+  const members = texts.map((text, index) => save(f, `valuation-${index}`, funding(text), { text }))
+  expect(members[1]!.eventId).toBe(members[0]!.eventId)
+  expect(members[2]!.eventId).not.toBe(members[0]!.eventId)
+})
