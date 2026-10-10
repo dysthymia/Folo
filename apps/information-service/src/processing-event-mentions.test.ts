@@ -360,7 +360,7 @@ describe("并列多事件的显式逐事实归属", () => {
     expect(factsForEvent([legacy], semantic, text, 0)).toEqual([])
     expect(factsForEvent(facts, semantic, `${text}\n${original}`, 0)).toEqual([])
   })
-  it("wire绑定事实目录和提及数组，同片段混写/错序/越界拒绝，落盘保留序号", () => {
+  it("请求按证据计算归属和最终提及顺序，持久化继续拒绝错误归属", () => {
     const mentions = [
       { identity, role: "reports" as const, isPrimary: false },
       { identity: secondSelection, role: "reports" as const, isPrimary: false },
@@ -380,17 +380,17 @@ describe("并列多事件的显式逐事实归属", () => {
     }
     const schema = createEntryModelSelectionSchema("entry", evidence, ["topic:ai"])
     expect(schema.safeParse(selected).success).toBe(true)
+    // 旧模型给出的错序/越界序号不再决定归属，解析时按证据重新计算。
+    for (const eventMentionIndex of [1, 2])
+      expect(
+        schema.parse({ ...selected, facts: [{ ...selectedFacts[0], eventMentionIndex }] }).facts[0]
+          ?.eventMentionIndex,
+      ).toBe(0)
     expect(
-      schema.safeParse({ ...selected, facts: [{ ...selectedFacts[0], eventMentionIndex: 1 }] })
-        .success,
-    ).toBe(false)
-    expect(
-      schema.safeParse({ ...selected, facts: [{ ...selectedFacts[0], eventMentionIndex: 2 }] })
-        .success,
-    ).toBe(false)
-    expect(schema.safeParse({ ...selected, eventMentions: [...mentions].reverse() }).success).toBe(
-      false,
-    )
+      schema
+        .parse({ ...selected, eventMentions: [...mentions].reverse() })
+        .facts.map((fact) => fact.eventMentionIndex),
+    ).toEqual([1, 0])
     expect(validateFactEventAssignments({ ...semantic, facts })).toBe(true)
     expect(
       entryModelOutputSchema.safeParse({ ...base, ...semanticFields, ...semantic, facts }).success,
