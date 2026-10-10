@@ -1,4 +1,9 @@
-import type { RuleSet, SemanticTagId, TagAssessment } from "@follow/information-core"
+import type {
+  AttentionInterest,
+  RuleSet,
+  SemanticTagId,
+  TagAssessment,
+} from "@follow/information-core"
 import { compileInstructions } from "@follow/information-core"
 import { describe, expect, it } from "vitest"
 
@@ -79,6 +84,127 @@ function decision(quote = "Acme 发布了有据实质变化"): ProcessingDecisio
 }
 
 describe("私人重点关注与证据期限", () => {
+  // 截图中的地缘攻击虽在 Blockchain 订阅出现，也不能绕过文章级个人相关性。
+  it("宽泛关注规则和来源分类不能把无关地缘攻击升级为关注", () => {
+    const settings = config()
+    settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = ["blockchain", "ai", "personal_growth", "macro"]
+    settings.rules = [
+      {
+        id: "security",
+        ownerId: "owner",
+        name: "安全事件",
+        enabled: true,
+        order: 0,
+        version: 1,
+        executionLocation: "processing_service",
+        when: { all: true },
+        actions: [{ type: "attention", level: "urgent", reason: "安全事件" }],
+      },
+    ]
+    const item = decision("胡塞武装袭击沙特机场，飞机受损")
+    item.context.category = "Blockchain"
+    item.semanticProfile!.entities = []
+    item.semanticProfile!.assessments = [assessment("event:security_incident")]
+    expect(processingAttention({ config: settings, decision: item, now }).level).toBe("none")
+  })
+
+  it.each<[AttentionInterest, SemanticTagId]>([
+    ["blockchain", "topic:blockchain"],
+    ["ai", "topic:ai"],
+    ["personal_growth", "topic:personal_growth"],
+  ])("%s 的有据实质信息可重要关注，低置信或未知领域不能触发", (interest, topic) => {
+    const settings = config()
+    settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = [interest]
+    const item = decision("原文给出可核对的领域方法及使用条件")
+    item.semanticProfile!.assessments = [assessment(topic), assessment("form:tutorial")]
+    expect(processingAttention({ config: settings, decision: item, now }).level).toBe("important")
+    for (const patch of [
+      { state: "unknown" as const },
+      { confidence: 0.7 },
+      { definitionVersion: 99 },
+      { evidenceIds: ["missing"] },
+    ]) {
+      item.semanticProfile!.assessments = [assessment(topic, patch), assessment("form:tutorial")]
+      expect(processingAttention({ config: settings, decision: item, now }).level).toBe("none")
+    }
+  })
+
+  // 领域正证与风险引用直接相连时，仍保留必要的紧急提示。
+  it("区块链领域内直接有据的安全事故可以紧急关注", () => {
+    const settings = config()
+    settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = ["blockchain"]
+    const item = decision("某 DeFi 协议遭攻击，原文确认资金被盗")
+    item.semanticProfile!.assessments = [
+      assessment("topic:defi"),
+      assessment("event:security_incident"),
+    ]
+    expect(processingAttention({ config: settings, decision: item, now }).level).toBe("urgent")
+    settings.global.attention!.interests = []
+    expect(processingAttention({ config: settings, decision: item, now }).level).toBe("none")
+  })
+
+  it("宏观市场相关性只能支持重要关注，不单独证明紧急风险", () => {
+    const settings = config()
+    settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = ["macro"]
+    const item = decision("央行利率变化与地缘安全消息")
+    item.semanticProfile!.assessments = [
+      assessment("event:macro_change"),
+      assessment("event:security_incident"),
+    ]
+    expect(processingAttention({ config: settings, decision: item, now })).toMatchObject({
+      level: "important",
+      reasons: expect.arrayContaining(["与你的关注领域相关：投资交易的宏观与市场信息"]),
+    })
+  })
+
+  it("AI 方法和另一段安全事件不能共用紧急理由", () => {
+    const settings = config()
+    settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = ["ai"]
+    settings.rules = [
+      {
+        id: "security",
+        ownerId: "owner",
+        name: "安全事件",
+        enabled: true,
+        order: 0,
+        version: 1,
+        executionLocation: "processing_service",
+        when: {
+          anyOf: [
+            {
+              allOf: [
+                {
+                  field: "entry_tag",
+                  operator: "contains_any",
+                  value: ["event:security_incident"],
+                  minConfidence: 0.9,
+                },
+              ],
+            },
+          ],
+        },
+        actions: [{ type: "attention", level: "urgent", reason: "军事安全事件" }],
+      },
+    ]
+    const item = decision("AI 工具教程与可核对的操作步骤")
+    item.semanticProfile!.evidence.E2 = "另一条消息是机场受到攻击"
+    item.semanticProfile!.assessments = [
+      assessment("topic:ai"),
+      assessment("form:tutorial"),
+      assessment("event:security_incident", { evidenceIds: ["E2"] }),
+    ]
+    const result = processingAttention({ config: settings, decision: item, now })
+    expect(result.level).toBe("important")
+    expect(result.reasons).not.toContain("军事安全事件")
+    expect(result.reasons).not.toContain("有原文证据支持的安全事件")
+    // 个人相关性只影响注意力投影，不改原始安全标签。
+    expect(item.semanticProfile!.assessments[2]!.state).toBe("present")
+  })
   it("仅关注有据实体的实质变化，不推测持仓或改变原文policy", () => {
     const item = decision()
     expect(processingAttention({ config: config(), decision: item, now })).toMatchObject({
@@ -140,6 +266,7 @@ describe("私人重点关注与证据期限", () => {
   it("attention规则独立于AI和presentation，urgent请求没有期限证据时降为important", () => {
     const settings = config()
     settings.global.attention!.watchlist = []
+    settings.global.attention!.interests = ["ai"]
     settings.rules = [
       {
         id: "focus",
@@ -154,7 +281,7 @@ describe("私人重点关注与证据期限", () => {
       },
     ]
     const item = decision()
-    item.semanticProfile!.assessments = [assessment("form:tutorial")]
+    item.semanticProfile!.assessments = [assessment("topic:ai"), assessment("form:tutorial")]
     const result = processingAttention({ config: settings, decision: item, now })
     expect(result.level).toBe("important")
     expect(result.reasons).toContain("关注具体可用经验")
@@ -164,7 +291,10 @@ describe("私人重点关注与证据期限", () => {
       aggregates: [],
     })
     settings.rules[0]!.actions = [{ type: "attention", level: "important", reason: "按重要关注" }]
-    item.semanticProfile!.assessments = [assessment("event:security_incident")]
+    item.semanticProfile!.assessments = [
+      assessment("topic:ai"),
+      assessment("event:security_incident"),
+    ]
     expect(processingAttention({ config: settings, decision: item, now }).level).toBe("important")
     settings.global.attention!.enabled = false
     expect(processingAttention({ config: settings, decision: item, now }).level).toBe("none")

@@ -169,6 +169,7 @@ export function convergedReadingRules(previous: RuleSet): RuleSet {
         : previous.global.markdown + extra,
       attention: previous.global.attention ?? {
         enabled: true,
+        interests: ["blockchain", "ai", "personal_growth", "macro"],
         watchlist: [],
         nearDeadlineHours: 48,
       },

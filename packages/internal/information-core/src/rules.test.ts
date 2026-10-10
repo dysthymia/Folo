@@ -48,6 +48,20 @@ const rules = (...items: AutomationRule[]): RuleSet => ({
 })
 
 describe("重点关注契约", () => {
+  // 私人领域选择可独立保存；重复或未定义领域不能被悄悄当作全局关注。
+  it("支持私人关注领域并拒绝重复和未知领域", () => {
+    const config = rules()
+    config.global.attention = { enabled: true, watchlist: [], interests: ["ai", "blockchain"] }
+    expect(ruleSetSchema.safeParse(config).success).toBe(true)
+    config.global.attention.interests = ["ai", "ai"]
+    expect(ruleSetSchema.safeParse(config).success).toBe(false)
+    expect(
+      ruleSetSchema.safeParse({
+        ...config,
+        global: { ...config.global, attention: { ...config.global.attention, interests: ["all"] } },
+      }).success,
+    ).toBe(false)
+  })
   it("关注清单默认为空且可选，不影响AI及presentation；非法重复身份不能保存", () => {
     const config = rules(
       rule("focus", 0, [{ type: "attention", level: "important", reason: "关注有据变化" }]),

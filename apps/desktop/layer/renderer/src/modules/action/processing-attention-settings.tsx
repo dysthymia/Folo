@@ -1,4 +1,5 @@
 import type { AttentionSettings } from "@follow/information-core"
+import { attentionInterestIds } from "@follow/information-core"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -33,6 +34,32 @@ export function ProcessingAttentionSettings({
         />
         {t("processing.attention.enabled")}
       </label>
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium">{t("processing.attention.interests")}</legend>
+        <p className="text-xs text-text-secondary">{t("processing.attention.interests_hint")}</p>
+        {attentionInterestIds.map((interest) => (
+          <label
+            key={interest}
+            data-attention-interest={interest}
+            className="flex items-center gap-2 text-sm"
+          >
+            <input
+              type="checkbox"
+              checked={settings.interests?.includes(interest) ?? false}
+              onChange={(event) =>
+                // 空选择仅按明确关注对象判断，不把全部来源默认为相关。
+                onChange({
+                  ...settings,
+                  interests: event.target.checked
+                    ? [...(settings.interests ?? []), interest]
+                    : (settings.interests?.filter((item) => item !== interest) ?? []),
+                })
+              }
+            />
+            {t(`processing.attention.interest_${interest}`)}
+          </label>
+        ))}
+      </fieldset>
       <label className="block text-sm">
         {t("processing.attention.near_hours")}
         <input

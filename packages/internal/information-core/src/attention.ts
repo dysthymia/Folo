@@ -1,9 +1,20 @@
 import { z } from "zod"
 
+// 关注领域是用户偏好，独立于订阅分类及客观语义标签。
+export const attentionInterestIds = ["blockchain", "ai", "personal_growth", "macro"] as const
+export type AttentionInterest = (typeof attentionInterestIds)[number]
+
 // 关注清单完全来自用户配置，别名也必须显式输入；空清单不会推测用户持仓。
 export const attentionSettingsSchema = z
   .object({
     enabled: z.boolean(),
+    interests: z
+      .array(z.enum(attentionInterestIds))
+      .max(attentionInterestIds.length)
+      .refine((items) => new Set(items).size === items.length, {
+        message: "duplicate_attention_interest",
+      })
+      .optional(),
     watchlist: z
       .array(
         z

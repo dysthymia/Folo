@@ -861,6 +861,7 @@ it("公共设置激活关注配置保留输入绑定与客观指纹，旧正文�
   const globalVersion = repository.effective().config!.global.version
   const attention: AttentionSettings = {
     enabled: true,
+    interests: ["blockchain", "ai", "personal_growth", "macro"],
     watchlist: [{ id: "watch", name: "OpenAI", aliases: ["Open AI"] }],
     nearDeadlineHours: 24,
   }

@@ -1,7 +1,9 @@
 import type {
+  AttentionInterest,
   EntryAttention,
   RuleSet,
   SemanticEntity,
+  SemanticTagId,
   TagAssessment,
 } from "@follow/information-core"
 import { matchConditions, semanticEntityId, semanticTagDefinition } from "@follow/information-core"
@@ -29,6 +31,18 @@ const substantiveTags = new Set([
   "signal:concrete_experience",
 ])
 const normalize = (value: string) => value.normalize("NFKC").trim().toLowerCase()
+const interestTags: Record<AttentionInterest, readonly SemanticTagId[]> = {
+  blockchain: ["topic:blockchain", "topic:defi", "topic:blockchain_infrastructure"],
+  ai: ["topic:ai"],
+  personal_growth: ["topic:personal_growth"],
+  macro: ["event:macro_change"],
+}
+const interestNames: Record<AttentionInterest, string> = {
+  blockchain: "区块链投资交易",
+  ai: "AI",
+  personal_growth: "个人成长",
+  macro: "投资交易的宏观与市场信息",
+}
 const hasEvidence = (ids: readonly string[], evidence: Record<string, string>) =>
   ids.length > 0 && ids.every((id) => Boolean(evidence[id]?.trim()))
 
@@ -78,10 +92,37 @@ export function processingAttention(options: {
     ),
   )
   const watchEvidence = new Set(matchedEntities.flatMap((entity) => entity.evidenceIds))
-  // 背景提到关注对象，不等于另一对象的事故或期限与用户相关；只能用明确共有证据。
-  const relatedEvidence = (ids: readonly string[]) =>
-    action !== undefined || ids.some((id) => watchEvidence.has(id))
-  const context = { ...decision.context, entry_tag: [...assessments] }
+  const interests = config.global.attention?.interests ?? []
+  const matchedInterests = interests.filter((interest) =>
+    present.some((tag) => interestTags[interest].includes(tag.tagId)),
+  )
+  const interestEvidence = present
+    .filter((tag) =>
+      matchedInterests.some((interest) => interestTags[interest].includes(tag.tagId)),
+    )
+    .flatMap((tag) => tag.evidenceIds)
+  const relevanceEvidence = new Set([...watchEvidence, ...interestEvidence])
+  // 宏观市场关联只支持重要关注，不能把地缘攻击自动提升为用户资产或工具的紧急风险。
+  const urgentEvidence = new Set([
+    ...watchEvidence,
+    ...present
+      .filter((tag) =>
+        matchedInterests.some(
+          (interest) => interest !== "macro" && interestTags[interest].includes(tag.tagId),
+        ),
+      )
+      .flatMap((tag) => tag.evidenceIds),
+  ])
+  // 来源分类和关注动作均不能证明个人相关性；事故、方法或期限必须与关注正证共有证据。
+  const relatedEvidence = (ids: readonly string[]) => ids.some((id) => relevanceEvidence.has(id))
+  const context = {
+    ...decision.context,
+    entry_tag: assessments.map((tag) =>
+      tag.state === "present" && !relatedEvidence(tag.evidenceIds)
+        ? { ...tag, state: "unknown" as const, confidence: null }
+        : tag,
+    ),
+  }
   // 仍按显式顺序选择首条匹配关注规则；未知条件不能当作匹配。
   const matchedRule = [...config.rules]
     .filter((rule) => rule.enabled)
@@ -99,11 +140,11 @@ export function processingAttention(options: {
       (contribution.confidence ?? 0) >= 0.9 &&
       hasEvidence(contribution.evidenceIds, evidence) &&
       relatedEvidence(contribution.evidenceIds))
-  const related = matchedWatches.length > 0 || action !== undefined
+  const related = matchedWatches.length > 0 || matchedInterests.length > 0
   const now = options.now ?? Date.now()
   const nearDeadline = deadlines.some(
     (deadline) =>
-      relatedEvidence([deadline.evidenceId]) &&
+      urgentEvidence.has(deadline.evidenceId) &&
       deadline.status === "known" &&
       deadline.at !== null &&
       Date.parse(deadline.at) > now &&
@@ -111,7 +152,9 @@ export function processingAttention(options: {
         (config.global.attention?.nearDeadlineHours ?? 48) * 3_600_000,
   )
   const security = present.some(
-    (tag) => tag.tagId === "event:security_incident" && relatedEvidence(tag.evidenceIds),
+    (tag) =>
+      tag.tagId === "event:security_incident" &&
+      tag.evidenceIds.some((id) => urgentEvidence.has(id)),
   )
   if (related && (security || nearDeadline) && (action === undefined || action.level === "urgent"))
     result.level = "urgent"
@@ -119,11 +162,15 @@ export function processingAttention(options: {
   if (result.level !== "none") {
     if (matchedWatches.length)
       result.reasons.push(`涉及关注清单：${matchedWatches.map((watch) => watch.name).join("、")}`)
+    if (matchedInterests.length)
+      result.reasons.push(
+        `与你的关注领域相关：${matchedInterests.map((interest) => interestNames[interest]).join("、")}`,
+      )
     if (action?.type === "attention") result.reasons.push(action.reason)
     if (security) result.reasons.push("有原文证据支持的安全事件")
     if (nearDeadline) result.reasons.push("原文明确的截止时间已临近")
     if (result.level === "important" && action?.type === "attention" && action.level === "urgent")
-      result.reasons.push("本条尚无安全事故或可计算近期限支撑，按重要关注显示")
+      result.reasons.push("本条尚无与你直接相关的安全风险或可计算近期限支撑，按重要关注显示")
     if (result.level === "important") result.reasons.push("存在有据的实质变化或可用贡献")
   }
   return result
