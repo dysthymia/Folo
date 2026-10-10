@@ -18,7 +18,7 @@ import {
 import { useSemanticDedupeProcessor } from "@follow/store/entry/semantic-dedupe"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
-import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
+import { dedupeEntryIdsByTitle } from "@follow/store/entry/utils"
 import { useFolderFeedsByFeedId } from "@follow/store/subscription/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { useWhoami } from "@follow/store/user/hooks"
@@ -120,9 +120,7 @@ const useRemoteEntries = (
   const refetch = useCallback(async () => void query.refetch(), [query])
   const fetchNextPage = useCallback(async () => void query.fetchNextPage(), [query])
 
-  if (!query.data || query.isLoading) {
-    return fallbackReturn
-  }
+  // 无数据或请求失败也保留真实状态与重试入口，避免永久加载暂停滚动已读。
   return {
     entriesIds: query.entriesIds,
     hasNext: query.hasNextPage,
@@ -140,7 +138,7 @@ const useRemoteEntries = (
     queryKey: query.queryKey,
     loadedEntryRefs,
     // 使用未过滤的原始响应页尾，AI 隐藏条目不能缩短已覆盖的时间区间。
-    paginationBoundary: query.data.pages.at(-1)?.data?.at(-1)?.entries.publishedAt,
+    paginationBoundary: query.data?.pages.at(-1)?.data?.at(-1)?.entries.publishedAt,
   }
 }
 
@@ -404,16 +402,18 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
     type: remoteQuery.isReady ? ("remote" as const) : ("local" as const),
     refetch: useCallback(() => {
-      const promise = query.refetch()
+      // 本地缓存只负责首屏展示；刷新始终重试远程查询，恢复完整分页。
+      const promise = remoteQuery.refetch()
       unreadSyncService.resetFromRemote()
       return promise
-    }, [query]),
+    }, [remoteQuery]),
     entriesIds: entryIds,
     paginationBoundary: remoteQuery.isReady ? remoteQuery.paginationBoundary : undefined,
     groupedCounts,
     isFetching: remoteQuery.isFetching,
     isFetchingNextPage: remoteQuery.isFetchingNextPage,
     isLoading: remoteQuery.isLoading,
+    error: remoteQuery.error,
   }
 }
 
