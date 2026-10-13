@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format:check": "prettier --check src *.ts *.json",
-    "build:web": "pnpm --filter Folo exec cross-env WEB_BUILD=1 vite build --config vite.information.config.ts --base /information-static/ --outDir ../../out/information-web"
+    "build:web": "pnpm --filter Folo exec cross-env WEB_BUILD=1 vite build --config vite.information.config.ts --base /information-static/ --outDir ../../out/information-web",
+    "backup:local": "python3 scripts/backup-database.py",
+    "backup:prune": "python3 scripts/backup-database.py --prune-only"
   },
   "dependencies": {
     "@follow/information-core": "workspace:*",

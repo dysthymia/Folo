@@ -55,3 +55,7 @@ apps/desktop/resources/cli
 
 # Mobile local E2E build artifacts
 apps/mobile/build-*.tar.gz
+
+# Python 缓存（本机信息服务的备份脚本会生成）
+__pycache__/
+*.pyc
