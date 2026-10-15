@@ -143,6 +143,34 @@ describe("information HTTP server", () => {
     expect(JSON.parse(rejected.body)).toEqual({ error: "authorization" })
   })
 
+  it("旧前端的读写请求在鉴权和修改前被拒绝，响应说明当前发布号", async () => {
+    vi.stubEnv("FOLO_INFORMATION_RELEASE_ID", "new-release")
+    try {
+      for (const method of ["POST", "PUT"]) {
+        const result = await request("/information/v1/rules", {
+          method,
+          headers: { ...signedHeaders, "X-Folo-Local-Release": "old-release" },
+          body: {},
+        })
+        expect(result.status).toBe(409)
+        expect(result.headers["x-folo-local-release"]).toBe("new-release")
+        expect(JSON.parse(result.body)).toEqual({ error: "local_release_mismatch" })
+      }
+      expect(authenticate).not.toHaveBeenCalled()
+      expect(store.automation.draft().revision).toBe(0)
+      const page = await request("/information")
+      expect(page.status).toBe(200)
+      expect(page.headers["x-folo-local-release"]).toBe("new-release")
+      const current = await request("/information/v1/automation/editor", {
+        method: "POST",
+        headers: { ...signedHeaders, "X-Folo-Read": "1", "X-Folo-Local-Release": "new-release" },
+      })
+      expect(current.status).toBe(200)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it("HTTP 同域只读 POST 保留 Origin 和新凭据检查，不能携带写入内容", async () => {
     const headers = { ...signedHeaders, "X-Folo-Read": "1" }
     const result = await request("/information/v1/configuration", { method: "POST", headers })

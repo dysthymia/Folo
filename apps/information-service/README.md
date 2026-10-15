@@ -12,11 +12,12 @@ v3.1 的完整开发范围和逐项状态见 [开发与验收台账](../../docs/
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm --filter @follow/information-service build
-pnpm --filter @follow/information-service build:web
-pnpm --filter Folo build:web
+# 构建后台、主站和信息页，校验同一份源码与三份文件摘要，再一起安装。
+pnpm --filter @follow/information-service deploy:local
 
-# 推荐：安装或更新 macOS 登录后常驻服务（等待当前任务结束再执行）。
+# 只准备完整发布；首次拆分安装需等旧版任务结束，后续可在规则运行中安装。
+pnpm --filter @follow/information-service build:local
+python3 apps/information-service/scripts/install-launch-agent.py --check
 python3 apps/information-service/scripts/install-launch-agent.py
 
 # 临时调试可使用 serve；不要与已安装的常驻 worker 同时运行。
@@ -54,7 +55,7 @@ pnpm --filter @follow/information-service start members --source 'list/<id>'
 
 以下描述是旧 P0 调试队列的口径；正式自动化由 Actions 计划驱动，智能阅读按固定快照分页提供全量范围，不受此调试快照条数限制。
 
-`scan` / `process` 只入队；`serve` 或 `run-once` 执行队列，二者不能同时作为 worker。扫描默认3页、每页5条并取详情，不代表历史全量完成。`status` 返回最近100项任务；Web最多展示最近200条输入和100条结果。分页字段 `coverage` 区分 `pending`、`budget`、`end`、`timestamp_boundary`，`succeeded` 只代表本次作业正常结束。
+`scan` / `process` 只入队；安装版的 `serve-web` 负责网页/API，独立的 `worker` 执行队列。临时调试的 `serve` 同时包含两种角色，`run-once` 执行一次；任何时候只有一个进程能够持有 worker 锁。扫描默认3页、每页5条并取详情，不代表历史全量完成。`status` 返回最近100项任务；Web最多展示最近200条输入和100条结果。分页字段 `coverage` 区分 `pending`、`budget`、`end`、`timestamp_boundary`，`succeeded` 只代表本次作业正常结束。
 
 现有上游分页用 `publishedAfter` 表示继续读取更早条目。没有可验证的 ID 次序游标，时间戳密集边界、API保留范围、迟到条目和更新覆盖都必须实测；不能把短页当作全部历史已覆盖的证明。适配器在游标不前进或页面逆序时失败并保留断点。检测到多条相同边界时间时保留覆盖缺口标记，不使用减1毫秒跳过数据。
 
@@ -119,9 +120,11 @@ ProxyPassReverse /information http://host.docker.internal:2240/information
 
 ## macOS 常驻部署
 
-安装器将已构建的单文件后台和 Web 产物复制到 `~/Library/Application Support/FoloLocal/information-runtime`，由 `is.folo.local.information` LaunchAgent 管理。旧产物保留在相邻的 `information-runtime-previous`；数据库仍在原数据目录。后台不依赖外置工作区挂载，修改源码后须重新 build、build:web（涉及 UI 时）并运行安装器。
+安装器将后台、主站和信息页作为完整发布复制到 `~/Library/Application Support/FoloLocal/information-releases/<发布号-文件摘要>`，`information-runtime` 原子指向当前版本，`information-runtime-previous` 指向上一版。网页/API 由 `is.folo.local.information` 管理，自动化执行器由 `is.folo.local.information.worker` 管理；二者通过同一个 WAL 数据库交换任务和结果。更新只重启网页进程；仅界面有变化时，执行器无需重启。后台代码有变化时，执行器保持原 PID 和完整旧版代码，完成当前扫描作业或规则批次后自行退出，再由 LaunchAgent 启动新版。连续发布也不会删除仍在使用的旧目录；历史目录需在确认不再使用后人工清理。首次从旧单进程迁移需等待任务空闲；手工选材研究仍在网页进程执行，其运行中暂不重启网页。数据库仍在原数据目录，后台不依赖外置工作区挂载，更新统一使用 `deploy:local`。
 
-日志：`~/Library/Logs/FoloInformation/service.log` 和 `service.error.log`。这是登录用户级常驻，退出账号或休眠时不保证继续工作；安装器不自行创建规则或启用计划；服务会执行用户已保存、发布并启用的处理计划。安装器只继承已有代理及运行目录，不复制认证密钥。千问模式由每次运行的独立 profile 提供配置；OpenAI 模式保留本机 Codex 登录，没有自动备用模型。
+`build:local` 在构建前后计算源码内容摘要，包含未提交源码、新文件和本机 Vite 环境文件；三份构建全部成功后才写入 `dist/local-release.json`。安装器要求清单、当前源码和每个产物文件一致，并校验复制后的文件。缺失前端、源码变化、单独重建或直接修改 bundle 都会在停服务前被拒绝；`--check` 只核对发布，不操作服务。各个原有 `build` 命令仍可用于开发，但不能独立形成可安装的发布。构建与安装共用文件锁，避免并发发布混用目录。
+
+日志：`~/Library/Logs/FoloInformation/service.log`、`service.error.log`；独立规则执行器使用同目录的 `worker.log`、`worker.error.log`。这是登录用户级常驻，退出账号或休眠时不保证继续工作；安装器不自行创建规则或启用计划；服务会执行用户已保存、发布并启用的处理计划。安装器只继承已有代理及运行目录，不复制认证密钥。千问模式由每次运行的独立 profile 提供配置；OpenAI 模式保留本机 Codex 登录，没有自动备用模型。
 
 ```sh
 # 检查服务；停止时只卸载此服务，保留部署产物和数据库。

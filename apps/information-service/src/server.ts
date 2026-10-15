@@ -83,6 +83,14 @@ export function createInformationServer(
     const url = new URL(request.url ?? "/", origin)
     response.setHeader("X-Content-Type-Options", "nosniff")
     response.setHeader("Referrer-Policy", "no-referrer")
+    // 统一发布号供旧标签页核验；版本不符时在鉴权或写入之前拒绝请求。
+    const releaseId = process.env.FOLO_INFORMATION_RELEASE_ID
+    if (releaseId) {
+      response.setHeader("X-Folo-Local-Release", releaseId)
+      const clientRelease = request.headers["x-folo-local-release"]
+      if (clientRelease !== undefined && clientRelease !== releaseId)
+        return json(response, 409, { error: "local_release_mismatch" })
+    }
     if (
       url.pathname === "/information/api/local-read-session" ||
       url.pathname === "/information/api/local-read-session/revoke"

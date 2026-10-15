@@ -17,7 +17,7 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/is.folo.local.dev-web.plis
 
 ## 生产更新与回退
 
-使用 `pnpm --filter @follow/information-service backup:local -- --name before-<功能>` 备份业务数据库后，统一运行 `pnpm --filter @follow/information-service deploy:local`，完整构建后台、主站和信息页再一起安装。安装器核对源码及三份产物摘要，拒绝旧文件、局部构建和正在执行的扫描或模型任务，保留上一份部署产物；模型配置和主站授权仍使用数据目录中的私有文件。有任务运行时可以先执行 `build:local`，待任务结束后再运行 `python3 apps/information-service/scripts/install-launch-agent.py`；不要手工覆盖某一个运行产物。
+使用 `pnpm --filter @follow/information-service backup:local -- --name before-<功能>` 备份业务数据库后，统一运行 `pnpm --filter @follow/information-service deploy:local`，完整构建后台、主站和信息页再一起安装。安装器核对源码及三份产物摘要，拒绝旧文件和局部构建，通过原子发布指针保留完整旧版目录。网页与规则执行器使用两个 LaunchAgent；更新只重启网页；仅界面变化时不重启执行器，后台代码变化时执行器完成当前扫描或规则批次后自动加载新版，不取消当前模型调用。首次从旧单进程拆分仍需空闲，手工选材研究运行中也暂不重启网页。模型配置和主站授权仍使用数据目录中的私有文件。可先执行 `build:local`，之后运行 `python3 apps/information-service/scripts/install-launch-agent.py` 安装；不要手工覆盖某一个运行产物。
 
 主站根路径及 `/information` 都由 2240 的生产服务响应。开发时可以运行 2233，但不会自动替换域名上的生产版本。原开发代理配置可恢复到 `ProxyPass / http://host.docker.internal:2233/`，经 Apache 配置校验后平滑重载；不要重建业务库或重置 Codex 模型配置。
 

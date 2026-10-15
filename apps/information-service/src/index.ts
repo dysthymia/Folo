@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process"
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { setTimeout } from "node:timers/promises"
 import { parseArgs } from "node:util"
 
 import { join, resolve } from "pathe"
@@ -21,6 +20,7 @@ import { createInformationServer, verifyWebBuild } from "./server"
 import { errorCode, InformationService, readCredential } from "./service"
 import { Store } from "./store"
 import { createWebAuthenticator } from "./web-auth"
+import { runWorkerLoop, serviceRoles, workerReleaseChanged } from "./worker-lifecycle"
 import { createXApi } from "./x-api"
 import { createXSearchClient } from "./x-client"
 
@@ -153,86 +153,105 @@ async function main() {
       resultsShown: snapshot.results.length,
       jobs: snapshot.jobs,
     })
-  } else if (command === "serve" || command === "run-once") {
-    if (command === "serve") {
+  } else if (["serve", "serve-web", "worker", "run-once"].includes(command)) {
+    const roles = serviceRoles(command)
+    if (roles.web) {
       await verifyWebBuild(webRoot)
       if (mainWebRoot) await verifyWebBuild(mainWebRoot)
     }
-    const unlock = workerLock()
+    const unlock = roles.worker ? workerLock() : () => {}
     const controller = new AbortController()
     const stop = () => controller.abort()
     process.once("SIGTERM", stop)
     process.once("SIGINT", stop)
-    const server =
-      command === "serve"
-        ? createInformationServer(
-            store,
-            webRoot,
-            port,
-            publicOrigin,
-            createWebAuthenticator(store, webCredentialPath),
-            {
-              config: aiConfig,
-              chat: new FoloChat({ store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") }),
-              trial: new ProcessingTrial({ store, aiConfig, runtimeDir: join(dataDir, "runtime") }),
+    const server = roles.web
+      ? createInformationServer(
+          store,
+          webRoot,
+          port,
+          publicOrigin,
+          createWebAuthenticator(store, webCredentialPath),
+          {
+            config: aiConfig,
+            chat: new FoloChat({ store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") }),
+            trial: new ProcessingTrial({ store, aiConfig, runtimeDir: join(dataDir, "runtime") }),
+            signal: controller.signal,
+          },
+          mainWebRoot,
+          [
+            nativeReaderApi({ store, getReader: reader, aiConfig }),
+            // 手工历史选材使用独立研究记录，不进入日常调度或改变原文读态。
+            new ResearchSelectionService({
+              store,
+              aiConfig,
+              runtimeDir: join(dataDir, "runtime"),
+              getReader: reader,
               signal: controller.signal,
-            },
-            mainWebRoot,
-            [
-              nativeReaderApi({ store, getReader: reader, aiConfig }),
-              // 手工历史选材使用独立研究记录，不进入日常调度或改变原文读态。
-              new ResearchSelectionService({
-                store,
-                aiConfig,
-                runtimeDir: join(dataDir, "runtime"),
-                getReader: reader,
-                signal: controller.signal,
-              }),
-              externalApi({ store, configPath: join(dataDir, "external-config.json") }),
-              diagnosticsApi(store, join(dataDir, "runtime", "codex-usage.jsonl")),
-              createXApi({
-                configPath: join(dataDir, "x-config.json"),
-                queries: store.xQueries,
-                client: (config) =>
-                  createXSearchClient({ bearerToken: config.bearerToken!, access: config.access }),
-                saveEntry: (entry) => store.saveEntry(entry),
-                subscribedFoloSource: (postId) => {
-                  // 按已保存的原帖链接身份关联，正文提及 X 或相似标题都不算同一帖子。
-                  return (
-                    store.automation.inputs().find((input) => {
-                      return (
-                        !input.sourceKey.startsWith("x/search/") && xPostId(input.body) === postId
-                      )
-                    })?.sourceKey ?? null
-                  )
-                },
-              }),
-            ],
-          )
-        : null
+            }),
+            externalApi({ store, configPath: join(dataDir, "external-config.json") }),
+            diagnosticsApi(store, join(dataDir, "runtime", "codex-usage.jsonl")),
+            createXApi({
+              configPath: join(dataDir, "x-config.json"),
+              queries: store.xQueries,
+              client: (config) =>
+                createXSearchClient({ bearerToken: config.bearerToken!, access: config.access }),
+              saveEntry: (entry) => store.saveEntry(entry),
+              subscribedFoloSource: (postId) => {
+                // 按已保存的原帖链接身份关联，正文提及 X 或相似标题都不算同一帖子。
+                return (
+                  store.automation.inputs().find((input) => {
+                    return (
+                      !input.sourceKey.startsWith("x/search/") && xPostId(input.body) === postId
+                    )
+                  })?.sourceKey ?? null
+                )
+              },
+            }),
+          ],
+        )
+      : null
     try {
       if (server)
         await new Promise<void>((resolveListen, reject) => {
           server.once("error", reject)
           server.listen(port, "127.0.0.1", resolveListen)
         })
-      store.recover()
-      store.processingState.recover()
-      print({ worker: "ready", ...(server ? { url: `${publicOrigin}/information` } : {}) })
-      do {
-        const job = store.nextJob()
-        if (job) {
-          await service.run(job, controller.signal)
-          print({ jobId: job.id, status: job.status, error: job.error })
-        }
-        const processing = await runProcessingWorker(
-          { store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") },
-          controller.signal,
-        )
-        if (processing) print({ processing })
-        if (command === "run-once" || controller.signal.aborted) break
-        await setTimeout(1000, undefined, { signal: controller.signal }).catch(() => {})
-      } while (!controller.signal.aborted)
+      print({ command, ...(server ? { url: `${publicOrigin}/information` } : {}) })
+      if (roles.worker) {
+        await runWorkerLoop({
+          signal: controller.signal,
+          once: roles.once,
+          recover: () => {
+            store.recover()
+            store.processingState.recover()
+          },
+          runJob: async (signal) => {
+            const job = store.nextJob()
+            if (job) {
+              await service.run(job, signal)
+              print({ jobId: job.id, status: job.status, error: job.error })
+            }
+          },
+          runProcessing: async (signal) => {
+            const processing = await runProcessingWorker(
+              { store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") },
+              signal,
+            )
+            if (processing) print({ processing })
+          },
+          shouldReload: () =>
+            workerReleaseChanged(
+              process.env.FOLO_INFORMATION_RUNTIME_POINTER,
+              process.env.FOLO_INFORMATION_WORKER_RUNTIME,
+            ),
+        })
+      } else {
+        // 独立网页只等待关闭信号，所有后台规则始终由持锁的执行器处理。
+        await new Promise<void>((resolveStop) => {
+          if (controller.signal.aborted) resolveStop()
+          else controller.signal.addEventListener("abort", () => resolveStop(), { once: true })
+        })
+      }
     } finally {
       if (server?.listening)
         await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
