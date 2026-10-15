@@ -25,10 +25,10 @@ export function semanticDefinitionsForIds(ids: readonly string[]) {
   })
 }
 
-export function renderSemanticTagRequirements(ids: readonly string[]) {
+export function renderSemanticTagRequirements(ids: readonly string[], keyed = false) {
   const definitions = semanticDefinitionsForIds(ids)
   if (!definitions.length) return ""
-  return `语义标签评估：逐个返回全部指定 tagId 的 tagAssessments，definitionVersion 必须与定义一致。标签含义不取决于用户偏好、隐藏动作或展示长度。
+  return `语义标签评估：${keyed ? "tagAssessments 使用以指定 tagId 为键的对象，每个标签恰好一个评估；评估内只返回 state、confidence、reason、evidenceIds，定义版本由程序补全。" : "逐个返回全部指定 tagId 的 tagAssessments，definitionVersion 必须与定义一致。"}标签含义不取决于用户偏好、隐藏动作或展示长度。
 state=present 需要明确证据；不存在须以完整已读材料为依据，缺失正文、图片或引用内容必须保留 unknown，不能把未读当作 absent。confidence 是客观自评，不为迎合规则提高置信度。
 必须返回 materialCoverage=complete 或 partial：该字段只说明可供判断的原文材料是否完整，不由标签 unknown 或低置信度决定；缺失图片/正文/影响判断的引用填 partial。
 必须同时返回 substantiveContribution={state, confidence, reason, evidenceIds}，独立记录证据支持的实质贡献，present 必须引用当前证据且给出真实置信度；没有充分材料填 unknown。

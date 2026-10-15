@@ -4,11 +4,16 @@ import type {
   SemanticEntity,
   TagAssessment,
 } from "@follow/information-core"
-import { semanticEntitiesSchema, tagAssessmentSchema } from "@follow/information-core"
+import {
+  semanticEntitiesSchema,
+  semanticTagDefinition,
+  tagAssessmentSchema,
+} from "@follow/information-core"
 import { z } from "zod"
 
 import type { AIProvider } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
+import { compactModelSchema, keyedTagAssessmentsSchema } from "./model-schema"
 import {
   eventIdentitySchema,
   eventSelectionForCatalog,
@@ -118,7 +123,7 @@ export function createEntryModelSelectionSchema(
       facts: evidenceFactsSelectionSchema(catalog, 30, requiredTagIds.length > 0),
     })
     .strict()
-  return requiredTagIds.length
+  const canonical = requiredTagIds.length
     ? base
         .extend({
           tagAssessments: createTagAssessmentsSelectionSchema(catalog, requiredTagIds),
@@ -137,11 +142,33 @@ export function createEntryModelSelectionSchema(
           message: "invalid_fact_event_assignment",
         })
     : base
+  return z.preprocess((value) => {
+    if (!value || typeof value !== "object" || !("tagAssessments" in value)) return value
+    const assessments = value.tagAssessments
+    if (!assessments || typeof assessments !== "object" || Array.isArray(assessments)) return value
+    const entries = Object.entries(assessments)
+    // 旧数组仍按原协议校验；紧凑对象不接受模型额外伪造程序拥有的字段。
+    if (
+      entries.some(
+        ([, item]) =>
+          !item || typeof item !== "object" || "tagId" in item || "definitionVersion" in item,
+      )
+    )
+      return value
+    return {
+      ...value,
+      tagAssessments: entries.map(([tagId, item]) => ({
+        ...item,
+        tagId,
+        definitionVersion: semanticTagDefinition(tagId)?.definitionVersion,
+      })),
+    }
+  }, canonical) as z.ZodType<EntryModelSelection>
 }
 
 // 保留旧响应解析能力，同时从模型协议移除程序拥有的归属字段，避免 optional 违反严格输出。
-export function entryModelSelectionJSONSchema(schema: z.ZodType) {
-  return z.toJSONSchema(schema, {
+export function entryModelSelectionJSONSchema(schema: z.ZodType, keyedTags = false) {
+  const wire = z.toJSONSchema(schema, {
     reused: "ref",
     override: ({ jsonSchema }) => {
       if (!jsonSchema.properties?.eventMentionIndex) return
@@ -150,6 +177,7 @@ export function entryModelSelectionJSONSchema(schema: z.ZodType) {
         jsonSchema.required = jsonSchema.required.filter((key) => key !== "eventMentionIndex")
     },
   })
+  return compactModelSchema(keyedTags ? keyedTagAssessmentsSchema(wire) : wire)
 }
 export type EntrySemanticProfile = {
   schemaVersion: 2

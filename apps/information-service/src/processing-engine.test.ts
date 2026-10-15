@@ -890,7 +890,7 @@ describe("单篇处理 engine", () => {
     expect(fixture.completed.size).toBe(0)
   })
 
-  it("正文很短但证据枚举很大时按 schema 预算拆批，并复用约束引用", async () => {
+  it("证据枚举复用后按实际契约预算合批，不能因展开估算退化为单篇", async () => {
     const fixture = batchStoreFixture(3)
     // 大量短句让证据枚举膨胀，正文仍远小于既有五万字符限制。
     for (const candidate of fixture.store.automation.inputs())
@@ -921,6 +921,7 @@ describe("单篇处理 engine", () => {
             ]
         sizes.push(materials.length)
         expect(JSON.stringify(request.schema)).toContain('"$defs"')
+        expect(JSON.stringify(request.schema).length).toBeLessThanOrEqual(32_000)
         const items = materials.map((item) =>
           batchSelection(item.entryId, item.evidenceCatalog[0]!.evidenceId),
         )
@@ -935,7 +936,7 @@ describe("单篇处理 engine", () => {
         }
       },
     })
-    expect(sizes.length).toBeGreaterThan(1)
+    expect(sizes).toEqual([3])
     expect(sizes.reduce((sum, size) => sum + size, 0)).toBe(3)
     expect(result.completed).toBe(3)
     expect(result.failures).toEqual([])

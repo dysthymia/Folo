@@ -78,7 +78,7 @@ const MAX_ENTRY_BATCH_CHARS = 50_000
 // 动态标签和事件证据会放大输出约束，装箱同时限制展开后的 schema，而非只看正文长度。
 const MAX_ENTRY_BATCH_SCHEMA_CHARS = 32_000
 const MAX_ENTRY_BATCH_ITEMS = PROCESSING_BATCH_ITEMS
-const ENTRY_BATCH_PROMPT_VERSION = 3
+const ENTRY_BATCH_PROMPT_VERSION = 4
 const defaultPolicy = { standalone: "auto", aggregation: "allow", rewrite: "allow" } as const
 
 type PreparedBatchItem = {
@@ -214,7 +214,7 @@ export async function runEntryProcessing(
       const snapshot = structuredClone(progress)
       // 中途 pending 包含尚未轮到和仍在补做的目标；终态返回值仍只统计真正延期项。
       const queued = options.store.automation
-        .inputs()
+        .inputs(options.inputSeqs)
         .filter(
           (candidate) =>
             candidate.current &&
@@ -233,7 +233,7 @@ export async function runEntryProcessing(
   const cutoffAt = options.cutoffAt === undefined ? null : Date.parse(options.cutoffAt)
   // 只调整调度顺序，时间敏感文字不会改变保留判定或材料资格。
   const candidates = options.store.automation
-    .inputs()
+    .inputs(options.inputSeqs)
     .filter((candidate) => !selectedInputSeqs || selectedInputSeqs.has(candidate.seq))
   // 批次开始时读取最新持久化 read/collected 快照；循环中不再重新读取，避免状态变化自触发。
   const entrySnapshots = new Map(
@@ -591,13 +591,14 @@ export async function runEntryProcessing(
 export function settleReadStates(
   store: ProcessingEngineStore,
   targets?: readonly { sourceKey: string; itemId: string }[],
+  inputSeqs?: readonly number[],
 ): {
   skip: number[]
   revive: number[]
 } {
   const skip: number[] = []
   const revive: number[] = []
-  for (const candidate of store.automation.inputs()) {
+  for (const candidate of store.automation.inputs(inputSeqs)) {
     // 列表唤醒只收敛本批读态，不能复活其它来源的历史跳过项。
     if (
       targets &&
@@ -773,7 +774,6 @@ async function prepareNormalEntryBatches(
           model: target.snapshot.model,
           endpointFingerprint: target.snapshot.endpointFingerprint,
           reasoningEffort: reasoningFingerprint(target.snapshot.reasoningEffort),
-          sourceRole: target.snapshot.sourceRole,
           lengthBucket,
           ...semanticAnalysisInstructions(instructions),
           semanticDefinitions: semanticDefinitionsForIds(instructions.semanticTagIds),
@@ -800,20 +800,6 @@ async function prepareNormalEntryBatches(
 
 function boundedBatchGroups(items: PreparedBatchItem[]): PreparedBatchItem[][] {
   const groups: PreparedBatchItem[][] = []
-  const schemaSizes = new Map(
-    items.map((item) => [
-      item,
-      JSON.stringify(
-        z.toJSONSchema(
-          createEntryModelSelectionSchema(
-            item.input.itemId,
-            item.evidence,
-            item.instructions.semanticTagIds,
-          ),
-        ),
-      ).length,
-    ]),
-  )
   const fingerprints = new Set<string>()
   const equivalentContexts: PreparedBatchItem[] = []
   for (const item of items) {
@@ -840,24 +826,37 @@ function boundedBatchGroups(items: PreparedBatchItem[]): PreparedBatchItem[][] {
       continue
     }
     // 从最近的同配置批次开始装箱，既保持输入顺序，也兼容当前 TypeScript 目标库。
-    const current = [...groups]
-      .reverse()
-      .find(
-        (group: PreparedBatchItem[]) =>
-          group[0]?.groupKey === item.groupKey &&
-          group[0]?.previousFailure !== "codex_timeout" &&
-          group.length < MAX_ENTRY_BATCH_ITEMS &&
-          group.reduce((total, candidate) => total + schemaSizes.get(candidate)!, 0) +
-            schemaSizes.get(item)! <=
-            MAX_ENTRY_BATCH_SCHEMA_CHARS &&
-          !group.some((candidate) => candidate.input.itemId === item.input.itemId) &&
-          group.reduce((total, candidate) => total + candidate.text.length, 0) + item.text.length <=
-            MAX_ENTRY_BATCH_CHARS,
-      )
+    const current = [...groups].reverse().find(
+      (group: PreparedBatchItem[]) =>
+        group[0]?.groupKey === item.groupKey &&
+        group[0]?.previousFailure !== "codex_timeout" &&
+        group.length < MAX_ENTRY_BATCH_ITEMS &&
+        !group.some((candidate) => candidate.input.itemId === item.input.itemId) &&
+        group.reduce((total, candidate) => total + candidate.text.length, 0) + item.text.length <=
+          MAX_ENTRY_BATCH_CHARS &&
+        // 按实际发出的合并契约装箱，不能把每篇展开后的重复字段相加而退化为单篇。
+        JSON.stringify(entryBatchJSONSchema([...group, item])).length <=
+          MAX_ENTRY_BATCH_SCHEMA_CHARS,
+    )
     if (current) current.push(item)
     else groups.push([item])
   }
   return [...groups, ...equivalentContexts.map((item) => [item])]
+}
+
+function entryBatchJSONSchema(group: PreparedBatchItem[]) {
+  const [first, second, ...remaining] = group.map((item) =>
+    createEntryModelSelectionSchema(
+      item.input.itemId,
+      item.evidence,
+      item.instructions.semanticTagIds,
+    ),
+  )
+  const item = second ? z.union([first!, second, ...remaining]) : first!
+  return entryModelSelectionJSONSchema(
+    z.object({ items: z.array(item).max(group.length * 2) }).strict(),
+    true,
+  )
 }
 
 async function runPreparedBatch(
@@ -919,28 +918,13 @@ async function runPreparedBatch(
     // 信封保持严格，item 留给各自 entryId/evidence schema 校验，避免一项损坏拖累成功项。
     .object({ items: z.array(z.unknown()).max(eligible.length * 2) })
     .strict()
-  const [firstItemSchema, secondItemSchema, ...remainingItemSchemas] = eligible.map((item) =>
-    createEntryModelSelectionSchema(
-      item.input.itemId,
-      item.evidence,
-      item.instructions.semanticTagIds,
-    ),
-  )
-  // 发给模型的 contract 必须列全每项字段与动态 enum；运行时仍用宽 item 信封逐项容错。
-  const batchContractSchema = z
-    .object({
-      items: z
-        .array(z.union([firstItemSchema!, secondItemSchema!, ...remainingItemSchemas]))
-        .max(eligible.length * 2),
-    })
-    .strict()
   let response: Awaited<ReturnType<typeof execute<z.infer<typeof batchEnvelopeSchema>>>>
   try {
     const request: CodexJsonOptions<z.infer<typeof batchEnvelopeSchema>> = {
       purpose: "entry",
       prompt: promptForEntryBatch(eligible, options.historySince),
       // 同一字段和证据枚举通过 $defs 复用，保留完整约束而不重复展开到每篇文章。
-      schema: entryModelSelectionJSONSchema(batchContractSchema),
+      schema: entryBatchJSONSchema(eligible),
       validate: (value): value is z.infer<typeof batchEnvelopeSchema> =>
         batchEnvelopeSchema.safeParse(value).success,
       model: eligible[0]!.target.snapshot.model,
@@ -1255,15 +1239,16 @@ ${SOURCE_FIDELITY_REQUIREMENTS}
 ${ENTRY_PRESENTATION_REQUIREMENTS}
 ${EVENT_IDENTITY_REQUIREMENTS}
 ${instructions.semanticTagIds.length ? EVENT_MENTION_REQUIREMENTS : ""}
-${renderSemanticTagRequirements(instructions.semanticTagIds)}
+${renderSemanticTagRequirements(instructions.semanticTagIds, true)}
 ${entryDisplayRequirements(instructions.display)}
-来源角色元数据：${first.target.snapshot.sourceRole}
+来源角色在每个条目中独立给出，只能影响所属条目的理解，不能跨条目套用。
 全局指令：\n${instructions.global.markdown}
 命中处理指令：\n${instructions.transformations.map((item) => item.prompt).join("\n")}
 未知规则会阻止最终隐藏或综合：${instructions.blocksFinalPresentation}。历史边界：${historySince}。
 批内条目与独立证据目录：\n${JSON.stringify(
     group.map((item) => ({
       entryId: item.input.itemId,
+      sourceRole: item.target.snapshot.sourceRole,
       evidenceCatalog: item.evidence.fragments.map((fragment) => ({
         evidenceId: fragment.evidenceId,
         text: fragment.quote,
@@ -1720,7 +1705,7 @@ export async function runSingleEntryModel(input: {
     purpose: "entry",
     prompt: promptForEntry({ ...input, instructions, evidence: renderEvidenceCatalog(evidence) }),
     // 单篇同样复用标签、主事件与提及中的重复字段，减少无意义的模型上下文。
-    schema: entryModelSelectionJSONSchema(selectionSchema),
+    schema: entryModelSelectionJSONSchema(selectionSchema, true),
     validate: (value): value is EntryModelSelection => selectionSchema.safeParse(value).success,
     model: input.model,
     reasoningEffort: input.reasoningEffort ?? "low",
@@ -1767,7 +1752,7 @@ ${SOURCE_FIDELITY_REQUIREMENTS}
 ${ENTRY_PRESENTATION_REQUIREMENTS}
 ${EVENT_IDENTITY_REQUIREMENTS}
 ${input.instructions.semanticTagIds.length ? EVENT_MENTION_REQUIREMENTS : ""}
-${renderSemanticTagRequirements(input.instructions.semanticTagIds)}
+${renderSemanticTagRequirements(input.instructions.semanticTagIds, true)}
 已完成的基础标签判断（仅作为规则选中的处理上下文，不能改写原档案）：${JSON.stringify(input.semanticAssessments ?? [])}
 ${entryDisplayRequirements(input.instructions.display)}
 来源角色元数据：${input.sourceRole}\n全局指令：\n${input.instructions.global.markdown}\n命中处理指令：\n${input.instructions.transformations.map((item) => item.prompt).join("\n")}
