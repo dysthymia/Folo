@@ -647,7 +647,12 @@ describe("单篇处理 engine", () => {
           if (calls === 2) {
             // 第二次付费请求开始前，第一批已正式发布，读端无需等待整轮或 Story。
             expect(store.processingState.published()).toHaveLength(8)
-            expect(progress[0]?.completed).toBe(8)
+            expect(progress.some((snapshot) => snapshot.completed === 8)).toBe(true)
+            expect(
+              progress.some(
+                (snapshot) => snapshot.completed === 0 && snapshot.metrics?.modelCalls === 1,
+              ),
+            ).toBe(true)
             expect(
               store.automation.inputs().filter((item) => item.status === "running"),
             ).toHaveLength(2)
@@ -696,7 +701,10 @@ describe("单篇处理 engine", () => {
       })
       expect(next.metrics?.modelCalls).toBe(0)
       expect(store.processingState.published()).toHaveLength(8)
-      expect(progress[0]?.completed).toBe(8)
+      expect(progress.some((snapshot) => snapshot.completed === 8)).toBe(true)
+      expect(
+        progress.some((snapshot) => snapshot.completed === 0 && snapshot.metrics?.modelCalls === 1),
+      ).toBe(true)
       expect(progress[0]?.metrics?.modelCalls).toBe(1)
     } finally {
       store.close()

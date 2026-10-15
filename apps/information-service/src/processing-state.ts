@@ -336,6 +336,49 @@ export class ProcessingStateStore {
     }
   }
 
+  // 调试概览只需要决定元数据与事实数量，不能为每次刷新加载全库原文和证据正文。
+  publishedSummaries() {
+    const rows = this.db
+      .prepare(
+        `SELECT inputs.seq,inputs.source_key,inputs.release_version,
+      json_extract(inputs.body,'$.publishedAt') AS published_at,json_extract(inputs.body,'$.title') AS title,
+      json_extract(decisions.body,'$.context') AS context,json_extract(decisions.body,'$.generatedAt') AS generated_at,
+      json_extract(decisions.body,'$.status') AS decision_status,json_extract(decisions.body,'$.labels') AS labels,
+      json_array_length(decisions.body,'$.facts') AS fact_count,
+      json_array_length(decisions.body,'$.pendingPolicyFields') AS policy_pending,
+      json_extract(decisions.body,'$.model') AS model,json_extract(decisions.body,'$.reason') AS reason,
+      json_extract(decisions.body,'$.reused') AS reused
+      FROM processing_inputs inputs JOIN entry_decisions decisions ON inputs.decision_id=decisions.id
+      WHERE inputs.current=1 AND inputs.status='succeeded'
+      AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version
+      AND json_extract(decisions.body,'$.schemaVersion') IN (1,2) ORDER BY inputs.seq`,
+      )
+      .all()
+    return rows.map((row) => ({
+      input: {
+        seq: Number(row.seq),
+        sourceKey: String(row.source_key),
+        releaseVersion: Number(row.release_version),
+        current: true,
+        body: {
+          publishedAt: String(row.published_at),
+          title: row.title === null ? null : String(row.title),
+        },
+      },
+      decision: {
+        context: JSON.parse(String(row.context ?? "{}")) as RuleInput,
+        generatedAt: String(row.generated_at),
+        status: String(row.decision_status) as ProcessingDecision["status"],
+        labels: JSON.parse(String(row.labels ?? "[]")) as string[],
+        factCount: Number(row.fact_count ?? 0),
+        pendingPolicyFieldCount: Number(row.policy_pending ?? 0),
+        model: String(row.model),
+        reason: String(row.reason),
+        reused: Boolean(row.reused),
+      },
+    }))
+  }
+
   published(inputSeqs?: readonly number[]): PublishedDecision[] {
     // 在 SQL 中一次筛出有效发布指针，避免逐条解析未处理原文并查询决定而阻塞 HTTP。
     const rows = this.db

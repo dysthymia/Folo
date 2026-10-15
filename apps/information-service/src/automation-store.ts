@@ -601,6 +601,22 @@ export class AutomationStore {
       .map((row) => this.inputFromRow(row))
   }
 
+  // 调试计数仅读取身份、状态和时间，不加载任何原文正文。
+  inputMetadata() {
+    return this.db
+      .prepare(
+        `SELECT seq,source_key,status,
+      json_extract(body,'$.publishedAt') AS published_at FROM processing_inputs WHERE current=1`,
+      )
+      .all()
+      .map((row) => ({
+        seq: Number(row.seq),
+        sourceKey: String(row.source_key),
+        status: String(row.status),
+        body: { publishedAt: String(row.published_at) },
+      }))
+  }
+
   // 来源条件只需少量元数据，不把全库已完成正文反序列化到执行器内存。
   contextInputs() {
     return this.db

@@ -196,6 +196,8 @@ export async function runEntryProcessing(
   const originalExecute = options.execute ?? runCodexJson
   const execute = async <T>(request: CodexJsonOptions<T>) => {
     metrics.modelCalls++
+    // 领取模型目标后立即发布进度，侧栏在请求进行中也能看到真实的 running 数量。
+    options.onProgress?.(result)
     try {
       return await originalExecute(request)
     } catch (error) {

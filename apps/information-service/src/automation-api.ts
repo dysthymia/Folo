@@ -69,21 +69,25 @@ export function automationApi(store: Store, method: string, path: string, body: 
         : keys
     const sourceKeys = actualRange(resolveAIRuleSourceKeys(store, effective))
     const covered = new Set(sourceKeys)
-    const inputs = repository.inputs().filter((input) => input.current)
-    const published = store.processingState.published().filter((item) => item.input.current)
+    const inputs = repository.inputMetadata()
+    const published = store.processingState.publishedSummaries()
     const processed = new Set(published.map((item) => item.input.seq))
     const schedule = store.schedule.readingStatus()
     const now = Date.now()
-    const inScheduledRange = (input: (typeof inputs)[number]) =>
+    const inScheduledRange = (input: { sourceKey: string; body: { publishedAt: string } }) =>
       covered.has(input.sourceKey) &&
       (!scheduleConfig ||
         Date.parse(input.body.publishedAt) >= Date.parse(scheduleConfig.historySince)) &&
       Date.parse(input.body.publishedAt) <= now
     // 最近处理按当时发布版本和已冻结上下文归属，不能用当前草稿重新匹配历史来虚增计数。
+    // 同一发布版本只解析一次规则集，不能为每个历史结果重复读取并校验完整规则。
+    const releases = new Map(
+      repository.releases().map((item) => [item.version, repository.release(item.version)]),
+    )
     const appliedRules = new Map(
       published.map((item) => {
         const release =
-          item.input.releaseVersion === null ? null : repository.release(item.input.releaseVersion)
+          item.input.releaseVersion === null ? null : releases.get(item.input.releaseVersion)
         return [
           item.input.seq,
           new Set(
@@ -167,9 +171,8 @@ export function automationApi(store: Store, method: string, path: string, body: 
         total: published.length,
         hidden: published.filter(({ decision }) => decision.status === "hide").length,
         tagged: published.filter(({ decision }) => decision.labels.length > 0).length,
-        facts: published.reduce((sum, { decision }) => sum + decision.facts.length, 0),
-        policyPending: published.filter(({ decision }) => decision.pendingPolicyFields?.length)
-          .length,
+        facts: published.reduce((sum, { decision }) => sum + decision.factCount, 0),
+        policyPending: published.filter(({ decision }) => decision.pendingPolicyFieldCount).length,
       },
       queue,
       run,

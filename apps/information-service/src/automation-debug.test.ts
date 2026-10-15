@@ -80,7 +80,11 @@ describe("自动化规则调试快照", () => {
     } satisfies ProcessingDecision
     store.automation.complete(input, decision)
     const before = store.automation.inputs()
+    const originalInputs = vi.spyOn(store.automation, "inputs")
+    const fullDecisions = vi.spyOn(store.processingState, "published")
     const result = automationApi(store, "GET", "/automation/debug", undefined)
+    expect(originalInputs).not.toHaveBeenCalled()
+    expect(fullDecisions).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       ownerId: "owner",
       releaseVersion: 1,
