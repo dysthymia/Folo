@@ -4,6 +4,8 @@ import { z } from "zod"
 import type { ProcessingRun } from "./processing-client"
 
 const count = z.number().finite().int().nonnegative().optional()
+const failureSchema = z.object({ code: z.string() })
+const usageSchema = z.object({ inputTokens: count, outputTokens: count, cachedInputTokens: count })
 const metricsSchema = z.object({
   elapsedMs: z.number().finite().nonnegative().optional(),
   modelCalls: count,
@@ -21,18 +23,47 @@ const reportSchema = z.object({
   phase: z.string().optional(),
   progressAt: z.string().datetime().optional(),
   finishedAt: z.string().datetime().optional(),
+  inventory: z.object({ failure: z.string().nullable().optional() }).optional(),
+  sources: z.array(z.object({ failure: z.string().nullable().optional() })).optional(),
   entries: z
     .object({
       completed: count,
       pending: count,
+      failures: z.array(failureSchema).optional(),
       metrics: metricsSchema.optional(),
-      usage: z
-        .object({ inputTokens: count, outputTokens: count, cachedInputTokens: count })
-        .nullable()
-        .optional(),
+      usage: z.object(usageSchema.shape).nullable().optional(),
     })
     .optional(),
   material: z.object({ complete: count, missing: count, failed: count }).optional(),
+  // 各阶段用量独立展示，共享分析已经计入单篇，不能再次相加。
+  dedupe: z
+    .object({
+      exactDuplicates: count,
+      duplicates: count,
+      candidates: count,
+      pending: count,
+      unresolved: count,
+      usage: usageSchema.optional(),
+    })
+    .optional(),
+  stories: z
+    .array(
+      z.object({
+        created: z.array(z.object({ storyId: z.string() })),
+        updated: z.array(z.object({ storyId: z.string() })),
+        pending: z.array(z.object({ reason: z.string() })),
+        failures: z.array(z.object({ reason: z.string() })),
+        usage: usageSchema.optional(),
+      }),
+    )
+    .optional(),
+  repair: z
+    .object({
+      repaired: z.array(z.object({ storyId: z.string() })),
+      failures: z.array(z.object({ reason: z.string() })),
+      usage: usageSchema.optional(),
+    })
+    .optional(),
 })
 
 // 报告来自历史兼容 unknown 字段；非法数字与缺字段保持未采集，不补成零。

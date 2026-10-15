@@ -36,6 +36,11 @@ vi.mock("~/lib/client", () => ({
   ipcServices: { semanticDedupe: { evaluateCandidates: vi.fn() } },
 }))
 vi.mock("~/modules/ai-chat/local-provider", () => ({ isLocalFoloHost: () => mocks.backend }))
+vi.mock("./automation-debug-panel", () => ({
+  AutomationDebugPanel: ({ ownerId }: { ownerId?: string }) => (
+    <div data-automation-debug={ownerId} />
+  ),
+}))
 
 const host = document.createElement("div")
 document.body.append(host)
@@ -63,7 +68,9 @@ describe("后台与旧去重执行器隔离", () => {
     expect(mocks.register).toHaveBeenCalledWith(null)
     expect(mocks.setAllowed).toHaveBeenCalledWith(false)
     expect(mocks.hydrate).toHaveBeenCalledWith("owner")
-    expect(host.innerHTML).toBe("")
+    expect(
+      host.querySelector("[data-automation-debug]")?.getAttribute("data-automation-debug"),
+    ).toBe("owner")
   })
 
   it("独立桌面仍可运行旧去重，关闭开关后执行器和默认缓存读取同步停用", async () => {

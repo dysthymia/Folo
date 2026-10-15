@@ -270,9 +270,28 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       failures: [],
       usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
     }
+    // 在慢步骤开始前发布阶段，调试浮窗不会在去重或汇总期间仍显示「单篇处理」。
+    const reportPhase = (phase: string) => {
+      // 沿用本轮已记录的阶段结果，调试记录不依赖处理流水线的分批实现。
+      const previous = store.processingState.reports(trigger.id)[0]?.report
+      store.processingState.report(trigger.id, {
+        ...(previous && typeof previous === "object" ? previous : {}),
+        inventory: {
+          snapshot: inventory.snapshot,
+          failure: inventory.failure,
+          syncedAt: inventory.syncedAt,
+        },
+        sources,
+        material: { ...material },
+        entries,
+        phase,
+        progressAt: new Date().toISOString(),
+      })
+    }
     // 紧迫条目优先按小批补读并正式发布，不等待所有普通材料串行水合完成。
     for (const batch of batches) {
       if (signal.aborted) break
+      reportPhase("material")
       const hydrated = await hydrateMaterials(
         options,
         trigger.sourceKeys,
@@ -284,6 +303,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       material.complete += hydrated.complete
       material.missing += hydrated.missing
       material.failed += hydrated.failed
+      reportPhase("entries")
       const result = await (options.processEntries ?? runEntryProcessing)({
         store,
         aiConfig: options.aiConfig,
@@ -358,6 +378,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     // 当前单篇和旧格式身份都先经过事件登记核验，去重才能读取同一份确认归属。
     store.synchronizeEvents()
     // 单篇发布后先落实覆盖关系，再把保留材料交给综述，重复报道不冒充独立证据。
+    reportPhase("dedupe")
     const dedupe = await (options.dedupe ?? runSemanticDedupe)({
       store,
       aiConfig: options.aiConfig,
@@ -383,6 +404,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       ),
     }))
     // 先修复既有 Story，保留原身份，再允许新增事件聚合，避免修复对象被复制成新 Story。
+    reportPhase("repair")
     const repair = await (options.repair ?? runStoryRepair)({
       decisions,
       currentEntry: store.entry.bind(store),
@@ -403,6 +425,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     const overrides = new Map(
       store.processingState.overrides().map((item) => [item.inputSeq, item.mode]),
     )
+    reportPhase("stories")
     for (const version of versions) {
       if (signal.aborted) break
       const publishedRuleSet = version === null ? null : store.automation.release(version)

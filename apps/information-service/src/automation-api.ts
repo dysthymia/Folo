@@ -59,7 +59,7 @@ export function automationApi(store: Store, method: string, path: string, body: 
       upgrade: legacyRuleUpgradePreview(store),
     }
   }
-  if (path === "/automation/status" && method === "GET") {
+  if (["/automation/status", "/automation/debug"].includes(path) && method === "GET") {
     const effective = repository.effective().config
     const scheduleConfig = store.schedule.snapshot().config
     // 尚未迁移的旧固定计划仍按明确名单展示覆盖，不能把 ALL 草稿暗示为全订阅已启用。
@@ -123,7 +123,7 @@ export function automationApi(store: Store, method: string, path: string, body: 
             .at(-1) ?? null,
       }
     })
-    return {
+    const status = {
       sourceInventory: {
         available: store.sources().length,
         covered: sourceKeys.length,
@@ -148,6 +148,44 @@ export function automationApi(store: Store, method: string, path: string, body: 
       nextScheduledStartLocal: schedule.nextScheduledStartLocal,
       nextPollAt: schedule.nextPollAt,
       rules,
+    }
+    if (path === "/automation/status") return status
+    const { run, ...queue } = store.schedule.debugRun()
+    // 调试结果只取生效配置和已发布决定；不触发抓取、模型调用或读态变更。
+    return {
+      ownerId: store.ownerId,
+      observedAt: new Date().toISOString(),
+      status,
+      releaseVersion: repository.effective().releaseVersion,
+      rules: (effective?.rules ?? []).map(({ id, name, enabled, actions }) => ({
+        id,
+        name,
+        enabled,
+        actions: actions.map((action) => action.type),
+      })),
+      outcomes: {
+        total: published.length,
+        hidden: published.filter(({ decision }) => decision.status === "hide").length,
+        tagged: published.filter(({ decision }) => decision.labels.length > 0).length,
+        facts: published.reduce((sum, { decision }) => sum + decision.facts.length, 0),
+        policyPending: published.filter(({ decision }) => decision.pendingPolicyFields?.length)
+          .length,
+      },
+      queue,
+      run,
+      report: run ? (store.processingState.reports(run.id)[0]?.report ?? null) : null,
+      recent: [...published]
+        .sort((a, b) => b.decision.generatedAt.localeCompare(a.decision.generatedAt))
+        .slice(0, 3)
+        .map(({ input, decision }) => ({
+          inputSeq: input.seq,
+          title: input.body.title,
+          status: decision.status,
+          reason: decision.reason,
+          labels: decision.labels,
+          model: decision.model,
+          reused: decision.reused,
+        })),
     }
   }
   if ((path === "/rules/activate-batch" || path === "/rules/reorder-active") && method === "POST") {

@@ -28,6 +28,7 @@ vi.mock("./processing-condition-editor", () => ({
   processingInputClass: "",
 }))
 vi.mock("./processing-export-controls", () => ({ ProcessingExportControls: () => null }))
+vi.mock("./automation-debug-switch", () => ({ AutomationDebugSwitch: () => null }))
 
 const config = (markdown: string): RuleSet => ({
   formatVersion: 4,

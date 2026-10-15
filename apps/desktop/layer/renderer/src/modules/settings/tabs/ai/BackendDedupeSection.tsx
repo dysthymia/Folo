@@ -2,6 +2,7 @@ import { useWhoami } from "@follow/store/user/hooks"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { AutomationDebugSwitch } from "~/modules/action/automation-debug-switch"
 import { localAutomationChanged } from "~/modules/action/local-automation-events"
 import { createProcessingClient } from "~/modules/action/processing-client"
 import { processingButtonClass } from "~/modules/action/processing-condition-editor"
@@ -154,6 +155,7 @@ function BackendDedupeStatus({ ownerId }: { ownerId?: string }) {
         </button>
       </div>
       <p className="text-xs text-text-secondary">{t("automation.dedupe.draft_hint")}</p>
+      <AutomationDebugSwitch />
     </div>
   )
 }

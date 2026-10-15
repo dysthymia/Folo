@@ -7,12 +7,18 @@ import { describe, expect, it, vi } from "vitest"
 import { BackendDedupeSection } from "./BackendDedupeSection"
 
 const mocks = vi.hoisted(() => ({
+  setSetting: vi.fn(),
   client: {
     loadEffective: vi.fn(),
     loadAutomationStatus: vi.fn(),
     loadModelSettings: vi.fn(),
     loadRuns: vi.fn(),
   },
+}))
+vi.mock("~/atoms/settings/ai", () => ({
+  useAISettingSelector: (selector: (settings: { semanticDedupeDebugPanel: boolean }) => unknown) =>
+    selector({ semanticDedupeDebugPanel: false }),
+  setAISetting: mocks.setSetting,
 }))
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
@@ -38,7 +44,11 @@ describe("后台去重设置", () => {
     await act(async () => root.render(<BackendDedupeSection />))
     expect(host.textContent).toContain("automation.dedupe.inactive")
     expect(host.textContent).toContain("automation.dedupe.no_report")
-    expect(host.querySelector("input")).toBeNull()
+    expect(host.querySelector('input[type="text"]')).toBeNull()
+    // 新开关只控制整套自动化的调试浮窗，不改变后台去重规则。
+    expect(host.textContent).toContain("automation.debug.enabled")
+    await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click())
+    expect(mocks.setSetting).toHaveBeenCalledWith("semanticDedupeDebugPanel", true)
     expect(host.querySelector("a")?.getAttribute("href")).toBe(
       "/action?scope=processing_service&dedupe=1",
     )

@@ -790,6 +790,27 @@ export class ProcessingScheduleStore {
       .map((row) => this.triggerFromRow(row))
   }
 
+  // 调试轮询只读当前账号的队列计数和一轮记录，避免传输全部运行历史。
+  debugRun() {
+    const ownerId = this.ownerId()
+    const counts = this.db
+      .prepare(
+        "SELECT SUM(status='pending') AS pending,SUM(status='running') AS running FROM processing_schedule_triggers WHERE owner_id=?",
+      )
+      .get(ownerId)!
+    const row = this.db
+      .prepare(
+        `SELECT * FROM processing_schedule_triggers WHERE owner_id=?
+        ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,created_at DESC,id DESC LIMIT 1`,
+      )
+      .get(ownerId)
+    return {
+      pending: Number(counts.pending ?? 0),
+      running: Number(counts.running ?? 0),
+      run: row ? this.triggerFromRow(row) : null,
+    }
+  }
+
   private createTrigger(draft: TriggerDraft): { trigger: ProcessingTrigger; created: boolean } {
     const ownerId = this.ownerId()
     const id = randomUUID()

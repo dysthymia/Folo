@@ -1,6 +1,6 @@
 // 本地读取逐条列出，不能把同一路径的发布、试运行或外部同步操作当成只读查询。
 const localGetPaths = [
-  /^(?:automation\/(?:editor|status)|configuration(?:\/effective)?)$/u,
+  /^(?:automation\/(?:editor|status|debug)|configuration(?:\/effective)?)$/u,
   /^(?:rules(?:\/[^/]+)?|global-instructions|subscription-tags|source-tags)$/u,
   /^(?:schedule|runs|inputs|rule-set-releases(?:\/\d+)?)$/u,
   /^(?:reading-snapshot|research-pack\/[^/]+|research-packs(?:\/[^/]+)?)$/u,

@@ -5,6 +5,7 @@ import { isLocalInformationRead } from "./local-information-read"
 describe("本地读取范围", () => {
   it.each([
     ["GET", "automation/editor"],
+    ["GET", "automation/debug"],
     ["GET", "/information/v1/configuration/effective"],
     ["GET", "rules/custom-rule"],
     ["GET", "processing/entries/42"],
@@ -25,6 +26,7 @@ describe("本地读取范围", () => {
 
   it.each([
     ["PUT", "configuration"],
+    ["POST", "automation/debug"],
     ["POST", "rules/trial"],
     ["PUT", "rules/custom-rule/activate"],
     ["POST", "feedback"],

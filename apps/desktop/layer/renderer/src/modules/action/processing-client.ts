@@ -488,6 +488,60 @@ export const processingRunSchema = z
   })
   .strict()
 
+// 调试接口与普通运行列表分开，只接收当前账号的一轮运行及少量最近结果。
+export const automationDebugSchema = z
+  .object({
+    ownerId: identifierSchema,
+    observedAt: isoDateTime,
+    status: automationStatusSchema,
+    releaseVersion: positiveIntegerSchema.nullable(),
+    rules: z.array(
+      z.object({
+        id: identifierSchema,
+        name: z.string(),
+        enabled: z.boolean(),
+        actions: z.array(
+          z.enum([
+            "attention",
+            "ai_classify",
+            "local_filter",
+            "ai_transform",
+            "ai_aggregate",
+            "ai_dedupe",
+            "presentation",
+            "reading_decision",
+            "display",
+          ]),
+        ),
+      }),
+    ),
+    outcomes: z.object({
+      total: revisionSchema,
+      hidden: revisionSchema,
+      tagged: revisionSchema,
+      facts: revisionSchema,
+      policyPending: revisionSchema,
+    }),
+    queue: z.object({ pending: revisionSchema, running: revisionSchema }),
+    run: processingRunSchema.nullable(),
+    report: z.unknown(),
+    recent: z
+      .array(
+        z.object({
+          inputSeq: positiveIntegerSchema,
+          title: z.string(),
+          status: z.enum(["keep", "hide", "needs_context"]),
+          reason: z.string(),
+          labels: z.array(z.string()),
+          model: z.string(),
+          reused: z.boolean(),
+        }),
+      )
+      .max(3),
+  })
+  .strict()
+export type AutomationDebug = z.infer<typeof automationDebugSchema>
+
 const runsSchema = z
   .object({
     runs: z.array(processingRunSchema),
@@ -623,6 +677,8 @@ export function createProcessingClient(
       request("automation/editor", "GET", automationEditorSchema, signal),
     loadAutomationStatus: (signal: AbortSignal) =>
       request("automation/status", "GET", automationStatusSchema, signal),
+    loadAutomationDebug: (signal: AbortSignal) =>
+      request("automation/debug", "GET", automationDebugSchema, signal),
     loadModelSettings: (signal: AbortSignal) =>
       request("processing/model-settings", "GET", processingModelSettingsSchema, signal),
     loadModelCatalog: (signal: AbortSignal) =>

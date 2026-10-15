@@ -4,6 +4,7 @@ import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
 import { setAISetting, useAISettingValue } from "~/atoms/settings/ai"
+import { AutomationDebugSwitch } from "~/modules/action/automation-debug-switch"
 import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { useSemanticDedupeEvaluatorAvailability } from "~/providers/semantic-dedupe-provider"
 
@@ -100,19 +101,9 @@ const LocalDedupeSection = () => {
             value={reasoningEffort}
             values={effortValues}
           />
-
-          <div>
-            <SettingSwitch
-              checked={settings.semanticDedupeDebugPanel}
-              label={t("semantic_dedupe.debug.label")}
-              onCheckedChange={(checked) => setAISetting("semanticDedupeDebugPanel", checked)}
-            />
-            <SettingDescription className="-mt-2">
-              {t("semantic_dedupe.debug.description")}
-            </SettingDescription>
-          </div>
         </>
       )}
+      <AutomationDebugSwitch />
     </div>
   )
 }

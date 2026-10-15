@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next"
 import { useSettingModal } from "~/modules/settings/modal/use-setting-modal-hack"
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
+import { AutomationDebugSwitch } from "./automation-debug-switch"
 import { notifyLocalAutomationChanged } from "./local-automation-events"
 import { ProcessingAttentionSettings } from "./processing-attention-settings"
 import { ProcessingClassificationSettings } from "./processing-classification-settings"
@@ -173,6 +174,7 @@ export function LocalAutomationPreferences({
   return (
     <div className="mx-auto w-full max-w-3xl space-y-6 overflow-y-auto pb-6">
       <p className="text-sm text-text-secondary">{t("automation.editor.preferences_hint")}</p>
+      <AutomationDebugSwitch />
       {error && (
         <p role="alert" className="text-sm text-red">
           {t("automation.editor.error_request")}

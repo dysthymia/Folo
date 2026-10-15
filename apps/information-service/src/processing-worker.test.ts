@@ -93,6 +93,7 @@ describe("调度到处理的后台链路", () => {
         failures: [],
         usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
       }))
+      const reports = vi.spyOn(options.store.processingState, "report")
       const result = await runProcessingWorker(
         { ...options, processEntries },
         new AbortController().signal,
@@ -104,6 +105,12 @@ describe("调度到处理的后台链路", () => {
         entries: { completed: 0, pending: 1 },
       })
       expect(options.store.automation.inputs()[0]?.status).toBe("pending")
+      // 每个慢步骤开始前就记录阶段，不能只在整轮结束后补写调试信息。
+      expect(
+        reports.mock.calls.flatMap(([, report]) => ("phase" in report ? [report.phase] : [])),
+      ).toEqual(
+        expect.arrayContaining(["sources", "material", "entries", "dedupe", "repair", "stories"]),
+      )
     } finally {
       options.store.close()
     }

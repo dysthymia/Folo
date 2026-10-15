@@ -336,10 +336,13 @@ export class ProcessingStateStore {
       .run(triggerId, JSON.stringify(body))
   }
 
-  reports() {
+  // 调试面板按批次读取，历史报告接口仍保持原有行为。
+  reports(triggerId?: string) {
     return this.db
-      .prepare("SELECT trigger_id,body FROM processing_trigger_reports")
-      .all()
+      .prepare(
+        `SELECT trigger_id,body FROM processing_trigger_reports${triggerId ? " WHERE trigger_id=?" : ""}`,
+      )
+      .all(...(triggerId ? [triggerId] : []))
       .map((row) => ({
         triggerId: String(row.trigger_id),
         report: JSON.parse(String(row.body)) as unknown,

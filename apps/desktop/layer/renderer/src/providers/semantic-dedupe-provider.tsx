@@ -20,6 +20,8 @@ import { useAISettingSelector } from "~/atoms/settings/ai"
 import { ipcServices } from "~/lib/client"
 import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 
+import { AutomationDebugPanel } from "./automation-debug-panel"
+
 const SEMANTIC_DEDUPE_DEV_ENDPOINT = "/__semantic-dedupe/evaluate"
 const SEMANTIC_DEDUPE_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 const SEMANTIC_DEDUPE_DEFAULT_REASONING_EFFORT = "low"
@@ -325,8 +327,11 @@ export const SemanticDedupeProvider = () => {
     semanticDedupeSettings.reasoningEffort,
   ])
 
-  // 后台去重的状态在规则管理中展示，旧缓存调试面板不能冒充当前执行结果。
-  if (backendManaged || !semanticDedupeSettings.debugPanel) return null
+  if (!semanticDedupeSettings.debugPanel) return null
+
+  // 后台接管时显示整套自动化的真实状态，不读取旧去重缓存冒充运行结果。
+  if (backendManaged)
+    return <AutomationDebugPanel key={user?.id ?? "anonymous"} ownerId={user?.id} />
 
   return <SemanticDedupeDebugPanel />
 }
