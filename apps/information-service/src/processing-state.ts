@@ -7,7 +7,9 @@ import type { AIProvider } from "./ai-config"
 import type { ReasoningEffort } from "./ai-reasoning"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import { AutomationError } from "./automation-store"
+import type { DecisionsSettings } from "./decisions-config"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
+import type { DecisionsAudit } from "./processing-decisions"
 
 export type TargetSnapshot = {
   context: RuleInput
@@ -19,6 +21,7 @@ export type TargetSnapshot = {
   reasoningEffort?: ReasoningEffort
   sourceRole: string
   metadataVersion: number
+  decisions?: DecisionsSettings
 }
 export type DecisionQuarantine = {
   inputSeq: number
@@ -44,7 +47,28 @@ export class ProcessingStateStore {
       CREATE TABLE IF NOT EXISTS processing_input_retries(input_seq INTEGER NOT NULL,generation INTEGER NOT NULL,last_failed_at TEXT NOT NULL,automatic_retries INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL,PRIMARY KEY(input_seq,generation));
       CREATE TABLE IF NOT EXISTS processing_decision_quarantine(decision_id TEXT PRIMARY KEY,input_seq INTEGER NOT NULL,content_version TEXT NOT NULL,fingerprint TEXT NOT NULL,reason TEXT NOT NULL,replacement_id TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS processing_quarantine_fingerprint ON processing_decision_quarantine(fingerprint);
+      CREATE TABLE IF NOT EXISTS processing_decisions_audit(id INTEGER PRIMARY KEY, input_seq INTEGER NOT NULL, body TEXT NOT NULL);
     `)
+  }
+
+  recordDecisions(audit: DecisionsAudit) {
+    this.db
+      .prepare("INSERT INTO processing_decisions_audit(input_seq,body) VALUES(?,?)")
+      .run(audit.inputSeq, JSON.stringify(audit))
+  }
+
+  decisionsAudit(inputSeq?: number) {
+    const rows =
+      inputSeq === undefined
+        ? this.db
+            .prepare("SELECT body FROM processing_decisions_audit ORDER BY id DESC LIMIT 100")
+            .all()
+        : this.db
+            .prepare(
+              "SELECT body FROM processing_decisions_audit WHERE input_seq=? ORDER BY id DESC LIMIT 100",
+            )
+            .all(inputSeq)
+    return rows.map((row) => JSON.parse(String(row.body)) as DecisionsAudit)
   }
 
   prepare(seq: number, snapshot: TargetSnapshot) {
@@ -97,6 +121,15 @@ export class ProcessingStateStore {
       )
       .run(new Date().toISOString())
     this.db.exec("UPDATE processing_inputs SET status='failed' WHERE status='running'")
+  }
+
+  // 未调用模型的预算延期保持当前代际，不清除缓存或误记一次失败。
+  defer(input: ProcessingInput) {
+    this.db
+      .prepare(
+        "UPDATE processing_inputs SET status='pending' WHERE seq=? AND generation=? AND current=1 AND status='running'",
+      )
+      .run(input.seq, input.generation)
   }
 
   retry(seq: number) {

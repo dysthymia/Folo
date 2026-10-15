@@ -19,7 +19,12 @@ import { LocalAutomationPreferences } from "./local-automation-preferences"
 import { LocalAutomationQueue } from "./local-automation-queue"
 import { LocalRuleActions } from "./local-rule-actions"
 import { localRuleConditionSummary, localRulePublicationState } from "./local-rule-feedback"
-import { localRuleUsesAI, newLocalRule, replaceLocalRule } from "./local-rule-model"
+import {
+  duplicateLocalRule,
+  localRuleUsesAI,
+  newLocalRule,
+  replaceLocalRule,
+} from "./local-rule-model"
 import { PersonalizedRulePackPanel } from "./personalized-rule-pack-panel"
 import type {
   EffectiveProcessing,
@@ -656,6 +661,24 @@ export function LocalAutomationSettings() {
                 <p role="status" className="text-sm text-text-secondary">
                   {publicationLabel(rule)}
                 </p>
+                <button
+                  type="button"
+                  className={processingButtonClass}
+                  disabled={busy}
+                  onClick={() =>
+                    guarded(() =>
+                      choose(
+                        duplicateLocalRule(
+                          editor.config,
+                          rule,
+                          t("automation.rule_model.copy_name", { name: rule.name }),
+                        ),
+                      ),
+                    )
+                  }
+                >
+                  {t("automation.rule_model.copy")}
+                </button>
                 <section className="space-y-2 rounded-lg bg-fill-quinary p-3">
                   <h3 className="text-sm font-medium">{t("automation.feedback.priority")}</h3>
                   <p className="text-xs text-text-secondary">
@@ -730,6 +753,36 @@ export function LocalAutomationSettings() {
                       {t("automation.feedback.enable_on_save")}
                     </label>
                   </div>
+                  <section className="space-y-2 rounded-lg border border-fill-secondary p-3">
+                    <label className="block space-y-2 text-sm">
+                      <span>{t("automation.rule_model.label")}</span>
+                      <select
+                        className={processingInputClass}
+                        aria-label={t("automation.rule_model.label")}
+                        value={rule.decisionModel ?? "inherit"}
+                        onChange={(event) => {
+                          const { decisionModel: _old, ...rest } = rule
+                          const value = event.target.value
+                          setSelection({
+                            ...selection,
+                            rule: {
+                              ...rest,
+                              ...(value === "generation" || value === "decisions"
+                                ? { decisionModel: value }
+                                : {}),
+                            },
+                          } as Selection)
+                        }}
+                      >
+                        <option value="inherit">{t("automation.rule_model.inherit")}</option>
+                        <option value="generation">{t("automation.rule_model.generation")}</option>
+                        <option value="decisions">{t("automation.rule_model.decisions")}</option>
+                      </select>
+                    </label>
+                    <p className="text-xs leading-relaxed text-text-secondary">
+                      {t("automation.rule_model.boundary")}
+                    </p>
+                  </section>
                   <section className="space-y-3">
                     <h3 className="font-medium">{t("automation.editor.when")}</h3>
                     <ProcessingConditionEditor

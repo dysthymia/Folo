@@ -899,3 +899,50 @@ describe("长文按需完整核对", () => {
     expect(expanded).toHaveLength(1)
   })
 })
+
+// 缺附件不意味着缺正文：只允许完整纯文字侧被覆盖，任何未核验材料都继续保留。
+it.each(["equivalent", "first_contains_second", "second_contains_first"] as const)(
+  "正文比较 %s 保留未核验上下文，禁止反向折叠",
+  (verdict) => {
+    const first = {
+      ...entry("A", "同一事件", at(0)),
+      contentComplete: false,
+      textContentComplete: true,
+    }
+    const second = entry("B", "同一事件", at(1))
+    const candidate: SemanticDuplicateCandidate = {
+      pairKey: semanticDuplicatePairKey("A", "B"),
+      keepEntryId: "A",
+      testEntryId: "B",
+      similarity: 1,
+      entries: [first, second],
+    }
+    const result = normalizeSemanticDuplicateOutput([candidate], {
+      results: [
+        {
+          pairKey: candidate.pairKey,
+          duplicate: true,
+          confidence: 0.99,
+          keepEntryId: "B",
+          hideEntryId: "A",
+          reason: "正文覆盖核验",
+          factComparison: {
+            verdict,
+            onlyInFirst: verdict === "first_contains_second" ? ["保留侧额外事实"] : [],
+            onlyInSecond: verdict === "second_contains_first" ? ["完整文字侧额外事实"] : [],
+          },
+        },
+      ],
+    })[0]!
+    expect(result.duplicate).toBe(verdict !== "second_contains_first")
+    if (result.duplicate) expect(result).toMatchObject({ keepEntryId: "A", hideEntryId: "B" })
+    else expect(result.status).toBe("incomplete")
+    first.contentComplete = false
+    second.contentComplete = false
+    expect(
+      normalizeSemanticDuplicateOutput([{ ...candidate, entries: [first, second] }], {
+        results: [],
+      })[0]?.status,
+    ).toBe("incomplete")
+  },
+)

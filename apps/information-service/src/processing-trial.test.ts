@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions } from "./codex"
+import { DECISIONS_CANONICAL_MODEL, defaultDecisionsSettings } from "./decisions-config"
+import type { requestDecisions } from "./openrouter-decisions"
+import { parseDecisionsResponse } from "./openrouter-decisions"
 import { ProcessingTrial } from "./processing-trial"
 import { Store } from "./store"
 
@@ -101,6 +104,77 @@ describe("规则 AI 试运行", () => {
     ).rejects.toMatchObject({ code: read === true ? "target_read" : "read_state_unknown" })
     expect(prompts).toEqual([])
     expect(store.automation.current(entry.sourceKey, entry.id)?.status).toBe("pending")
+  })
+  it("uses the rule's Decisions choice in preview without writing queue, published results or permanent caches", async () => {
+    await aiConfig.saveDecisions({
+      ...defaultDecisionsSettings,
+      enabled: true,
+      classificationEnabled: false,
+      mode: "apply",
+      apiKey: "offline-key",
+    })
+    const body = request()
+    body.config.formatVersion = 5
+    body.config.rules[0] = {
+      ...body.config.rules[0]!,
+      decisionModel: "decisions",
+      when: {
+        anyOf: [
+          {
+            allOf: [
+              {
+                field: "entry_tag",
+                operator: "contains_any",
+                value: ["event:security_incident"],
+                minConfidence: 0.95,
+              },
+            ],
+          },
+        ],
+      },
+      actions: [{ type: "reading_decision", visibility: "hide" }],
+    }
+    const execute = vi.fn(async () => {
+      throw new Error("generation must not run")
+    })
+    const decisionsExecute = vi.fn<typeof requestDecisions>(async (input) =>
+      parseDecisionsResponse(
+        {
+          model: DECISIONS_CANONICAL_MODEL,
+          provider: "OpenAI",
+          usage: { input_tokens: 50, output_tokens: 0, cost: 0.000005 },
+          answers: Object.fromEntries(
+            Object.entries(input.questions).map(([id, question]) => [
+              id,
+              question.type === "choice"
+                ? { type: "choice", choice: id === "contribution_evidence" ? "none" : "E000001" }
+                : { type: "noul", noul: id === "contribution" ? 0.01 : 0.99 },
+            ]),
+          ),
+        },
+        input.questions,
+      ),
+    )
+    const result = await new ProcessingTrial({
+      store,
+      aiConfig,
+      runtimeDir: directory,
+      execute,
+      decisionsExecute,
+    }).run(body, new AbortController().signal)
+    expect(execute).not.toHaveBeenCalled()
+    expect(decisionsExecute).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      model: DECISIONS_CANONICAL_MODEL,
+      after: { status: "hide" },
+      usage: { inputTokens: 50 },
+    })
+    expect(store.processingState.published()).toEqual([])
+    expect(store.automation.current(entry.sourceKey, entry.id)?.status).toBe("pending")
+    expect(store.processingState.decisionsAudit()[0]).toMatchObject({
+      purpose: "preview",
+      ruleIds: ["rule"],
+    })
   })
 
   it("复用正式引用和显式策略，不发布规则、改队列或阅读结果", async () => {

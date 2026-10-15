@@ -430,6 +430,116 @@ const processingModelSettingsSchema = z
   })
   .strict()
 export type ProcessingModelSettings = z.infer<typeof processingModelSettingsSchema>
+const decisionsSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    classificationEnabled: z.boolean().default(true),
+    mode: z.enum(["observe", "apply"]),
+    // 与后端一致，支持 85% 的用户门槛。
+    threshold: z.number().min(0.85).max(0.999),
+    maxInputChars: z.number().int().min(500).max(60_000),
+    maxRequestsPerRun: z.number().int().min(1).max(100),
+    dedupeObservation: z
+      .object({
+        enabled: z.boolean(),
+        mode: z.enum(["observe", "apply"]).default("observe"),
+        maxPairsPerTrigger: z.number().int().min(1).max(24),
+        // 保留后端显式开关，保存其他设置时不能丢掉复核选择。
+        generationFallback: z.boolean().optional(),
+      })
+      .default({ enabled: false, mode: "observe", maxPairsPerTrigger: 8 }),
+    hasApiKey: z.boolean(),
+    model: z.string(),
+    endpoint: z.string(),
+  })
+  .strict()
+export type ProcessingDecisionsSettings = z.infer<typeof decisionsSettingsSchema>
+const decisionsAuditSchema = z.object({
+  dedupeRecords: z
+    .array(
+      z.object({
+        evidenceKey: z.string(),
+        pairKey: z.string(),
+        reusedByRuleIds: z.array(z.string()).optional(),
+        ruleId: z.string(),
+        triggerId: z.string().nullable(),
+        inputs: z.array(
+          z.object({
+            seq: z.number(),
+            generation: z.number(),
+            contentVersion: z.string(),
+            itemId: z.string(),
+          }),
+        ),
+        protocolVersion: z.number(),
+        threshold: z.number(),
+        attempted: z.boolean(),
+        status: z.enum(["pending", "decided", "uncertain", "skipped", "error"]),
+        code: z.string().nullable(),
+        model: z.string().nullable(),
+        provider: z.string().nullable(),
+        comparison: z.enum(["agree", "disagree", "unavailable"]),
+        mode: z.enum(["observe", "apply"]).default("observe"),
+        assessment: z
+          .object({
+            coverage: z.enum([
+              "equivalent",
+              "first_contains_second",
+              "second_contains_first",
+              "different",
+              "uncertain",
+            ]),
+            confidence: z.number().nullable(),
+          })
+          .nullable(),
+        reference: z
+          .object({
+            model: z.string(),
+            provider: z.string(),
+            evaluation: z.object({
+              duplicate: z.boolean(),
+              confidence: z.number(),
+              verdict: z.string().optional(),
+              status: z.string().optional(),
+            }),
+          })
+          .nullable(),
+        answers: z.record(z.string(), z.unknown()).nullable(),
+        usage: z
+          .object({
+            input_tokens: z.number(),
+            output_tokens: z.number(),
+            cost: z.number().nullable().optional(),
+          })
+          .nullable(),
+      }),
+    )
+    .default([]),
+  records: z.array(
+    z.object({
+      inputSeq: z.number(),
+      purpose: z.enum(["processing", "preview"]).optional(),
+      contentVersion: z.string(),
+      generation: z.number(),
+      attempted: z.boolean(),
+      status: z.enum(["success", "retained"]),
+      code: z.string().nullable(),
+      model: z.string().nullable(),
+      provider: z.string().nullable(),
+      tagIds: z.array(z.string()),
+      ruleIds: z.array(z.string()).optional(),
+      fingerprint: z.string().optional(),
+      answers: z.record(z.string(), z.unknown()).nullable(),
+      usage: z
+        .object({
+          input_tokens: z.number(),
+          output_tokens: z.number(),
+          cost: z.number().nullable().optional(),
+        })
+        .nullable(),
+    }),
+  ),
+})
 export type ProcessingReasoningEffort = NonNullable<ProcessingModelSettings["reasoningEffort"]>
 
 // 模型目录只接收公开能力字段，不向浏览器传递 CLI 配置或认证信息。
@@ -681,6 +791,16 @@ export function createProcessingClient(
       request("automation/debug", "GET", automationDebugSchema, signal),
     loadModelSettings: (signal: AbortSignal) =>
       request("processing/model-settings", "GET", processingModelSettingsSchema, signal),
+    loadDecisionsSettings: (signal: AbortSignal) =>
+      request("processing/decisions-settings", "GET", decisionsSettingsSchema, signal),
+    saveDecisionsSettings: (
+      settings: Omit<ProcessingDecisionsSettings, "hasApiKey" | "model" | "endpoint"> & {
+        apiKey?: string
+      },
+      signal: AbortSignal,
+    ) => request("processing/decisions-settings", "PUT", decisionsSettingsSchema, signal, settings),
+    loadDecisionsAudit: (signal: AbortSignal) =>
+      request("processing/decisions-audit", "GET", decisionsAuditSchema, signal),
     loadModelCatalog: (signal: AbortSignal) =>
       request("processing/model-catalog", "GET", processingModelCatalogSchema, signal),
     saveModelSettings: (

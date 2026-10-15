@@ -18,6 +18,60 @@ afterEach(() => {
   document.documentElement.removeAttribute("data-information-page")
 })
 
+it("defaults old Decisions settings/audit to observation off and reads explicit pair audit", async () => {
+  const old = {
+    enabled: true,
+    mode: "observe",
+    threshold: 0.95,
+    maxInputChars: 12000,
+    maxRequestsPerRun: 20,
+    hasApiKey: true,
+    model: "openai/gpt-6-luna-decisions",
+    endpoint: "https://openrouter.ai/api/alpha/decisions",
+  }
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json(old))
+    .mockResolvedValueOnce(Response.json({ records: [] }))
+    .mockResolvedValueOnce(
+      Response.json({
+        records: [],
+        dedupeRecords: [
+          {
+            evidenceKey: "hash",
+            pairKey: "a::b",
+            ruleId: "rule",
+            triggerId: null,
+            inputs: [
+              { seq: 1, generation: 1, contentVersion: "v1", itemId: "a" },
+              { seq: 2, generation: 1, contentVersion: "v2", itemId: "b" },
+            ],
+            protocolVersion: 1,
+            threshold: 0.95,
+            attempted: true,
+            status: "decided",
+            code: null,
+            model: old.model,
+            provider: "OpenAI",
+            comparison: "disagree",
+            assessment: { coverage: "different", confidence: 0.99 },
+            reference: null,
+            answers: { same_event: { type: "noul", noul: 0.99 } },
+            usage: { input_tokens: 42, output_tokens: 0, cost: null },
+          },
+        ],
+      }),
+    )
+  const client = createProcessingClient(async () => "fixture-token", fetcher)
+  expect(
+    (await client.loadDecisionsSettings(new AbortController().signal)).dedupeObservation,
+  ).toEqual({ enabled: false, mode: "observe", maxPairsPerTrigger: 8 })
+  expect((await client.loadDecisionsAudit(new AbortController().signal)).dedupeRecords).toEqual([])
+  expect(
+    (await client.loadDecisionsAudit(new AbortController().signal)).dedupeRecords[0],
+  ).toMatchObject({ comparison: "disagree", usage: { cost: null } })
+})
+
 const ruleSet: RuleSet = {
   formatVersion: 4,
   ownerId: "owner-1",

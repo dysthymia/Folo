@@ -27,6 +27,18 @@ vi.mock("~/modules/action/processing-client", () => ({
     loadModelSettings: mocks.load,
     saveModelSettings: mocks.save,
     loadModelCatalog: mocks.catalog,
+    loadDecisionsSettings: async () => ({
+      enabled: false,
+      mode: "observe",
+      threshold: 0.95,
+      maxInputChars: 12000,
+      maxRequestsPerRun: 20,
+      hasApiKey: false,
+      model: "openai/gpt-6-luna-decisions",
+      dedupeObservation: { enabled: false, mode: "observe", maxPairsPerTrigger: 8 },
+      endpoint: "https://openrouter.ai/api/alpha/decisions",
+    }),
+    loadDecisionsAudit: async () => ({ records: [] }),
   }),
 }))
 let container: HTMLDivElement
@@ -128,7 +140,9 @@ describe("原AI设置中的实际执行配置", () => {
     expect(mocks.catalog).not.toHaveBeenCalled()
     await inputValue(control<HTMLSelectElement>("automation.model.source"), "codex")
     expect(control<HTMLSelectElement>("automation.model.codex_model").value).toBe("codex-one")
-    expect(container.querySelector('input[type="password"]')).toBeNull()
+    expect(
+      container.querySelector('#settings-ai-processing-model input[type="password"]'),
+    ).toBeNull()
     expect(mocks.save).not.toHaveBeenCalled()
     await act(async () => saveButton().click())
     expect(mocks.save).toHaveBeenCalledWith(

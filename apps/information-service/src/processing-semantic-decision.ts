@@ -105,11 +105,14 @@ export function projectSemanticDecision(
       ? ("always" as const)
       : (instructions.policy.standalone ?? ("auto" as const)),
     aggregation:
-      pending.has("aggregation") || output.disposition === "needs_context"
+      decision.classification ||
+      pending.has("aggregation") ||
+      output.disposition === "needs_context"
         ? ("deny" as const)
         : (instructions.policy.aggregation ??
           (output.aggregation ? ("allow" as const) : ("deny" as const))),
     rewrite:
+      decision.classification ||
       pending.has("rewrite") ||
       output.disposition === "needs_context" ||
       (context.entry_content?.length ?? 0) > 60_000
@@ -200,12 +203,13 @@ export function effectiveSemanticAssessments(
 export function semanticProfileNeedsAnalysis(
   profile: EntrySemanticProfile | null,
   tagIds: readonly string[],
+  requireEntities = true,
 ) {
   return (
     tagIds.length > 0 &&
     (!profile ||
-      profile.entityVersion !== SEMANTIC_ENTITY_VERSION ||
-      !profile.entities ||
+      (requireEntities &&
+        (profile.entityVersion !== SEMANTIC_ENTITY_VERSION || !profile.entities)) ||
       tagIds.some((id) => {
         const assessment = profile.assessments.find((item) => item.tagId === id)
         return (

@@ -5,12 +5,44 @@ import { join } from "pathe"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
+import { defaultDecisionsSettings } from "./decisions-config"
 import { FoloReader } from "./folo"
 import type { GeneratedFeedPage } from "./generated-feeds"
 import { nativeReaderApi } from "./native-reader-api"
 import { Store } from "./store"
 
 const stores: Store[] = []
+it("reads and writes separate Decisions settings without contacting Folo or exposing credentials", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "folo-native-decisions-"))
+  const store = new Store(":memory:")
+  stores.push(store)
+  store.bindOwner("owner")
+  const aiConfig = new AIConfigStore(join(directory, "ai.json"))
+  const getReader = vi.fn(async () => {
+    throw new Error("must stay offline")
+  })
+  const api = nativeReaderApi({ store, aiConfig, getReader })
+  try {
+    expect(await api.handle("GET", "/processing/decisions-settings", undefined)).toMatchObject({
+      enabled: false,
+      hasApiKey: false,
+    })
+    const response = await api.handle("PUT", "/processing/decisions-settings", {
+      ...defaultDecisionsSettings,
+      enabled: true,
+      apiKey: "fixture-private-key",
+    })
+    expect(response).toMatchObject({ enabled: true, hasApiKey: true })
+    expect(JSON.stringify(response)).not.toContain("fixture-private-key")
+    expect(await api.handle("GET", "/processing/decisions-audit", undefined)).toEqual({
+      records: [],
+      dedupeRecords: [],
+    })
+    expect(getReader).not.toHaveBeenCalled()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 afterEach(() => stores.splice(0).forEach((store) => store.close()))
 const collectionRow = (index: number) => ({
   entries: {

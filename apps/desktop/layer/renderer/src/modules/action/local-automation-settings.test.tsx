@@ -258,6 +258,46 @@ describe("single local automation editor", () => {
     expect(mocks.client.activateRule.mock.calls[0]![1]).toBe(2)
     expect(mocks.disable).not.toHaveBeenCalled()
   })
+  it.each(["generation", "decisions"])(
+    "persists %s on only the selected rule and restores it in a new editor",
+    async (model) => {
+      await render()
+      await selectRow("Second")
+      const selector = container.querySelector<HTMLSelectElement>(
+        '[aria-label="automation.rule_model.label"]',
+      )!
+      expect(selector.value).toBe("inherit")
+      await act(async () => {
+        selector.value = model
+        selector.dispatchEvent(new Event("change", { bubbles: true }))
+      })
+      await click("automation.editor.save")
+      const saved = mocks.client.activateRule.mock.calls[0]![0] as AutomationRule
+      expect(saved).toMatchObject({ id: "second", decisionModel: model })
+      expect(config().rules[0]).not.toHaveProperty("decisionModel")
+      const snapshot = editorSnapshot()
+      snapshot.editor.config.rules[1] = saved
+      snapshot.effective.config.rules[1] = saved
+      mocks.client.loadEditor.mockResolvedValue(snapshot)
+      await act(async () => root.unmount())
+      root = createRoot(container)
+      await render()
+      await selectRow("Second")
+      expect(
+        container.querySelector<HTMLSelectElement>('[aria-label="automation.rule_model.label"]')!
+          .value,
+      ).toBe(model)
+      await click("automation.rule_model.copy")
+      const duplicateSelector = container.querySelector<HTMLSelectElement>(
+        '[aria-label="automation.rule_model.label"]',
+      )!
+      expect(duplicateSelector.value).toBe(model)
+      await click("automation.editor.save")
+      const copy = mocks.client.activateRule.mock.calls.at(-1)![0] as AutomationRule
+      expect(copy).toMatchObject({ decisionModel: model, enabled: false })
+      expect(copy.id).not.toBe(saved.id)
+    },
+  )
   it("creates AI rules from the main create button without another service form", async () => {
     await render()
     await click("automation.editor.create")

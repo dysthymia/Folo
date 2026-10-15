@@ -16,6 +16,8 @@ import {
 } from "~/modules/action/processing-condition-editor"
 import { getOneTimeToken, isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 
+import { DecisionsSettingsSection } from "./DecisionsSettingsSection"
+
 const client = createProcessingClient(getOneTimeToken)
 const qianwenBaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 const effortLabels = {
@@ -53,7 +55,12 @@ function canonicalBaseUrl(value: string) {
 
 export function LocalProcessingModelSection() {
   const ownerId = useWhoami()?.id
-  return isLocalFoloHost() && ownerId ? <ProcessingModelEditor key={ownerId} /> : null
+  return isLocalFoloHost() && ownerId ? (
+    <div key={ownerId}>
+      <ProcessingModelEditor />
+      <DecisionsSettingsSection />
+    </div>
+  ) : null
 }
 
 /** 使用后台真实执行配置；本机对话共用该配置，原 Folo 云端/BYOK 配置保持独立。 */

@@ -11,6 +11,16 @@ import { aiReasoningEffort, reasoningFingerprint } from "./ai-reasoning"
 import type { CodexJsonOptions, CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
+import {
+  allSemanticRulesUseDecisions,
+  DECISIONS_CANONICAL_MODEL,
+  DECISIONS_MODEL,
+  DECISIONS_VERSION,
+  decisionsSettings,
+  defaultDecisionsSettings,
+  semanticRulesForInput,
+} from "./decisions-config"
+import type { requestDecisions } from "./openrouter-decisions"
 import { processLongEntry } from "./processing-chunks"
 import { processingRuleInput } from "./processing-context"
 import type {
@@ -24,6 +34,7 @@ import {
   entryModelOutputSchema,
   entryModelSelectionJSONSchema,
 } from "./processing-decision"
+import { classifyWithDecisions, decisionsOnlyEligible } from "./processing-decisions"
 import { materializeEvent } from "./processing-event"
 import { materializeEventMentions } from "./processing-event-mentions"
 import type { EvidenceCatalog } from "./processing-evidence"
@@ -42,6 +53,7 @@ import {
   SOURCE_FIDELITY_REQUIREMENTS,
 } from "./processing-prompt"
 import { entryReadState, inputReadState } from "./processing-read-state"
+import { attachRuleDecisions } from "./processing-rule-decisions"
 import { matchesAIRule, runnableReleasedConfig } from "./processing-rule-scope"
 import {
   createSemanticProfile,
@@ -127,7 +139,10 @@ export type EntryProcessingOptions = {
   onProgress?: (result: EntryProcessingResult) => void
   // 同一证据目录可同时产出单篇、去重与新综述，避免各规则重读正文。
   sharedAnalysis?: SharedAnalysisSession
+  decisionsExecute?: typeof requestDecisions
 }
+
+const decisionsRequests = new WeakMap<EntryProcessingResult, number>()
 
 // 用条目最早入库时间判断新内容，正文水合生成新 seq 不能把旧文挪过启用水位。
 const classificationArrivalTimes = new WeakMap<EntryProcessingOptions, Map<string, number>>()
@@ -344,6 +359,9 @@ export async function runEntryProcessing(
           : {}),
         sourceRole: sourceRole(options.store, context.source_id),
         metadataVersion: options.store.subscriptionTags.snapshot().revision,
+        decisions: config.decisions
+          ? decisionsSettings(config.decisions)
+          : defaultDecisionsSettings,
       }
       target = options.store.processingState.prepare(candidate.seq, snapshot)
       if (
@@ -370,6 +388,12 @@ export async function runEntryProcessing(
         target: target.snapshot,
         instructions,
         historySince: options.historySince,
+        decisionsOnly:
+          allSemanticRulesUseDecisions(
+            effectiveConfig,
+            target.snapshot.context,
+            target.snapshot.decisions,
+          ) && decisionsOnlyEligible(effectiveConfig, target.snapshot.context),
       })
       const cached = options.store.processingState.cache(fingerprint)
       if (!cached && text.length <= MAX_ENTRY_CHARS) {
@@ -379,7 +403,7 @@ export async function runEntryProcessing(
         }
         started = true
       }
-      let decision: ProcessingDecision
+      let decision: ProcessingDecision | null
       if (cached) {
         metrics.cacheHits++
         decision = {
@@ -406,6 +430,28 @@ export async function runEntryProcessing(
           durationMs: 0,
           usage: null,
         }
+      } else if (
+        allSemanticRulesUseDecisions(
+          effectiveConfig,
+          target.snapshot.context,
+          target.snapshot.decisions,
+        ) &&
+        decisionsOnlyEligible(effectiveConfig, target.snapshot.context)
+      ) {
+        decision = await runDecisionsItem(
+          options,
+          {
+            input: target.input,
+            target,
+            text,
+            instructions,
+            config: effectiveConfig,
+            fingerprint,
+            evidence: createEvidenceCatalog(text),
+            groupKey: "decisions",
+          },
+          result,
+        )
       } else {
         const execution = await options.aiConfig.execution(
           target.snapshot.provider,
@@ -638,6 +684,9 @@ async function prepareNormalEntryBatches(
           : {}),
         sourceRole: sourceRole(options.store, context.source_id),
         metadataVersion: options.store.subscriptionTags.snapshot().revision,
+        decisions: config.decisions
+          ? decisionsSettings(config.decisions)
+          : defaultDecisionsSettings,
       })
       if (
         !target.input.current ||
@@ -661,6 +710,12 @@ async function prepareNormalEntryBatches(
         target: target.snapshot,
         instructions,
         historySince: options.historySince,
+        decisionsOnly:
+          allSemanticRulesUseDecisions(
+            effectiveConfig,
+            target.snapshot.context,
+            target.snapshot.decisions,
+          ) && decisionsOnlyEligible(effectiveConfig, target.snapshot.context),
       })
       const cached = options.store.processingState.cache(fingerprint)
       if (cached) {
@@ -762,6 +817,17 @@ function boundedBatchGroups(items: PreparedBatchItem[]): PreparedBatchItem[][] {
   const fingerprints = new Set<string>()
   const equivalentContexts: PreparedBatchItem[] = []
   for (const item of items) {
+    if (
+      allSemanticRulesUseDecisions(
+        item.config,
+        item.target.snapshot.context,
+        item.target.snapshot.decisions,
+      ) &&
+      decisionsOnlyEligible(item.config, item.target.snapshot.context)
+    ) {
+      groups.push([item])
+      continue
+    }
     // 等效上下文延后领取首个原文结果，避免占据批次名额或打断原文装箱。
     if (fingerprints.has(item.fingerprint)) {
       equivalentContexts.push(item)
@@ -995,6 +1061,23 @@ async function retryBatchItem(
     return
   }
   try {
+    if (
+      allSemanticRulesUseDecisions(
+        item.config,
+        item.target.snapshot.context,
+        item.target.snapshot.decisions,
+      ) &&
+      decisionsOnlyEligible(item.config, item.target.snapshot.context)
+    ) {
+      const decision = await runDecisionsItem(options, item, result)
+      if (options.signal.aborted || !batchTargetCurrent(options.store, item)) {
+        result.pending++
+        return
+      }
+      await publishDecision(options, item.input, decision, result, item.target.snapshot)
+      options.onProgress?.(result)
+      return
+    }
     const execution = await options.aiConfig.execution(
       item.target.snapshot.provider,
       item.target.snapshot.baseUrl,
@@ -1103,6 +1186,65 @@ function decisionForOutput(
   }
 }
 
+async function runDecisionsItem(
+  options: EntryProcessingOptions,
+  item: PreparedBatchItem,
+  result: EntryProcessingResult,
+) {
+  const settings = { ...item.target.snapshot.decisions!, classificationEnabled: true }
+  const config = (await options.aiConfig.read()).decisions
+  const count = decisionsRequests.get(result) ?? 0
+  const response = await classifyWithDecisions({
+    target: item.input,
+    text: item.text,
+    tagIds: item.instructions.semanticTagIds,
+    settings,
+    config: config ? { ...config, classificationEnabled: true } : undefined,
+    ruleIds: semanticRulesForInput(item.config, item.target.snapshot.context).map(
+      (rule) => rule.id,
+    ),
+    fingerprint: item.fingerprint,
+    budgetAllowed: count < settings.maxRequestsPerRun,
+    signal: options.signal,
+    execute: options.decisionsExecute,
+    record: (audit) => {
+      if (audit.attempted) {
+        decisionsRequests.set(result, count + 1)
+        result.metrics!.modelCalls++
+        if (audit.status !== "success") result.metrics!.modelFailures++
+      }
+      options.store.processingState.recordDecisions(audit)
+    },
+  })
+  const usage = response.audit.usage
+    ? {
+        inputTokens: response.audit.usage.input_tokens,
+        outputTokens: response.audit.usage.output_tokens,
+        cachedInputTokens: 0,
+      }
+    : null
+  addUsage(result.usage, usage)
+  // 预算耗尽尚未发请求，不生成永久未知结果；下一轮仍可消费本条。
+  if (response.audit.code === "run_limit") return null
+  const decision: ProcessingDecision = {
+    ...decisionForOutput(
+      item,
+      response.output,
+      response.audit.durationMs,
+      usage,
+      response.evidence,
+    ),
+    classification: {
+      kind: "openrouter-decisions",
+      mode: settings.mode,
+      model: response.audit.model ?? DECISIONS_MODEL,
+      protocolVersion: DECISIONS_VERSION,
+    },
+  }
+  if (response.cacheable) options.store.processingState.saveCache(decision)
+  return decision
+}
+
 function promptForEntryBatch(group: PreparedBatchItem[], historySince: string) {
   const first = group[0]!
   const instructions = semanticAnalysisInstructions(first.instructions)
@@ -1136,6 +1278,7 @@ function entryFingerprint(input: {
   target: TargetSnapshot
   instructions: ReturnType<typeof compileInstructions>
   historySince: string
+  decisionsOnly?: boolean
 }) {
   if (input.instructions.semanticTagIds.length) {
     const analysis = semanticAnalysisInstructions(input.instructions)
@@ -1157,6 +1300,26 @@ function entryFingerprint(input: {
       transformations: analysis.transformations.map((item) => item.prompt),
       language: analysis.display.language,
       definitions: semanticDefinitionsForIds(input.instructions.semanticTagIds),
+      ...(input.decisionsOnly
+        ? {
+            decisions: {
+              ...input.target.decisions,
+              model: DECISIONS_MODEL,
+              canonicalModel: DECISIONS_CANONICAL_MODEL,
+              version: DECISIONS_VERSION,
+              material: {
+                title: input.input.body.title,
+                html: input.input.body.content,
+                originalContent: input.input.body.originalContent,
+                imageCount: input.input.body.imageCount,
+                mediaLength: input.input.body.mediaLength,
+                attachmentsDuration: input.input.body.attachmentsDuration,
+                context: input.input.body.context,
+                linkedMaterials: input.input.body.linkedMaterials,
+              },
+            },
+          }
+        : {}),
     })
   }
   return hash({
@@ -1248,10 +1411,132 @@ export function resolvedPolicy(
 async function publishDecision(
   options: EntryProcessingOptions,
   input: PreparedBatchItem["input"],
-  decision: ProcessingDecision,
+  candidateDecision: ProcessingDecision | null,
   result: EntryProcessingResult,
   snapshot: TargetSnapshot,
 ) {
+  const defer = () => {
+    options.store.processingState.defer(input)
+    result.pending++
+    result.metrics!.budgetDeferred++
+  }
+  if (!candidateDecision) {
+    defer()
+    return
+  }
+  let decision = candidateDecision
+  let deferred = false
+  const release =
+    input.releaseVersion === null ? null : options.store.automation.release(input.releaseVersion)
+  if (release && snapshot.decisions) {
+    const config = runnableReleasedConfig(
+      release,
+      options.store.automation.effective?.().config,
+      decision.context,
+      classificationAllowed(options, input),
+    )
+    decision = await attachRuleDecisions({
+      target: input,
+      decision,
+      config,
+      settings: snapshot.decisions,
+      text: sourceText(input.body.content ?? ""),
+      signal: options.signal,
+      readConfig: async () => (await options.aiConfig.read()).decisions,
+      store: options.store.processingState,
+      execute: options.decisionsExecute,
+      onDeferred: () => {
+        deferred = true
+      },
+      budgetAllowed: () =>
+        (decisionsRequests.get(result) ?? 0) < snapshot.decisions!.maxRequestsPerRun,
+      record: (audit) => {
+        if (audit.attempted) {
+          decisionsRequests.set(result, (decisionsRequests.get(result) ?? 0) + 1)
+          result.metrics!.modelCalls++
+          if (audit.status !== "success") result.metrics!.modelFailures++
+          if (audit.usage)
+            addUsage(result.usage, {
+              inputTokens: audit.usage.input_tokens,
+              outputTokens: audit.usage.output_tokens,
+              cachedInputTokens: 0,
+            })
+        }
+        options.store.processingState.recordDecisions(audit)
+      },
+    })
+  }
+  if (deferred) {
+    defer()
+    return
+  }
+  if (decision.classification) {
+    const current = (await options.aiConfig.read()).decisions
+    const settings = snapshot.decisions
+    const stillAuthorized =
+      release &&
+      allSemanticRulesUseDecisions(release, decision.context, current) &&
+      current?.enabled &&
+      current &&
+      settings &&
+      JSON.stringify({ ...decisionsSettings(current), classificationEnabled: true }) ===
+        JSON.stringify({ ...decisionsSettings(settings), classificationEnabled: true })
+    if (!stillAuthorized && decision.semanticProfile) {
+      const assessments = decision.semanticProfile.assessments.map((assessment) => ({
+        ...assessment,
+        state: "unknown" as const,
+        confidence: null,
+        reason: "Decisions 设置已变更，保留原文；原始判断仍在审计中。",
+      }))
+      decision = {
+        ...decision,
+        ruleSemanticProfiles: decision.ruleSemanticProfiles
+          ? Object.fromEntries(
+              Object.entries(decision.ruleSemanticProfiles).map(([id, stored]) => [
+                id,
+                {
+                  ...stored,
+                  profile: {
+                    ...stored.profile,
+                    assessments: stored.profile.assessments.map((item) => ({
+                      ...item,
+                      state: "unknown",
+                      confidence: null,
+                      reason: "Decisions consent changed; retain the article.",
+                    })),
+                    coverage: "partial",
+                    semanticAssessmentCoverage: "partial",
+                  },
+                },
+              ]),
+            )
+          : undefined,
+        context: {
+          ...decision.context,
+          ruleTagAssessments: decision.context.ruleTagAssessments
+            ? Object.fromEntries(
+                Object.entries(decision.context.ruleTagAssessments).map(([id, values]) => [
+                  id,
+                  values?.map((item) => ({
+                    ...item,
+                    state: "unknown",
+                    confidence: null,
+                    reason: "Decisions consent changed; retain the article.",
+                  })) ?? null,
+                ]),
+              )
+            : undefined,
+        },
+        semanticProfile: {
+          ...decision.semanticProfile,
+          assessments,
+          semanticAssessmentCoverage: "partial",
+          coverage: "partial",
+        },
+        semantic: decision.semantic ? { ...decision.semantic, tagAssessments: assessments } : null,
+      }
+    }
+  }
   // 模型缓存也须验证原文证据，历史异常引用不能再次正式发布。
   const originalText = sourceText(input.body.content ?? "")
   if (decision.facts.some((fact) => !containsQuote(originalText, fact.quote)))
@@ -1272,6 +1557,24 @@ async function publishDecision(
         classificationAllowed(options, input),
       )
       const assessments = options.store.semantics.assessments(input, decision.semanticProfile)
+      if (decision.ruleSemanticProfiles)
+        decision = {
+          ...decision,
+          context: {
+            ...decision.context,
+            ruleTagAssessments: Object.fromEntries(
+              effectiveConfig.rules.map((rule) => {
+                const stored = decision.ruleSemanticProfiles?.[rule.id]
+                const values =
+                  stored &&
+                  (rule.decisionModel === undefined || stored.executor === rule.decisionModel)
+                    ? options.store.semantics.assessments(input, stored.profile)
+                    : null
+                return [rule.id, values]
+              }),
+            ),
+          },
+        }
       const instructions = compileInstructions(effectiveConfig, {
         ...decision.context,
         entry_tag: undefined,
@@ -1355,6 +1658,8 @@ async function publishDecision(
     .overrides()
     .find((item) => item.inputSeq === input.seq)?.mode
   decision = applyOverride(decision, mode ?? "automatic")
+  if (decision.classification)
+    decision = { ...decision, policy: { ...decision.policy, aggregation: "deny", rewrite: "deny" } }
   const published = options.store.semantics
     ? options.store.semantics.publish(input, decision)
     : options.store.automation.complete(input, decision)

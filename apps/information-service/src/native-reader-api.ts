@@ -55,6 +55,15 @@ export function nativeReaderApi(options: {
         if (method === "GET") return options.aiConfig.publicSettings()
         if (method === "PUT") return options.aiConfig.save(body)
       }
+      if (path === "/processing/decisions-settings") {
+        if (method === "GET") return options.aiConfig.publicDecisionsSettings()
+        if (method === "PUT") return options.aiConfig.saveDecisions(body)
+      }
+      if (path === "/processing/decisions-audit" && method === "GET")
+        return {
+          records: options.store.processingState.decisionsAudit(),
+          dedupeRecords: options.store.dedupe.decisionsObservations(),
+        }
       if (path !== "/processing/generated-feed/items" || !["GET", "POST"].includes(method)) return
       const query = generatedFeedQuerySchema.parse(body ?? {})
       if (query.mode !== "collections") return

@@ -9,7 +9,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
+import { DECISIONS_CANONICAL_MODEL, defaultDecisionsSettings } from "./decisions-config"
 import type { SourceEntry } from "./folo"
+import { parseDecisionsResponse } from "./openrouter-decisions"
 import type { ProcessingDecision } from "./processing-decision"
 import {
   activeDedupeActions,
@@ -185,6 +187,356 @@ function publishPair(store: Store) {
 function duplicateExecute() {
   return fakeExecute(() => ({ duplicate: true, confidence: 0.93, keep: "older", hide: "newer" }))
 }
+
+async function decisionsFixture() {
+  const f = fixture()
+  publishRules(f.store, [dedupeRule({ all: true })])
+  publishDecision(
+    f.store,
+    entry("older", "Example 发布新版", "2026-01-10T00:00:00Z", "Example 发布新版，价格十美元。"),
+  )
+  publishDecision(
+    f.store,
+    entry(
+      "newer",
+      "Example 发布新版",
+      "2026-01-10T01:00:00Z",
+      "新版由 Example 发布，售价为十美元。",
+    ),
+  )
+  await f.aiConfig.saveDecisions({
+    ...defaultDecisionsSettings,
+    enabled: true,
+    apiKey: "offline-key",
+    dedupeObservation: { enabled: true, mode: "apply", maxPairsPerTrigger: 8 },
+  })
+  const execute = negativeExecute()
+  return {
+    ...f,
+    options: {
+      ...f,
+      execute: execute as never,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+    },
+    execute,
+  }
+}
+
+function fixedDecisions(coverage: string, confidence = 0.99) {
+  return vi.fn(
+    async (input: Parameters<typeof import("./openrouter-decisions").requestDecisions>[0]) =>
+      parseDecisionsResponse(
+        {
+          model: DECISIONS_CANONICAL_MODEL,
+          provider: "OpenAI",
+          usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 },
+          answers: {
+            same_event: { type: "noul", noul: 0.99 },
+            material_complete: { type: "noul", noul: 0.99 },
+            conflicts: { type: "noul", noul: 0.01 },
+            coverage: { type: "choice", choice: coverage, confidence },
+          },
+        },
+        input.questions,
+      ),
+  )
+}
+
+// 降低概率门槛必须重新解释已有回答，不能让旧“未知”缓存永久挡住去重或重复计费。
+it("reapplies a saved low-confidence answer after lowering the threshold without model calls", async () => {
+  const f = await decisionsFixture()
+  const decisionsExecute = fixedDecisions("equivalent", 0.88)
+  expect(await runSemanticDedupe({ ...f.options, decisionsExecute })).toMatchObject({
+    duplicates: 0,
+  })
+  const config = (await f.aiConfig.read()).decisions!
+  await f.aiConfig.saveDecisions({ ...config, threshold: 0.85 })
+  expect(await runSemanticDedupe({ ...f.options, decisionsExecute, maxBatches: 0 })).toMatchObject({
+    duplicates: 1,
+    batches: 0,
+    relationCacheHits: 1,
+  })
+  expect(decisionsExecute).toHaveBeenCalledOnce()
+  expect(f.execute).not.toHaveBeenCalled()
+  expect(f.store.dedupe.merges(fingerprintsOf(f.store))).toHaveLength(1)
+})
+
+it.each([true, false])(
+  "routes two dedupe rules independently when the global Decisions mode is %s",
+  async (globalEnabled) => {
+    const f = await decisionsFixture()
+    publishRules(f.store, [
+      { ...dedupeRule({ all: true }), id: "gen-rule", order: 0, decisionModel: "generation" },
+      { ...dedupeRule({ all: true }), id: "dec-rule", order: 1, decisionModel: "decisions" },
+    ])
+    await f.aiConfig.saveDecisions({
+      ...defaultDecisionsSettings,
+      enabled: true,
+      dedupeObservation: {
+        enabled: globalEnabled,
+        mode: globalEnabled ? "apply" : "observe",
+        maxPairsPerTrigger: 8,
+      },
+    })
+    const decisionsExecute = fixedDecisions("equivalent")
+    expect(await runSemanticDedupe({ ...f.options, decisionsExecute })).toMatchObject({
+      duplicates: 1,
+      decisionsRequests: 1,
+    })
+    expect(f.execute).toHaveBeenCalledTimes(1)
+    expect(decisionsExecute).toHaveBeenCalledTimes(1)
+    expect(f.store.dedupe.decisionsObservations()[0]?.ruleId).toBe("dec-rule")
+  },
+)
+
+it.each(["equivalent", "first_contains_second", "second_contains_first"])(
+  "direct Decisions %s publishes only through existing merge/read protections",
+  async (coverage) => {
+    const f = await decisionsFixture()
+    const plan = prepareSemanticDedupe({ store: f.store })[0]!
+    const candidate = plan.candidates[0]!
+    const decisionsExecute = fixedDecisions(coverage)
+    expect(await runSemanticDedupe({ ...f.options, decisionsExecute })).toMatchObject({
+      duplicates: 1,
+      decisionsRequests: 1,
+      usage: { inputTokens: 100 },
+    })
+    expect(f.execute).not.toHaveBeenCalled()
+    expect(f.store.dedupe.decisionsObservations()[0]).toMatchObject({
+      mode: "apply",
+      status: "decided",
+    })
+    const expected =
+      coverage === "first_contains_second"
+        ? candidate.entries[0].itemId
+        : coverage === "second_contains_first"
+          ? candidate.entries[1].itemId
+          : candidate.keepEntryId
+    expect(f.store.dedupe.merges(fingerprintsOf(f.store))[0]?.keep.itemId).toBe(expected)
+    expect(f.store.automation.inputs().every((input) => input.body.read === false)).toBe(true)
+  },
+)
+
+it.each(["failure", "uncertain", "different", "late-disable", "late-read"])(
+  "direct Decisions %s keeps articles without a generation fallback",
+  async (mode) => {
+    const f = await decisionsFixture()
+    const reply = fixedDecisions(
+      mode === "different" ? "different" : "equivalent",
+      mode === "uncertain" ? 0.6 : 0.99,
+    )
+    const decisionsExecute = vi.fn(
+      async (input: Parameters<typeof import("./openrouter-decisions").requestDecisions>[0]) => {
+        if (mode === "failure") throw new Error("offline failure")
+        if (mode === "late-disable")
+          await f.aiConfig.saveDecisions({ ...defaultDecisionsSettings, enabled: false })
+        if (mode === "late-read")
+          f.store.saveEntry({ ...f.store.entry(source.key, "newer")!, read: true })
+        return reply(input)
+      },
+    )
+    expect(await runSemanticDedupe({ ...f.options, decisionsExecute })).toMatchObject({
+      duplicates: 0,
+    })
+    expect(f.execute).not.toHaveBeenCalled()
+    expect(f.store.dedupe.merges(fingerprintsOf(f.store))).toEqual([])
+  },
+)
+
+it.each(["global-off", "generation"])(
+  "%s restores the selected generation model for dedupe",
+  async (mode) => {
+    const f = await decisionsFixture()
+    await f.aiConfig.saveDecisions({
+      ...defaultDecisionsSettings,
+      enabled: mode !== "global-off",
+      dedupeObservation: { enabled: false, mode: "observe", maxPairsPerTrigger: 8 },
+    })
+    const decisionsExecute = fixedDecisions("equivalent")
+    expect(await runSemanticDedupe({ ...f.options, decisionsExecute })).toMatchObject({
+      batches: 1,
+      duplicates: 0,
+    })
+    expect(f.execute).toHaveBeenCalledTimes(1)
+    expect(decisionsExecute).not.toHaveBeenCalled()
+  },
+)
+
+// 只有显式启用后才消费已有低置信账本；普通模型复核结果（含失败）不能反复付费。
+it.each(["success", "failure", "late-disable", "low-confidence"])(
+  "rechecks an uncertain Decisions pair once: %s",
+  async (mode) => {
+    const f = await decisionsFixture()
+    const decisionsExecute = fixedDecisions("equivalent", 0.6)
+    await runSemanticDedupe({ ...f.options, decisionsExecute })
+    expect(f.execute).not.toHaveBeenCalled()
+    const config = (await f.aiConfig.read()).decisions!
+    await f.aiConfig.saveDecisions({
+      ...config,
+      dedupeObservation: { ...config.dedupeObservation!, generationFallback: true },
+    })
+    expect(f.store.dedupe.unresolvedDecisions(fingerprintsOf(f.store))[0]).toMatchObject({
+      status: "uncertain",
+      model: DECISIONS_CANONICAL_MODEL,
+      reason: expect.stringContaining("low_confidence"),
+    })
+    expect(
+      prepareSemanticDedupe({ store: f.store, recheckUncertainDecisions: true })[0]?.candidates,
+    ).toHaveLength(1)
+    const success = fakeExecute(() => ({
+      duplicate: true,
+      confidence: mode === "low-confidence" ? 0.9 : 0.99,
+      keep: "older",
+      hide: "newer",
+    }))
+    const execute = vi.fn(async (request) => {
+      if (mode === "failure") throw new Error("offline failure")
+      if (mode === "late-disable")
+        await f.aiConfig.saveDecisions({
+          ...config,
+          dedupeObservation: { ...config.dedupeObservation!, generationFallback: false },
+        })
+      return success(request)
+    })
+    const result = await runSemanticDedupe({
+      ...f.options,
+      execute: execute as never,
+      decisionsExecute,
+    })
+    expect(result.duplicates).toBe(mode === "success" ? 1 : 0)
+    expect(execute).toHaveBeenCalledOnce()
+    expect(decisionsExecute).toHaveBeenCalledOnce()
+    if (mode !== "late-disable") {
+      await runSemanticDedupe({ ...f.options, execute: execute as never, decisionsExecute })
+      expect(execute).toHaveBeenCalledOnce()
+      expect(f.store.dedupe.candidateExcludedPairKeys(fingerprintsOf(f.store), true).size).toBe(1)
+    }
+  },
+)
+
+it("defers a recheck at the batch limit and reuses the Decisions ledger next time", async () => {
+  const f = await decisionsFixture()
+  const config = (await f.aiConfig.read()).decisions!
+  await f.aiConfig.saveDecisions({
+    ...config,
+    dedupeObservation: { ...config.dedupeObservation!, generationFallback: true },
+  })
+  const decisionsExecute = fixedDecisions("equivalent", 0.6)
+  const execute = fakeExecute(() => ({
+    duplicate: true,
+    confidence: 0.99,
+    keep: "older",
+    hide: "newer",
+  }))
+  const options = { ...f.options, execute: execute as never, decisionsExecute, maxBatches: 1 }
+  expect(await runSemanticDedupe(options)).toMatchObject({ batches: 1, duplicates: 0 })
+  expect(execute).not.toHaveBeenCalled()
+  expect(await runSemanticDedupe(options)).toMatchObject({ batches: 1, duplicates: 1 })
+  expect(decisionsExecute).toHaveBeenCalledOnce()
+  expect(execute).toHaveBeenCalledOnce()
+})
+
+it.each([false, true])(
+  "Decisions observation leaves original negative/positive dedupe outcomes and read states unchanged (%s)",
+  async (originalDuplicate) => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishDecision(
+      store,
+      entry(
+        "older",
+        "Example 发布新版",
+        "2026-01-10T00:00:00.000Z",
+        "Example 发布新版，价格十美元。",
+      ),
+    )
+    publishDecision(
+      store,
+      entry(
+        "newer",
+        "Example 发布新版",
+        "2026-01-10T01:00:00.000Z",
+        "新版由 Example 发布，售价为十美元。",
+      ),
+    )
+    await aiConfig.saveDecisions({
+      ...defaultDecisionsSettings,
+      enabled: true,
+      apiKey: "offline-decisions",
+      dedupeObservation: { enabled: true, maxPairsPerTrigger: 8 },
+    })
+    const decisionsExecute = vi.fn(
+      async (input: Parameters<typeof import("./openrouter-decisions").requestDecisions>[0]) =>
+        parseDecisionsResponse(
+          {
+            model: DECISIONS_CANONICAL_MODEL,
+            provider: "OpenAI",
+            usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 },
+            answers: {
+              same_event: { type: "noul", noul: 0.99 },
+              material_complete: { type: "noul", noul: 0.99 },
+              conflicts: { type: "noul", noul: 0.01 },
+              coverage: {
+                type: "choice",
+                choice: originalDuplicate ? "different" : "equivalent",
+                confidence: 0.99,
+              },
+            },
+          },
+          input.questions,
+        ),
+    )
+    const result = await runSemanticDedupe({
+      store,
+      aiConfig,
+      runtimeDir: "/unused",
+      signal: new AbortController().signal,
+      execute: (originalDuplicate ? duplicateExecute() : negativeExecute()) as never,
+      decisionsExecute,
+      triggerId: "shadow-trigger",
+    })
+    expect(result.duplicates).toBe(Number(originalDuplicate))
+    expect(store.dedupe.decisionsObservations()).toContainEqual(
+      expect.objectContaining({ comparison: "disagree", status: "decided" }),
+    )
+    expect(store.dedupe.merges(fingerprintsOf(store))).toHaveLength(Number(originalDuplicate))
+    expect(store.automation.inputs().every((input) => input.body.read === false)).toBe(true)
+    expect(store.processingState.published()).toHaveLength(2)
+    expect(store.dedupe.decisionsObservations()[0]?.reference?.model).toBe("test-model")
+  },
+)
+
+it("exact duplicates never call the dedicated endpoint even with observation enabled", async () => {
+  const { store, aiConfig } = fixture()
+  publishRules(store, [dedupeRule({ all: true })])
+  for (const [id, time] of [
+    ["older", "2026-01-10T00:00:00.000Z"],
+    ["newer", "2026-01-10T06:00:00.000Z"],
+  ])
+    publishDecision(store, {
+      ...entry(id!, "同一标题", time!, "严格相同短原文"),
+      url: "https://example.test/article",
+    })
+  await aiConfig.saveDecisions({
+    ...defaultDecisionsSettings,
+    enabled: true,
+    apiKey: "offline-key",
+    dedupeObservation: { enabled: true, maxPairsPerTrigger: 8 },
+  })
+  const decisionsExecute = vi.fn()
+  const result = await runSemanticDedupe({
+    store,
+    aiConfig,
+    runtimeDir: "/unused",
+    signal: new AbortController().signal,
+    execute: negativeExecute() as never,
+    decisionsExecute,
+  })
+  expect(result.exactDuplicates).toBe(1)
+  expect(decisionsExecute).not.toHaveBeenCalled()
+  expect(store.dedupe.decisionsObservations()).toEqual([])
+})
 
 // 用真实 StoryStore 构造可读综述，候选排除必须遵守服务资格而不是只看残留成员关系。
 function createStory(store: Store, inputs: ProcessingInput[]) {
@@ -1083,7 +1435,7 @@ describe("去重根因回归", () => {
     expect(rolesOf(store)).toEqual([])
   })
 
-  it("附件或引用未补齐时不执行精确或语义隐藏", async () => {
+  it("未核验附件的扩展版保留，正文等价的完整纯文字版可以折叠", async () => {
     const { store, aiConfig } = fixture()
     publishRules(store, [dedupeRule({ all: true })])
     const content = "附件中包含各轮次的资格与截止条件，正文不能替代配图。".repeat(5)
@@ -1096,12 +1448,14 @@ describe("去重根因回归", () => {
     })
     const execute = duplicateExecute()
     expect(await runFixture(store, aiConfig, execute)).toMatchObject({
-      batches: 0,
-      duplicates: 0,
-      unresolved: 1,
+      batches: 1,
+      duplicates: 1,
+      unresolved: 0,
     })
-    expect(execute).not.toHaveBeenCalled()
-    expect(rolesOf(store)).toEqual([])
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(store.dedupe.merges(fingerprintsOf(store))).toMatchObject([
+      { keep: { itemId: "newer" }, hide: { itemId: "older" } },
+    ])
   })
 
   it.each([true, null] as const)("成功条目当前读态为 %s 时不进入去重候选", async (read) => {

@@ -193,7 +193,22 @@ export type ProcessingDecision = {
   facts: EntryModelOutput["facts"]
   semantic: EntryModelOutput | null
   semanticProfile?: EntrySemanticProfile
+  ruleSemanticProfiles?: Record<
+    string,
+    {
+      executor: "generation" | "decisions"
+      model: string
+      fingerprint: string
+      profile: EntrySemanticProfile
+    }
+  >
   reused: boolean
+  classification?: {
+    kind: "openrouter-decisions"
+    mode: "observe" | "apply"
+    model: string
+    protocolVersion: number
+  }
 }
 export type PublishedDecision = {
   input: ProcessingInput

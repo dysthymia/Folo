@@ -2,6 +2,7 @@ import { requiredSemanticTagIds } from "@follow/information-core"
 import { z } from "zod"
 
 import { processingRuleInput } from "./processing-context"
+import { decisionsOnlyEligible } from "./processing-decisions"
 import { resolveAIRuleSourceKeys } from "./processing-rule-scope"
 import type { ProcessingTarget, ProcessingTrigger } from "./processing-schedule"
 import { semanticProfileNeedsAnalysis } from "./processing-semantic-decision"
@@ -73,18 +74,20 @@ export function processListLoaded(
         const active = store.automation.effective()
         if (current && active.config && active.releaseVersion !== null) {
           const stored = store.entry(entry.sourceKey, entry.id)!
-          const requested = requiredSemanticTagIds(
-            active.config,
-            processingRuleInput(
-              store,
-              entry.sourceKey,
-              stored,
-              sourceText(stored.content ?? ""),
-              store.processingState.material(current) === "complete",
-            ),
+          const context = processingRuleInput(
+            store,
+            entry.sourceKey,
+            stored,
+            sourceText(stored.content ?? ""),
+            store.processingState.material(current) === "complete",
           )
+          const requested = requiredSemanticTagIds(active.config, context)
           const profile = requested.length ? store.semantics.view(current).profile : null
-          if (semanticProfileNeedsAnalysis(profile, requested))
+          const classified = store.processingState.published([current.seq])[0]?.decision
+            .classification
+          // 纯标签 Decisions 缓存不包含实体，不能因此把已完成条目反复加入队列。
+          const requireEntities = !classified || !decisionsOnlyEligible(active.config, context)
+          if (semanticProfileNeedsAnalysis(profile, requested, requireEntities))
             store.automation.assignLoadedRelease(current, active.releaseVersion)
         }
         targets.push({ sourceKey: entry.sourceKey, itemId: entry.id })

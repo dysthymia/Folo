@@ -5,6 +5,7 @@ import { dirname } from "pathe"
 import { z } from "zod"
 
 import { reasoningEffortSchema } from "./ai-reasoning"
+import { decisionsConfigSchema, publicDecisionsSettings } from "./decisions-config"
 import { readModelCatalog } from "./model-catalog"
 
 export const QIANWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -59,7 +60,11 @@ const inputSchema = z
   .refine((input) => input.provider !== "openai-compatible" || Boolean(input.baseUrl))
 // 私有文件记录密钥绑定端点；不接受浏览器伪造绑定信息，也不返回密钥及该内部字段。
 const configSchema = z
-  .object({ ...fields, apiKeyBaseUrl: baseUrlSchema.optional() })
+  .object({
+    ...fields,
+    apiKeyBaseUrl: baseUrlSchema.optional(),
+    decisions: decisionsConfigSchema.optional(),
+  })
   .strict()
   .refine((input) => input.provider !== "openai-compatible" || Boolean(input.baseUrl))
 export type AIConfig = z.infer<typeof configSchema>
@@ -96,6 +101,7 @@ export class AIConfigError extends Error {
 }
 
 export class AIConfigStore {
+  private mutationQueue: Promise<void> = Promise.resolve()
   constructor(
     private readonly path: string,
     private readonly modelCatalog = readModelCatalog,
@@ -113,6 +119,38 @@ export class AIConfigStore {
 
   async publicSettings() {
     return this.publicView(await this.read())
+  }
+
+  async publicDecisionsSettings() {
+    return publicDecisionsSettings((await this.read()).decisions)
+  }
+
+  async saveDecisions(input: unknown) {
+    return this.mutate(() => this.saveDecisionsConfig(input))
+  }
+
+  private async saveDecisionsConfig(input: unknown) {
+    const parsed = decisionsConfigSchema.safeParse(input)
+    if (!parsed.success) throw new AIConfigError("invalid_ai_config")
+    const previous = await this.read()
+    const apiKey = parsed.data.apiKey || previous.decisions?.apiKey
+    if (parsed.data.enabled && !apiKey) throw new AIConfigError("ai_key_required")
+    const config = {
+      ...previous,
+      decisions: {
+        ...parsed.data,
+        apiKey,
+        classificationEnabled:
+          typeof input === "object" &&
+          input !== null &&
+          Object.hasOwn(input, "classificationEnabled")
+            ? parsed.data.classificationEnabled
+            : (previous.decisions?.classificationEnabled ?? true),
+        dedupeObservation: parsed.data.dedupeObservation ?? previous.decisions?.dedupeObservation,
+      },
+    }
+    await this.write(config)
+    return publicDecisionsSettings(config.decisions)
   }
 
   private credentialEndpoint(config: AIConfig) {
@@ -137,6 +175,10 @@ export class AIConfigStore {
   }
 
   async save(input: unknown) {
+    return this.mutate(() => this.saveModelConfig(input))
+  }
+
+  private async saveModelConfig(input: unknown) {
     const parsed = inputSchema.safeParse(input)
     if (!parsed.success) throw new AIConfigError("invalid_ai_config")
     if (parsed.data.reasoningEffort !== undefined) {
@@ -160,7 +202,13 @@ export class AIConfigStore {
       ...parsed.data,
       apiKey,
       ...(apiKey ? { apiKeyBaseUrl: endpoint ?? previousEndpoint } : {}),
+      ...(previous.decisions ? { decisions: previous.decisions } : {}),
     }
+    await this.write(config)
+    return this.publicView(config)
+  }
+
+  private async write(config: AIConfig) {
     // 空密码保留已有密钥；原子替换私有文件，浏览器只能获取密钥是否存在。
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
     const temporary = `${this.path}.${randomUUID()}.tmp`
@@ -171,7 +219,16 @@ export class AIConfigStore {
     } finally {
       await rm(temporary, { force: true })
     }
-    return this.publicView(config)
+  }
+
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    // Independent settings forms must not overwrite another form's read-modify-write update.
+    const pending = this.mutationQueue.then(operation)
+    this.mutationQueue = pending.then(
+      () => undefined,
+      () => undefined,
+    )
+    return pending
   }
 
   async execution(

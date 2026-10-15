@@ -2,14 +2,29 @@ import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
 import type { ConditionSet, RuleSet } from "@follow/information-core"
-import { compileInstructions, matchConditions } from "@follow/information-core"
+import { compileInstructions, matchConditions, ruleInputFor } from "@follow/information-core"
 import { z } from "zod"
 
 import type { AIConfigStore } from "./ai-config"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import type { CodexUsage, runCodexJson } from "./codex"
+import { CodexRunError } from "./codex"
 import { contentIdentity } from "./content-identity"
+import {
+  DECISIONS_CANONICAL_MODEL,
+  dedupeDecisionsMode,
+  defaultDecisionsSettings,
+  defaultDedupeObservationSettings,
+} from "./decisions-config"
+import type { DecisionsDedupeAudit } from "./decisions-dedupe"
+import {
+  assessDecisionsDedupe,
+  DECISIONS_DEDUPE_VERSION,
+  decisionsDedupeEvaluation,
+  observeDecisionsDedupe,
+} from "./decisions-dedupe"
 import type { Source, SourceEntry } from "./folo"
+import type { requestDecisions } from "./openrouter-decisions"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
 import type { EventRecallMetadata } from "./processing-event-recall"
@@ -29,6 +44,7 @@ import {
   dedupeUrlHost,
   evaluateSemanticDuplicateCandidates,
   getSemanticDuplicateCandidates,
+  hasCompleteDedupeCoverage,
   isWithinDedupeWindow,
   MAX_SEMANTIC_DUPLICATE_CANDIDATES,
   SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
@@ -67,7 +83,10 @@ export type CachedDedupeRelation = {
   model: string
   provider: string
 }
-export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate) {
+export function semanticDedupeEvidenceKey(
+  candidate: SemanticDuplicateCandidate,
+  namespace?: string,
+) {
   // 包括方向和全部模型可见字段，防止正文、标题、时间或来源变化后误用旧结论。
   return (
     createHash("sha256")
@@ -83,6 +102,7 @@ export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate)
               ...entry
             }) => entry,
           ),
+          ...(namespace ? [namespace] : []),
         ]),
       )
       .digest("hex")
@@ -95,9 +115,11 @@ export function semanticDedupeEvidenceKey(candidate: SemanticDuplicateCandidate)
  * 判定按"对"保存，读取时逐条核对正文版本与规则指纹，任何一侧正文更新、或用户改了去重
  * 规则，旧判定立即失效并被重算；这与阅读快照对决定的处理方式一致，不做原地修改。
  */
-const MAX_BATCHES_PER_RUN = 3
+export const MAX_SEMANTIC_DEDUPE_BATCHES = 3
+// 规则资格与模型提示词分开版本化：比较策略改进不能撤销正文和规则均未变化的既有折叠。
+const DEDUPE_CONFIG_VERSION = 8
 // 单轮最多判定的对数。预筛时多取一个，用来区分"确实没有剩余候选"与"预算刚好用尽"。
-const MAX_CANDIDATES_PER_RUN = MAX_BATCHES_PER_RUN * MAX_SEMANTIC_DUPLICATE_CANDIDATES
+const MAX_CANDIDATES_PER_RUN = MAX_SEMANTIC_DEDUPE_BATCHES * MAX_SEMANTIC_DUPLICATE_CANDIDATES
 // 漏答和无效回答冷却后最多补判一次；未知与证据不足等待输入或判重版本变化。
 const MAX_DEDUPE_ATTEMPTS = 2
 const DEDUPE_RETRY_COOLDOWN_MS = 60_000
@@ -107,6 +129,7 @@ export type DedupeAction = {
   when: ConditionSet
   scope: ConditionSet
   fingerprint: string
+  decisionModel?: "generation" | "decisions"
 }
 
 export type DedupeDecisionView = {
@@ -121,6 +144,9 @@ export type DedupeDecisionView = {
   keepReference: boolean
   status: SemanticDuplicateEvaluationStatus
   attempts: number
+  // 复核资格必须区分 Decisions 与已经追加过的普通模型结果。
+  model: string
+  provider: string
   createdAt: string
 }
 
@@ -138,7 +164,7 @@ function incompleteDedupeContext(entry: SourceEntry) {
 }
 
 /**
- * 规则指纹只包含规则身份、触发条件、参与范围与提示词版本：正文之外的模型设置变化不追溯推翻既有
+ * 规则指纹只包含规则身份、触发条件、参与范围与资格版本：正文之外的模型设置变化不追溯推翻既有
  * 判定，但用户改动去重规则会立刻让旧判定失效。
  */
 export function dedupeConfigFingerprint(input: {
@@ -149,7 +175,7 @@ export function dedupeConfigFingerprint(input: {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: SEMANTIC_DUPLICATE_PROMPT_VERSION,
+        version: DEDUPE_CONFIG_VERSION,
         ruleId: input.ruleId,
         scope: input.scope,
         when: input.when,
@@ -172,6 +198,7 @@ export function activeDedupeActions(config: RuleSet | null): DedupeAction[] {
             when: rule.when,
           }),
           ruleId: rule.id,
+          ...(rule.decisionModel ? { decisionModel: rule.decisionModel } : {}),
           scope: action.scope,
           when: rule.when,
         })),
@@ -222,6 +249,12 @@ export class ProcessingDedupeStore {
       );
       CREATE INDEX IF NOT EXISTS processing_dedupe_scans_fingerprint
         ON processing_dedupe_scans(config_fingerprint);
+      CREATE TABLE IF NOT EXISTS processing_decisions_dedupe_observations (
+        evidence_key TEXT PRIMARY KEY, trigger_id TEXT, attempted INTEGER NOT NULL,
+        created_at TEXT NOT NULL, body TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS processing_decisions_dedupe_trigger
+        ON processing_decisions_dedupe_observations(trigger_id,attempted);
     `)
     // 旧行没有模型输入序号/代次，无法证明仍对应当前正文，迁移后自然失效并重算。
     for (const [table, columns] of [
@@ -261,10 +294,10 @@ export class ProcessingDedupeStore {
       )
   }
 
-  relation(candidate: SemanticDuplicateCandidate): CachedDedupeRelation | null {
+  relation(candidate: SemanticDuplicateCandidate, namespace?: string): CachedDedupeRelation | null {
     const row = this.db
       .prepare("SELECT * FROM processing_dedupe_relations WHERE evidence_key=?")
-      .get(semanticDedupeEvidenceKey(candidate))
+      .get(semanticDedupeEvidenceKey(candidate, namespace))
     if (!row) return null
     try {
       const parsed = relationEvaluationSchema.safeParse(JSON.parse(String(row.evaluation_json)))
@@ -279,7 +312,11 @@ export class ProcessingDedupeStore {
     }
   }
 
-  saveRelation(candidate: SemanticDuplicateCandidate, relation: CachedDedupeRelation) {
+  saveRelation(
+    candidate: SemanticDuplicateCandidate,
+    relation: CachedDedupeRelation,
+    namespace?: string,
+  ) {
     // 异常不能绕过按规则保存的冷却/次数限制；材料不完整也不跨任务复用。
     const parsed = relationEvaluationSchema.safeParse(relation.evaluation)
     if (!parsed.success || parsed.data.pairKey !== candidate.pairKey) return
@@ -290,7 +327,7 @@ export class ProcessingDedupeStore {
       evaluation_json=excluded.evaluation_json,model=excluded.model,provider=excluded.provider`,
       )
       .run(
-        semanticDedupeEvidenceKey(candidate),
+        semanticDedupeEvidenceKey(candidate, namespace),
         JSON.stringify({ ...parsed.data, status: semanticDuplicateEvaluationStatus(parsed.data) }),
         relation.model,
         relation.provider,
@@ -377,6 +414,8 @@ export class ProcessingDedupeStore {
             ) ?? "uncertain",
         }),
         attempts: Number(row.attempts),
+        model: String(row.model),
+        provider: String(row.provider),
         createdAt: String(row.created_at),
         pairKey: String(row.pair_key),
         reason: row.reason === null ? null : String(row.reason),
@@ -396,15 +435,24 @@ export class ProcessingDedupeStore {
   }
 
   /** 保留待复核状态，同时把冷却和补判次数限制在候选入口，避免反复付费。 */
-  candidateExcludedPairKeys(fingerprints: ReadonlySet<string>): Set<string> {
+  candidateExcludedPairKeys(
+    fingerprints: ReadonlySet<string>,
+    recheckUncertainDecisions = false,
+  ): Set<string> {
     const now = Date.now()
     return new Set(
       this.validDecisions(fingerprints)
         .filter(
           (decision) =>
-            !["missing_result", "invalid_result"].includes(decision.status) ||
-            decision.attempts >= MAX_DEDUPE_ATTEMPTS ||
-            Date.parse(decision.createdAt) + DEDUPE_RETRY_COOLDOWN_MS > now,
+            !(
+              recheckUncertainDecisions &&
+              decision.status === "uncertain" &&
+              decision.model === DECISIONS_CANONICAL_MODEL &&
+              /Decisions (?:low_confidence|model_uncertain);/u.test(decision.reason ?? "")
+            ) &&
+            (!["missing_result", "invalid_result"].includes(decision.status) ||
+              decision.attempts >= MAX_DEDUPE_ATTEMPTS ||
+              Date.parse(decision.createdAt) + DEDUPE_RETRY_COOLDOWN_MS > now),
         )
         .map((decision) => decision.pairKey),
     )
@@ -611,6 +659,80 @@ export class ProcessingDedupeStore {
       throw error
     }
   }
+
+  decisionsObservation(key: string): DecisionsDedupeAudit | null {
+    const row = this.db
+      .prepare("SELECT body FROM processing_decisions_dedupe_observations WHERE evidence_key=?")
+      .get(key)
+    return row ? (JSON.parse(String(row.body)) as DecisionsDedupeAudit) : null
+  }
+
+  // 仅查找同一正文代际的成功回答；旧文、未知计费失败和不同协议不能作为重算依据。
+  savedDecisionsAnswer(pairKey: string, inputs: readonly ProcessingInput[]) {
+    const rows = this.db
+      .prepare(
+        "SELECT body FROM processing_decisions_dedupe_observations WHERE attempted=1 AND json_extract(body,'$.pairKey')=? ORDER BY created_at DESC",
+      )
+      .all(pairKey)
+    for (const row of rows) {
+      const audit = JSON.parse(String(row.body)) as DecisionsDedupeAudit
+      if (
+        audit.model !== DECISIONS_CANONICAL_MODEL ||
+        audit.protocolVersion !== DECISIONS_DEDUPE_VERSION ||
+        !audit.answers ||
+        !audit.assessment ||
+        audit.inputs.length !== 2
+      )
+        continue
+      if (
+        inputs.length === 2 &&
+        inputs.every((input) =>
+          audit.inputs.some(
+            (saved) =>
+              saved.seq === input.seq &&
+              saved.generation === input.generation &&
+              saved.contentVersion === input.contentVersion &&
+              saved.itemId === input.itemId,
+          ),
+        )
+      )
+        return audit
+    }
+    return null
+  }
+
+  recordDecisionsObservation(audit: DecisionsDedupeAudit) {
+    this.db
+      .prepare(
+        "INSERT INTO processing_decisions_dedupe_observations VALUES(?,?,?,?,?) ON CONFLICT(evidence_key) DO UPDATE SET trigger_id=excluded.trigger_id,attempted=excluded.attempted,created_at=excluded.created_at,body=excluded.body",
+      )
+      .run(
+        audit.evidenceKey,
+        audit.triggerId,
+        Number(audit.attempted),
+        audit.createdAt,
+        JSON.stringify(audit),
+      )
+  }
+
+  decisionsObservationAttempts(triggerId: string) {
+    return Number(
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS total FROM processing_decisions_dedupe_observations WHERE trigger_id=? AND attempted=1",
+        )
+        .get(triggerId)!.total,
+    )
+  }
+
+  decisionsObservations() {
+    return this.db
+      .prepare(
+        "SELECT body FROM processing_decisions_dedupe_observations ORDER BY created_at DESC,evidence_key LIMIT 100",
+      )
+      .all()
+      .map((row) => JSON.parse(String(row.body)) as DecisionsDedupeAudit)
+  }
 }
 
 export type SemanticDedupeRunResult = {
@@ -629,6 +751,8 @@ export type SemanticDedupeRunResult = {
   /** 缺少供应商用量时保留未知，已知用量合计不能冒充全部费用。 */
   unknownUsageRequests: number
   usage: CodexUsage
+  decisionsObservationError?: "audit_unavailable"
+  decisionsRequests?: number
 }
 
 export type SemanticDedupeStore = {
@@ -652,12 +776,16 @@ export type SemanticDedupePreparationOptions = {
   cutoffAt?: string
   /** 单篇统一批次可在发布决定前用已冻结且完整的输入准备相同候选。 */
   pendingInputs?: readonly ProcessingInput[]
+  // 显式启用复核后只恢复成功但低置信的 Decisions 对；生成复核结果不再次恢复。
+  recheckUncertainDecisions?: boolean
 }
 
 export type DedupeParticipant = {
   entry: SemanticDuplicateEntry
   input: ProcessingInput
   readReference: boolean
+  /** 比较开始时的真实读态，用于拒绝调用期间发生读态变化的晚到结果。 */
+  readAtPreparation?: boolean
 }
 
 export type PreparedSemanticDedupe = {
@@ -746,7 +874,10 @@ export function prepareSemanticDedupe(
         context = processingRuleInput(contextStore, input.sourceKey, input.body, text, true)
       }
       // 已读仅作为范围参考，日常未读触发条件不应阻断同一范围内的历史事实核对。
-      const matchContext = readReference ? { ...context, read: false } : context
+      const matchContext = ruleInputFor(
+        action.ruleId,
+        readReference ? { ...context, read: false } : context,
+      )
       const instructions = compileInstructions(latest, matchContext)
       if (
         instructions.blocksFinalPresentation ||
@@ -761,6 +892,7 @@ export function prepareSemanticDedupe(
       const evidence = dedupeContentEvidence(input.body.content)
       // 正文完整不代表整个条目完整，附件/引用未核验时保持待补，不允许语义隐藏。
       const contextComplete = !incompleteDedupeContext(input.body)
+      const textContentComplete = evidence.contentComplete
       evidence.contentComplete &&= contextComplete
       if (evidence.fullContentComplete) evidence.fullContentComplete &&= contextComplete
       if (readReference && !evidence.contentComplete && !evidence.fullContentComplete) continue
@@ -783,6 +915,7 @@ export function prepareSemanticDedupe(
       participants.push({
         entry: {
           ...evidence,
+          textContentComplete,
           description: truncateDedupeDescription(input.body.description),
           itemId: input.itemId,
           originalIdentity: contentIdentity(input.body),
@@ -804,6 +937,7 @@ export function prepareSemanticDedupe(
         },
         input,
         readReference,
+        readAtPreparation: read,
       })
     }
     // 多个来源仍分别匹配规则；同一 itemId 优先使用未读材料，参考不能冒充处理目标。
@@ -854,7 +988,10 @@ export function prepareSemanticDedupe(
     const candidates = dedupeCandidates(
       uniqueParticipants.filter((item) => !exactHidden.has(item.input.itemId)),
       targetItemIds,
-      options.store.dedupe.candidateExcludedPairKeys(fingerprints),
+      options.store.dedupe.candidateExcludedPairKeys(
+        fingerprints,
+        options.recheckUncertainDecisions,
+      ),
       options.store.dedupe.settledItemIds(fingerprints, recallWatermark),
     )
     return {
@@ -896,11 +1033,16 @@ export async function runSemanticDedupe(
     runtimeDir: string
     signal: AbortSignal
     execute?: typeof runCodexJson
+    decisionsExecute?: typeof requestDecisions
+    /** 小批结算共享整轮剩余付费预算，不能把每次结算当作新的一轮额度。 */
+    maxBatches?: number
     /** 先消费统一批次已有结果，缺失或换代的候选仍按正常预算判定。 */
     preparedEvaluations?: readonly PreparedDedupeEvaluation[]
     /** 单篇批次内部可只发布已有结果，把其他候选留给任务尾部。 */
     preparedOnly?: boolean
     triggerId?: string
+    // 单次显式修复可复核所选候选，不修改用户保存的自动运行开关。
+    recheckUncertainOnce?: boolean
   },
 ): Promise<SemanticDedupeRunResult> {
   const result: SemanticDedupeRunResult = {
@@ -916,13 +1058,100 @@ export async function runSemanticDedupe(
     unknownUsageRequests: 0,
     usage: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0 },
   }
-  const plans = prepareSemanticDedupe(options)
+  const initialConfig = await options.aiConfig.read()
+  const generationFallback =
+    options.recheckUncertainOnce === true ||
+    initialConfig.decisions?.dedupeObservation?.generationFallback === true
+  const plans = prepareSemanticDedupe({ ...options, recheckUncertainDecisions: generationFallback })
   const taskRelations = new Map<string, CachedDedupeRelation>()
+  const observationBudget = { attempts: 0 }
   for (const plan of plans) {
     const { action, participants, targetItemIds } = plan
     if (options.signal.aborted) break
     const fingerprints = new Set([action.fingerprint])
-    const decided = options.store.dedupe.candidateExcludedPairKeys(fingerprints)
+    // 降低门槛后，旧的低置信终态不能永久阻止去重；在当前范围内直接重算成功回答。
+    const threshold = initialConfig.decisions?.threshold
+    if (
+      initialConfig.decisions?.enabled &&
+      threshold !== undefined &&
+      dedupeDecisionsMode(initialConfig.decisions, action.decisionModel) === "apply"
+    ) {
+      const bySeq = new Map(participants.map((participant) => [participant.input.seq, participant]))
+      for (const previous of options.store.dedupe.unresolvedDecisions(fingerprints)) {
+        if (previous.model !== DECISIONS_CANONICAL_MODEL || !previous.keep || !previous.hide)
+          continue
+        const keep = bySeq.get(previous.keep.seq)
+        const hide = bySeq.get(previous.hide.seq)
+        if (
+          !keep ||
+          !hide ||
+          (!targetItemIds.has(keep.input.itemId) && !targetItemIds.has(hide.input.itemId))
+        )
+          continue
+        const audit = options.store.dedupe.savedDecisionsAnswer(previous.pairKey, [
+          keep.input,
+          hide.input,
+        ])
+        if (!audit || threshold >= audit.threshold) continue
+        const first = bySeq.get(audit.inputs[0]!.seq)
+        const second = bySeq.get(audit.inputs[1]!.seq)
+        if (
+          !first ||
+          !second ||
+          ![first, second].every(
+            (participant) =>
+              participant.entry.contentComplete || participant.entry.fullContentComplete,
+          )
+        )
+          continue
+        const candidate = getSemanticDuplicateCandidates([first.entry, second.entry], {
+          maxCandidates: 1,
+        })[0]
+        if (!candidate) continue
+        // first/second 的包含方向绑定原始请求顺序，不能随当前保留侧交换。
+        candidate.entries = [first.entry, second.entry]
+        const reassessed = assessDecisionsDedupe(audit.answers!, threshold)
+        if (reassessed.code) continue
+        const evaluation = decisionsDedupeEvaluation(candidate, {
+          ...audit,
+          assessment: reassessed,
+          threshold,
+          code: null,
+        })
+        const keeper = [first, second].find(
+          (item) => item.input.itemId === (evaluation.keepEntryId ?? candidate.keepEntryId),
+        )!
+        const hidden = [first, second].find((item) => item !== keeper)!
+        if (
+          hidden.readReference ||
+          (evaluation.duplicate &&
+            !hasCompleteDedupeCoverage(candidate, keeper.entry.itemId, hidden.entry.itemId))
+        )
+          continue
+        const saved = options.store.dedupe.saveBatch({
+          configFingerprint: action.fingerprint,
+          ruleId: action.ruleId,
+          provider: audit.provider ?? "OpenAI",
+          model: audit.model!,
+          decisions: [
+            {
+              candidate,
+              evaluation: {
+                ...evaluation,
+                reason: `${evaluation.reason} 按当前门槛 ${threshold} 复用原回答（原门槛 ${audit.threshold}），无新增模型调用。`,
+              },
+              keep: keeper.input,
+              hide: hidden.input,
+              keepReference: keeper.readReference,
+            },
+          ],
+        })
+        result.candidates += saved.size
+        result.relationCacheHits += saved.size
+        if (evaluation.duplicate) result.duplicates += saved.size
+      }
+    }
+    const decided = options.store.dedupe.candidateExcludedPairKeys(fingerprints, generationFallback)
     const settled = options.store.dedupe.settledItemIds(fingerprints, plan.recallWatermark)
     if (targetItemIds?.size === 0 || participants.length < 2) continue
     const entries = [...participants].sort(
@@ -970,6 +1199,86 @@ export async function runSemanticDedupe(
     const entryByItemId = new Map(
       entries.map((participant) => [participant.entry.itemId, participant]),
     )
+    const isCurrent = (candidate: SemanticDuplicateCandidate) =>
+      activeDedupeActions(options.store.automation.effective().config).some(
+        (current) =>
+          current.fingerprint === action.fingerprint &&
+          current.decisionModel === action.decisionModel,
+      ) &&
+      candidate.entries.every((entry) => {
+        const participant = entryByItemId.get(entry.itemId)
+        if (!participant) return false
+        if (
+          options.store.processingState
+            .overrides()
+            .some(
+              (override) =>
+                override.inputSeq === participant.input.seq && override.mode !== "automatic",
+            )
+        )
+          return false
+        const current = options.store.automation
+          .inputs()
+          .find((row) => row.seq === participant.input.seq)
+        return (
+          current?.current &&
+          current.generation === participant.input.generation &&
+          current.contentVersion === participant.input.contentVersion &&
+          inputReadState(current, options.store.entry?.bind(options.store)) ===
+            (participant.readAtPreparation ?? participant.readReference)
+        )
+      })
+    const observeSlice = (
+      selected: readonly SemanticDuplicateCandidate[],
+      references: readonly (CachedDedupeRelation & { pairKey: string })[],
+      mode: "observe" | "apply",
+    ) =>
+      observeDecisionsDedupe({
+        candidates: selected,
+        store: options.store.dedupe,
+        readConfig: async () => {
+          const config = (await options.aiConfig.read()).decisions
+          return action.decisionModel === "decisions"
+            ? {
+                ...(config ?? defaultDecisionsSettings),
+                dedupeObservation: {
+                  ...(config?.dedupeObservation ?? defaultDedupeObservationSettings),
+                  enabled: true,
+                  mode: "apply",
+                },
+              }
+            : config
+        },
+        ruleId: action.ruleId,
+        configFingerprint: action.fingerprint,
+        triggerId: options.triggerId,
+        signal: options.signal,
+        execute: options.decisionsExecute,
+        budget: observationBudget,
+        mode,
+        reference: (pairKey) => references.find((item) => item.pairKey === pairKey) ?? null,
+        inputs: (candidate) =>
+          candidate.entries.flatMap((entry) => {
+            const participant = entryByItemId.get(entry.itemId)
+            return participant
+              ? [
+                  {
+                    seq: participant.input.seq,
+                    generation: participant.input.generation,
+                    contentVersion: participant.input.contentVersion,
+                    itemId: participant.input.itemId,
+                  },
+                ]
+              : []
+          }),
+        isCurrent,
+      })
+    const modeConfig = await options.aiConfig.read().catch(() => null)
+    const selectedMode = dedupeDecisionsMode(modeConfig?.decisions, action.decisionModel)
+    const useDecisions = selectedMode === "apply"
+    const namespace = useDecisions
+      ? `decisions:${DECISIONS_DEDUPE_VERSION}:${DECISIONS_CANONICAL_MODEL}:${modeConfig?.decisions?.threshold ?? defaultDecisionsSettings.threshold}${generationFallback ? ":generation-recheck-v2" : ""}`
+      : undefined
     for (
       let offset = 0;
       offset < candidates.length && offset < MAX_CANDIDATES_PER_RUN;
@@ -980,7 +1289,7 @@ export async function runSemanticDedupe(
         offset,
         Math.min(offset + MAX_SEMANTIC_DUPLICATE_CANDIDATES, MAX_CANDIDATES_PER_RUN),
       )
-      const cached = options.preparedEvaluations?.filter(
+      const preparedMatches = options.preparedEvaluations?.filter(
         (item) =>
           item.configFingerprint === action.fingerprint &&
           item.pairKey === item.evaluation.pairKey &&
@@ -1003,29 +1312,80 @@ export async function runSemanticDedupe(
               }),
           ),
       )
+      const cached = useDecisions ? [] : preparedMatches
       const reused = slice.flatMap((candidate) => {
         if (cached?.some((item) => item.pairKey === candidate.pairKey)) return []
         const relation =
-          taskRelations.get(semanticDedupeEvidenceKey(candidate)) ??
-          options.store.dedupe.relation(candidate)
+          taskRelations.get(semanticDedupeEvidenceKey(candidate, namespace)) ??
+          options.store.dedupe.relation(candidate, namespace)
+        // 上轮只够 Decisions 预算时，缓存的低置信回答仍要进入一次普通模型复核。
+        // observeSlice 会复用原计费账本，不能为取得复核资格再次请求 Decisions。
+        if (
+          generationFallback &&
+          relation?.model === DECISIONS_CANONICAL_MODEL &&
+          relation.evaluation.status === "uncertain" &&
+          /Decisions (?:low_confidence|model_uncertain);/u.test(relation.evaluation.reason ?? "")
+        )
+          return []
         return relation ? [{ ...relation, pairKey: candidate.pairKey }] : []
       })
       const cachedKeys = new Set([...(cached ?? []), ...reused].map((item) => item.pairKey))
       const missing = slice.filter((item) => !cachedKeys.has(item.pairKey))
       const config =
-        missing.length > 0 && !options.preparedOnly && result.batches < MAX_BATCHES_PER_RUN
-          ? await options.aiConfig.read()
+        missing.length > 0 &&
+        !options.preparedOnly &&
+        result.batches <
+          Math.max(
+            0,
+            Math.min(
+              MAX_SEMANTIC_DEDUPE_BATCHES,
+              options.maxBatches ?? MAX_SEMANTIC_DEDUPE_BATCHES,
+            ),
+          )
+          ? (modeConfig ?? (await options.aiConfig.read()))
           : null
+      const runDecisions = async () => {
+        const before = observationBudget.attempts
+        const observed = await observeSlice(missing, preparedMatches ?? [], "apply").catch(() => {
+          result.decisionsObservationError = "audit_unavailable"
+          return { audits: [] as DecisionsDedupeAudit[], requested: [] as DecisionsDedupeAudit[] }
+        })
+        const usageRows = observed.requested.flatMap((audit) => (audit.usage ? [audit.usage] : []))
+        return {
+          executed: observationBudget.attempts > before,
+          requests: observationBudget.attempts - before,
+          unknownUsageRequests:
+            observed.requested.filter((audit) => !audit.usage).length +
+            Math.max(0, observationBudget.attempts - before - observed.requested.length),
+          usage: usageRows.length
+            ? {
+                inputTokens: usageRows.reduce((sum, usage) => sum + usage.input_tokens, 0),
+                outputTokens: usageRows.reduce((sum, usage) => sum + usage.output_tokens, 0),
+                cachedInputTokens: 0,
+              }
+            : null,
+          evaluations: missing.map((candidate) =>
+            decisionsDedupeEvaluation(
+              candidate,
+              observed.audits.find((audit) => audit.pairKey === candidate.pairKey),
+            ),
+          ),
+          model: observed.audits.find((audit) => audit.model)?.model ?? DECISIONS_CANONICAL_MODEL,
+          provider: "OpenAI",
+        }
+      }
       const run = config
-        ? await evaluateSemanticDuplicateCandidates({
-            aiConfig: config,
-            candidates: missing,
-            triggerId: options.triggerId,
-            execute: options.execute,
-            qianwen: await options.aiConfig.execution(config),
-            runtimeDir: options.runtimeDir,
-            signal: options.signal,
-          })
+        ? useDecisions
+          ? await runDecisions()
+          : await evaluateSemanticDuplicateCandidates({
+              aiConfig: config,
+              candidates: missing,
+              triggerId: options.triggerId,
+              execute: options.execute,
+              qianwen: await options.aiConfig.execution(config),
+              runtimeDir: options.runtimeDir,
+              signal: options.signal,
+            })
         : {
             executed: false,
             usage: null,
@@ -1034,7 +1394,12 @@ export async function runSemanticDedupe(
             provider: cached?.[0]?.provider ?? "local",
           }
       result.batches += Number(run.executed)
-      result.unknownUsageRequests += Number(run.executed && !run.usage)
+      result.unknownUsageRequests +=
+        "unknownUsageRequests" in run
+          ? run.unknownUsageRequests
+          : Number(run.executed && !run.usage)
+      if ("requests" in run && run.requests)
+        result.decisionsRequests = (result.decisionsRequests ?? 0) + run.requests
       result.sharedComparisons += cached?.length ?? 0
       result.relationCacheHits += reused.length
       // 正文不完整的候选在本地返回，不能计作已经发给模型的比较。
@@ -1045,6 +1410,115 @@ export async function runSemanticDedupe(
         result.usage.inputTokens += run.usage.inputTokens
         result.usage.outputTokens += run.usage.outputTokens
         result.usage.cachedInputTokens += run.usage.cachedInputTokens
+      }
+      // A mode switch or shutdown during an awaited request invalidates publication,
+      // including cached Decisions results. Keep the audit and actual usage intact.
+      if (useDecisions) {
+        const current = await options.aiConfig.read().catch(() => null)
+        if (
+          options.signal.aborted ||
+          !current?.decisions?.enabled ||
+          dedupeDecisionsMode(current?.decisions, action.decisionModel) !== "apply" ||
+          current?.decisions?.threshold !== modeConfig?.decisions?.threshold
+        )
+          continue
+      }
+      // 只复核已成功返回的低置信结论；失败、材料不足与结果未知不能触发第二次付费。
+      const recheckOrigins = new Map<string, { model: string; provider: string }>()
+      if (
+        config &&
+        useDecisions &&
+        generationFallback &&
+        result.batches <
+          Math.min(MAX_SEMANTIC_DEDUPE_BATCHES, options.maxBatches ?? MAX_SEMANTIC_DEDUPE_BATCHES)
+      ) {
+        const uncertain = missing.filter(
+          (candidate) =>
+            run.evaluations.some(
+              (evaluation) =>
+                evaluation.pairKey === candidate.pairKey &&
+                evaluation.status === "uncertain" &&
+                /Decisions (?:low_confidence|model_uncertain);/u.test(evaluation.reason ?? ""),
+            ) &&
+            candidate.entries.every((entry) => entry.contentComplete || entry.fullContentComplete),
+        )
+        if (uncertain.length) {
+          let evaluations: SemanticDuplicateEvaluation[]
+          let usage: CodexUsage | null = null
+          let executed = false
+          try {
+            const qianwen = await options.aiConfig.execution(config)
+            executed = true
+            const recheck = await evaluateSemanticDuplicateCandidates({
+              aiConfig: config,
+              candidates: uncertain,
+              triggerId: options.triggerId,
+              execute: options.execute,
+              qianwen,
+              runtimeDir: options.runtimeDir,
+              signal: options.signal,
+            })
+            // 复核不能借普通模型较低的默认门槛绕过用户为 Decisions 设置的阈值。
+            const threshold = Math.max(
+              SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
+              config.decisions?.threshold ?? defaultDecisionsSettings.threshold,
+            )
+            evaluations = recheck.evaluations.map((evaluation) =>
+              evaluation.confidence >= threshold
+                ? evaluation
+                : {
+                    ...evaluation,
+                    duplicate: false,
+                    keepEntryId: null,
+                    hideEntryId: null,
+                    status: "uncertain",
+                    verdict: "uncertain",
+                    reason: `普通模型复核置信度 ${evaluation.confidence} 未达到门槛 ${threshold}，保留原文。`,
+                  },
+            )
+            usage = recheck.usage
+            executed = recheck.executed
+          } catch (error) {
+            usage = error instanceof CodexRunError ? error.usage : null
+            // 失败也保存普通模型来源，后续不重新领取这次结果未知的付费复核。
+            evaluations = uncertain.map((candidate) => ({
+              pairKey: candidate.pairKey,
+              duplicate: false,
+              confidence: 0,
+              keepEntryId: null,
+              hideEntryId: null,
+              status: "uncertain",
+              verdict: "uncertain",
+              reason: "普通模型复核失败，保留原文；结果未知时不自动重复调用。",
+            }))
+          }
+          result.batches += Number(executed)
+          result.dedicatedComparisons += executed ? uncertain.length : 0
+          result.unknownUsageRequests += Number(executed && !usage)
+          if (usage) {
+            result.usage.inputTokens += usage.inputTokens
+            result.usage.outputTokens += usage.outputTokens
+            result.usage.cachedInputTokens += usage.cachedInputTokens ?? 0
+          }
+          const current = await options.aiConfig.read().catch(() => null)
+          if (
+            options.signal.aborted ||
+            !current?.decisions?.enabled ||
+            (options.recheckUncertainOnce !== true &&
+              current.decisions.dedupeObservation?.generationFallback !== true) ||
+            dedupeDecisionsMode(current.decisions, action.decisionModel) !== "apply" ||
+            current.decisions.threshold !== config.decisions?.threshold
+          )
+            continue
+          for (const evaluation of evaluations) {
+            const index = run.evaluations.findIndex((item) => item.pairKey === evaluation.pairKey)
+            if (index >= 0) run.evaluations[index] = evaluation
+            recheckOrigins.set(evaluation.pairKey, {
+              model: config.model,
+              provider: config.provider,
+            })
+          }
+        }
       }
       const decisions: Array<{
         candidate: SemanticDuplicateCandidate
@@ -1061,18 +1535,19 @@ export async function runSemanticDedupe(
         ...run.evaluations,
       ]) {
         const candidate = slice.find((item) => item.pairKey === evaluation.pairKey)
-        if (!candidate) continue
+        if (!candidate || (useDecisions && !isCurrent(candidate))) continue
         const origin = [...(cached ?? []), ...reused].find(
           (item) => item.pairKey === evaluation.pairKey,
         )
         const relation = {
           evaluation,
-          model: origin?.model ?? run.model,
-          provider: origin?.provider ?? run.provider,
+          model: origin?.model ?? recheckOrigins.get(evaluation.pairKey)?.model ?? run.model,
+          provider:
+            origin?.provider ?? recheckOrigins.get(evaluation.pairKey)?.provider ?? run.provider,
         }
         // 同一任务的重叠规则共用一次结果（包括异常），每条规则仍独立保存应用与重试状态。
-        taskRelations.set(semanticDedupeEvidenceKey(candidate), relation)
-        options.store.dedupe.saveRelation(candidate, relation)
+        taskRelations.set(semanticDedupeEvidenceKey(candidate, namespace), relation)
+        options.store.dedupe.saveRelation(candidate, relation, namespace)
         // 判定失效前先确认两侧仍在当前库中：正文换代期间到达的结果不再落库。
         let keep = entryByItemId.get(evaluation.keepEntryId ?? candidate.keepEntryId)
         let hide = entryByItemId.get(evaluation.hideEntryId ?? candidate.testEntryId)
@@ -1088,16 +1563,14 @@ export async function runSemanticDedupe(
           ![keep, hide].every(
             (participant) =>
               inputReadState(participant.input, options.store.entry?.bind(options.store)) ===
-              participant.readReference,
+              (participant.readAtPreparation ?? participant.readReference),
           )
         )
           continue
         let resolved = evaluation
         if (
           evaluation.duplicate &&
-          !candidate.entries.every(
-            (entry) => entry.contentComplete === true && Boolean(entry.content?.trim()),
-          )
+          !hasCompleteDedupeCoverage(candidate, keep.entry.itemId, hide.entry.itemId)
         )
           resolved = { ...evaluation, duplicate: false, keepEntryId: null, hideEntryId: null }
         // 等价优先保留已读参考；未读有补充事实时只保存否定，永远不隐藏已读。
@@ -1158,6 +1631,30 @@ export async function runSemanticDedupe(
           item.evaluation.confidence >= SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD,
       ).length
       for (const pairKey of saved) decided.add(pairKey)
+      // Shadow comparison has its own consent and budget; it never publishes a dedupe relation.
+      if (
+        !useDecisions &&
+        !options.preparedOnly &&
+        !options.signal.aborted &&
+        selectedMode === "observe"
+      ) {
+        const references = [
+          ...(cached ?? []),
+          ...reused,
+          ...run.evaluations.map((evaluation) => ({
+            evaluation,
+            pairKey: evaluation.pairKey,
+            model: run.model,
+            provider: run.provider,
+          })),
+        ]
+        try {
+          await observeSlice(slice, references, "observe")
+        } catch {
+          // Failed audit persistence must not replace or interrupt the original dedupe result.
+          result.decisionsObservationError = "audit_unavailable"
+        }
+      }
     }
     // 每条一轮仅取一对；判完本批后重新预筛，三篇两对否定不能误认第三对已穷尽。
     const remaining = dedupeCandidates(semanticEntries, targetItemIds, decided)

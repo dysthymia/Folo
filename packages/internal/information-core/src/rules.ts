@@ -201,6 +201,7 @@ export const ruleSchema = z
     actions: z.array(actionSchema).min(1).max(30),
     version: z.number().int().positive(),
     executionLocation: z.literal("processing_service"),
+    decisionModel: z.enum(["generation", "decisions"]).optional(),
   })
   .strict()
   .superRefine((rule, context) => {
@@ -244,6 +245,7 @@ export const createRuleSchema = z
     when: ruleSchema.shape.when,
     actions: ruleSchema.shape.actions,
     executionLocation: ruleSchema.shape.executionLocation,
+    decisionModel: ruleSchema.shape.decisionModel.default("generation"),
   })
   .strict()
 export const ruleSetSchema = z
@@ -303,6 +305,8 @@ export type RuleInput = Partial<Record<z.infer<typeof textFields>, string | null
   category_ref?: { view: number; name: string } | null
   subscription_tag?: string[] | null
   entry_tag?: TagAssessment[] | null
+  // Per-rule fixed judgments must not leak into rules using another executor.
+  ruleTagAssessments?: Record<string, TagAssessment[] | null>
   // 每个列表单独记录资格，未同步／不完整必须保留 null，不能变成空集合。
   list_id?: Record<string, boolean | null>
   read?: boolean | null
@@ -311,6 +315,12 @@ export type RuleInput = Partial<Record<z.infer<typeof textFields>, string | null
   entry_attachments_duration?: number | null
   visible_length?: number | null
   updated_at?: string | null
+}
+
+export function ruleInputFor(ruleId: string, input: RuleInput): RuleInput {
+  return input.ruleTagAssessments && Object.hasOwn(input.ruleTagAssessments, ruleId)
+    ? { ...input, entry_tag: input.ruleTagAssessments[ruleId] }
+    : input
 }
 
 const state = (matches: boolean): MatchState => (matches ? "match" : "no_match")
@@ -486,7 +496,7 @@ export function compileInstructions(ruleSet: RuleSet, input: RuleInput) {
     .filter((rule) => rule.enabled)
     .sort((a, b) => a.order - b.order)
     .map((rule) => {
-      const result = matchConditions(rule.when, input)
+      const result = matchConditions(rule.when, ruleInputFor(rule.id, input))
       if (result.state === "match") matched.push(rule)
       else if (result.state === "unknown") pending.push(rule)
       return { ruleId: rule.id, ...result }

@@ -1,6 +1,12 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 
-import { compileInstructions, matchConditions, ruleSetSchema } from "@follow/information-core"
+import {
+  compileInstructions,
+  matchConditions,
+  requiredSemanticTagIds,
+  ruleInputFor,
+  ruleSetSchema,
+} from "@follow/information-core"
 import { join } from "pathe"
 import { z } from "zod"
 
@@ -8,9 +14,18 @@ import type { AIConfigStore } from "./ai-config"
 import { aiEndpointFingerprint } from "./ai-config"
 import { aiReasoningEffort } from "./ai-reasoning"
 import { runCodexJson } from "./codex"
+import {
+  allSemanticRulesUseDecisions,
+  DECISIONS_CANONICAL_MODEL,
+  DECISIONS_VERSION,
+  decisionsSettings,
+  defaultDecisionsSettings,
+} from "./decisions-config"
+import type { requestDecisions } from "./openrouter-decisions"
 import { processLongEntry } from "./processing-chunks"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
+import { classifyWithDecisions, decisionsOnlyEligible } from "./processing-decisions"
 import {
   resolvedPolicy,
   resolvedStatus,
@@ -18,6 +33,7 @@ import {
   sourceRole,
 } from "./processing-engine"
 import { inputReadState } from "./processing-read-state"
+import { attachRuleDecisions } from "./processing-rule-decisions"
 import {
   createSemanticProfile,
   projectSemanticDecision,
@@ -69,6 +85,7 @@ export class ProcessingTrial {
       aiConfig: AIConfigStore
       runtimeDir: string
       execute?: typeof runCodexJson
+      decisionsExecute?: typeof requestDecisions
     },
   ) {}
 
@@ -106,7 +123,14 @@ export class ProcessingTrial {
       const published = store.processingState.published()
       const before = published.find((item) => item.input.seq === input.seq)
       const ai = await this.options.aiConfig.read()
-      const qianwen = await this.options.aiConfig.execution(ai)
+      const settings = ai.decisions ? decisionsSettings(ai.decisions) : defaultDecisionsSettings
+      const pureDecisions =
+        request.config.rules.some((rule) => rule.decisionModel !== undefined) &&
+        allSemanticRulesUseDecisions(request.config, context, settings) &&
+        decisionsOnlyEligible(request.config, context)
+      const qianwen = pureDecisions ? undefined : await this.options.aiConfig.execution(ai)
+      const recordDecisions = (audit: Parameters<Store["processingState"]["recordDecisions"]>[0]) =>
+        store.processingState.recordDecisions({ ...audit, purpose: "preview" })
       const execute: typeof runCodexJson = (request) =>
         (this.options.execute ?? runCodexJson)({
           ...request,
@@ -132,9 +156,36 @@ export class ProcessingTrial {
         await mkdir(this.options.runtimeDir, { recursive: true, mode: 0o700 })
         temporary = await mkdtemp(join(this.options.runtimeDir, "trial-"))
       }
-      const response = temporary
-        ? await processLongEntry({ ...common, runtimeDir: temporary, provider: ai.provider })
-        : await runSingleEntryModel(common)
+      const response = pureDecisions
+        ? await (async () => {
+            const response = await classifyWithDecisions({
+              target: input,
+              text,
+              tagIds: requiredSemanticTagIds(request.config, context),
+              settings: { ...settings, classificationEnabled: true },
+              config: ai.decisions ? { ...ai.decisions, classificationEnabled: true } : undefined,
+              budgetAllowed: true,
+              signal,
+              execute: this.options.decisionsExecute,
+              ruleIds: request.config.rules.filter((rule) => rule.enabled).map((rule) => rule.id),
+              record: recordDecisions,
+            })
+            return {
+              output: response.output,
+              semanticEvidence: response.evidence,
+              durationMs: response.audit.durationMs,
+              usage: response.audit.usage
+                ? {
+                    inputTokens: response.audit.usage.input_tokens,
+                    outputTokens: response.audit.usage.output_tokens,
+                    cachedInputTokens: 0,
+                  }
+                : null,
+            }
+          })()
+        : temporary
+          ? await processLongEntry({ ...common, runtimeDir: temporary, provider: ai.provider })
+          : await runSingleEntryModel(common)
       if ("status" in response && response.status === "pending")
         throw new ProcessingTrialError(response.reason)
       const output = response.output
@@ -164,7 +215,52 @@ export class ProcessingTrial {
           coverage: "semanticCoverage" in response ? response.semanticCoverage : undefined,
         }),
         reused: false,
+        ...(pureDecisions
+          ? {
+              classification: {
+                kind: "openrouter-decisions" as const,
+                mode: settings.mode,
+                model: DECISIONS_CANONICAL_MODEL,
+                protocolVersion: DECISIONS_VERSION,
+              },
+            }
+          : {}),
       }
+      const ruleCache = new Map<string, ProcessingDecision>()
+      let additionalUsage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 }
+      decision = await attachRuleDecisions({
+        target: input,
+        decision,
+        config: request.config,
+        settings,
+        text,
+        signal,
+        readConfig: async () => (await this.options.aiConfig.read()).decisions,
+        execute: this.options.decisionsExecute,
+        budgetAllowed: () => true,
+        store: {
+          cache: (key) => ruleCache.get(key) ?? null,
+          saveCache: (value) => {
+            ruleCache.set(value.fingerprint, value)
+          },
+          recordDecisions,
+        },
+        record: (audit) => {
+          recordDecisions(audit)
+          if (audit.attempted && audit.usage)
+            additionalUsage = {
+              inputTokens: additionalUsage.inputTokens + audit.usage.input_tokens,
+              outputTokens: additionalUsage.outputTokens + audit.usage.output_tokens,
+              cachedInputTokens: 0,
+            }
+        },
+      })
+      if (additionalUsage.inputTokens || additionalUsage.outputTokens)
+        decision.usage = {
+          inputTokens: (decision.usage?.inputTokens ?? 0) + additionalUsage.inputTokens,
+          outputTokens: (decision.usage?.outputTokens ?? 0) + additionalUsage.outputTokens,
+          cachedInputTokens: decision.usage?.cachedInputTokens ?? 0,
+        }
       if (decision.semanticProfile) {
         const assessments = decision.semanticProfile.assessments
         // 后置变换只用本次试运行内存缓存，不能写入正式模型缓存或发布语义档案。
@@ -179,7 +275,7 @@ export class ProcessingTrial {
             },
           },
           config: request.config,
-          context,
+          context: decision.context,
           assessments,
           instructions,
           decision,
@@ -209,7 +305,7 @@ export class ProcessingTrial {
         decision = projectSemanticDecision(
           transformed.decision,
           request.config,
-          context,
+          decision.context,
           assessments,
         )
         // 长文仍保留原文阅读，不把试运行综合产物变成替代正文。
@@ -232,7 +328,7 @@ export class ProcessingTrial {
       const aggregation = evaluated.aggregates.map((rule) => {
         const candidates =
           after.policy.aggregation === "deny" ||
-          matchConditions(rule.scope, decision.context).state !== "match"
+          matchConditions(rule.scope, ruleInputFor(rule.ruleId, decision.context)).state !== "match"
             ? []
             : published.filter(
                 (item) =>
@@ -241,7 +337,8 @@ export class ProcessingTrial {
                   item.decision.policy.aggregation !== "deny" &&
                   item.decision.status !== "needs_context" &&
                   !store.stories.isMaterialWithdrawn(item.input.seq) &&
-                  matchConditions(rule.scope, item.decision.context).state === "match",
+                  matchConditions(rule.scope, ruleInputFor(rule.ruleId, item.decision.context))
+                    .state === "match",
               )
         return {
           ruleId: rule.ruleId,
@@ -262,7 +359,7 @@ export class ProcessingTrial {
         before: before ? displayResult(before.decision) : null,
         beforeReleaseVersion: before?.input.releaseVersion ?? null,
         after,
-        model: ai.model,
+        model: decision.classification?.model ?? ai.model,
         usage: decision.usage,
         aggregation,
       }

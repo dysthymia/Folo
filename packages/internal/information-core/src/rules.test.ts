@@ -5,6 +5,7 @@ import {
   andStates,
   compileInstructions,
   conditionSetSchema,
+  createRuleSchema,
   matchConditions,
   orStates,
   requiredSemanticTagIds,
@@ -45,6 +46,21 @@ const rules = (...items: AutomationRule[]): RuleSet => ({
   ownerId: "owner",
   global: { version: 1, markdown: "全局说明" },
   rules: items,
+})
+
+it("preserves legacy executor choice absence and defaults only new create requests to generation", () => {
+  const original = rule("old", 0, [{ type: "ai_transform", prompt: "keep facts" }])
+  expect(ruleSetSchema.parse(rules(original)).rules[0]).not.toHaveProperty("decisionModel")
+  const { id: _id, ownerId: _owner, order: _order, version: _version, ...creation } = original
+  expect(createRuleSchema.parse(creation).decisionModel).toBe("generation")
+  expect(
+    ruleSetSchema.parse(rules({ ...original, decisionModel: "decisions" })).rules[0]?.decisionModel,
+  ).toBe("decisions")
+  expect(
+    ruleSetSchema.safeParse(
+      rules({ ...original, decisionModel: "unknown" } as unknown as AutomationRule),
+    ).success,
+  ).toBe(false)
 })
 
 describe("重点关注契约", () => {

@@ -24,9 +24,27 @@ export function newLocalRule(
     order: Math.max(-1, ...config.rules.map((rule) => rule.order)) + 1,
     version: 1,
     executionLocation: "processing_service",
+    decisionModel: "generation",
     when,
     actions: [],
   }
+}
+
+export function duplicateLocalRule(
+  config: RuleSet,
+  rule: AutomationRule,
+  name: string,
+): AutomationRule {
+  const copy = structuredClone(rule)
+  const duplicate = {
+    ...copy,
+    ...newLocalRule(config, name, copy.when),
+    actions: copy.actions,
+    enabled: false,
+  }
+  if (copy.decisionModel === undefined) delete duplicate.decisionModel
+  else duplicate.decisionModel = copy.decisionModel
+  return duplicate
 }
 
 // 这里只描述卡片包含的处理动作；分类标签不改变后台生成内容的资格判断。
