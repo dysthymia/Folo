@@ -59,10 +59,14 @@ def check_running(database, split, checkpoint=False):
 def stop_web(domain, database, split, checkpoint=False):
     state = registered(domain, WEB_LABEL)
     if state.returncode != 0:
+        if not split:
+            check_running(database, False)
         return
     previous_pid = re.search(r"^\s*pid = (\d+)$", state.stdout, re.MULTILINE)
     pid = int(previous_pid.group(1)) if previous_pid else None
     handoff = []
+    if not pid and not split:
+        check_running(database, False)
     if pid and not split:
         # 旧版不支持协作式交接，先暂停领取任务，再核对空闲状态，消除检查与停止之间的竞争。
         os.kill(pid, signal.SIGSTOP)
@@ -183,7 +187,9 @@ def install(manifest, package=None, home=None, checkpoint=False):
     worker_registered = registered(domain, WORKER_LABEL).returncode == 0
     split = existing.get("EnvironmentVariables", {}).get("FOLO_INFORMATION_PROCESS_ROLE") == "web" and worker_registered
     database = pathlib.Path(os.environ.get("FOLO_INFORMATION_DATA_DIR", str(home / ".local/share/folo-information-p0"))) / "information.sqlite"
-    check_running(database, split, checkpoint)
+    # 首次检查点交接先准备产物，冻结后的复核才决定能否停止；准备耗时不能错过空闲窗口。
+    if not checkpoint or split:
+        check_running(database, split)
     for directory in (support, logs, home / "Library/LaunchAgents", support / "information-releases"):
         directory.mkdir(parents=True, exist_ok=True)
     logs.chmod(0o700)
@@ -197,7 +203,8 @@ def install(manifest, package=None, home=None, checkpoint=False):
         # 再次验证源码、完整产物和迁移条件，均通过后才操作现有网页服务。
         validate_release(package.parents[1])
         validate_runtime(staging, manifest)
-        check_running(database, split, checkpoint)
+        if not checkpoint or split:
+            check_running(database, split)
         # 构建文件摘要区分相同源码的重复构建，避免覆盖仍由旧执行器使用的目录。
         build = hashlib.sha256(json.dumps(manifest["files"], sort_keys=True).encode()).hexdigest()[:12]
         release = support / "information-releases" / (manifest["releaseId"] + "-" + build)
@@ -227,8 +234,19 @@ def install(manifest, package=None, home=None, checkpoint=False):
     if not worker_registered:
         worker_plist, worker_pending = prepare_agent(home, support, logs, node, worker_environment, True)
         pending += worker_pending
-    check_running(database, split, checkpoint)
-    stop_web(domain, database, split, checkpoint)
+    # 首次检查点交接先准备产物，冻结后的复核才决定能否停止；准备耗时不能错过空闲窗口。
+    if not checkpoint or split:
+        check_running(database, split)
+    deadline = time.monotonic() + 300
+    while True:
+        try:
+            stop_web(domain, database, split, checkpoint)
+            break
+        except SystemExit as error:
+            # 每次失败都会恢复旧进程；等待期间不会重新复制产物或重启模型。
+            if not checkpoint or split or not str(error).startswith(("首次拆分", "有选材研究")) or time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
     activate_release(support, release)
     for source, target in pending:
         source.replace(target)

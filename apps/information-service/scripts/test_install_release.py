@@ -217,6 +217,21 @@ class InstallReleaseTest(unittest.TestCase):
             self.assertEqual([call.args for call in kill.call_args_list], [(888, installer.signal.SIGSTOP), (888, installer.signal.SIGCONT)])
         self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in self.calls))
 
+    def test_checkpoint_prepares_once_then_waits_without_changing_old_agent(self):
+        self.running()
+        calls = []
+        def stop(*args):
+            self.assertTrue((self.support / "run-information.sh.next").exists())
+            self.assertFalse((self.support / "run-information.sh").exists())
+            calls.append(args)
+            if len(calls) < 3:
+                raise SystemExit("首次拆分需等待当前模型完成")
+        with patch.object(installer, "stop_web", side_effect=stop), patch.object(installer.time, "sleep") as sleep:
+            installer.install(self.manifest, self.package, self.home, checkpoint=True)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(self.runtime.is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()
