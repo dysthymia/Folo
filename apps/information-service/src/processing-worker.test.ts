@@ -62,6 +62,132 @@ function fixture() {
 }
 
 describe("调度到处理的后台链路", () => {
+  it("采集最多80页即交还租约，续采从保存游标继续", async () => {
+    const options = fixture()
+    try {
+      let pages = 0
+      vi.mocked(options.sourceReader.page).mockImplementation(async () => ({
+        entries: [],
+        nextCursor: `cursor-${++pages}`,
+        pageFull: true,
+        boundaryCount: 0,
+      }))
+      options.store.schedule.save(
+        {
+          sourceKeys: ["feed/1"],
+          historySince: "2026-01-01T00:00:00Z",
+          timeZone: "UTC",
+          enabled: false,
+        },
+        0,
+      )
+      options.store.automation.publish(0, { mode: "future" }, randomUUID())
+      const root = options.store.schedule.manual(randomUUID(), new Date())
+      await runProcessingWorker(
+        { ...options, acquire: acquireSources },
+        new AbortController().signal,
+      )
+      expect(pages).toBe(80)
+      const next = options.store.schedule
+        .triggers()
+        .find((item) => item.dedupeKey === `scan:${root.id}`)!
+      expect(next.cutoffAt).toBe(root.cutoffAt)
+      expect(next.sourceKeys).toEqual(["feed/1"])
+      await runProcessingWorker(
+        { ...options, acquire: acquireSources },
+        new AbortController().signal,
+      )
+      expect(pages).toBe(160)
+      expect(vi.mocked(options.sourceReader.page).mock.calls[80]![1].cursor).toBe("cursor-80")
+    } finally {
+      options.store.close()
+    }
+  })
+  it("采集与模型交错执行，全范围进度包含后续小批，超出32篇保存续跑", async () => {
+    const options = fixture()
+    try {
+      for (let index = 0; index < 40; index++)
+        options.store.saveEntry({
+          id: `bounded-${index}`,
+          sourceKey: "feed/1",
+          title: `正文${index}`,
+          url: null,
+          publishedAt: "2026-01-01T00:00:00Z",
+          read: false,
+          content: "独立文章正文",
+          description: null,
+        })
+      options.store.schedule.save(
+        {
+          sourceKeys: ["feed/1"],
+          historySince: "2026-01-01T00:00:00Z",
+          timeZone: "UTC",
+          enabled: false,
+        },
+        0,
+      )
+      options.store.automation.publish(0, { mode: "future" }, randomUUID())
+      const root = options.store.schedule.manual(randomUUID(), new Date())
+      const order: string[] = []
+      const acquire = vi.fn(async (_input: Parameters<typeof acquireSources>[0]) => {
+        order.push("sources")
+        // 写入推进标志，模拟仍有第二轮分页。
+        options.store.sourceSync.savePage({
+          sourceKey: "feed/1",
+          historySince: root.historySince,
+          cursor: `page-${order.length}`,
+          coverage: order.length === 1 ? "budget" : "end",
+          pending: order.length === 1,
+          now: new Date().toISOString(),
+        })
+        return [
+          {
+            sourceKey: "feed/1",
+            pages: 20,
+            entries: 40,
+            coverage: order.length === 1 ? ("budget" as const) : ("end" as const),
+            failure: null,
+          },
+        ]
+      })
+      const processEntries = vi.fn(
+        async (_input: Parameters<typeof import("./processing-engine").runEntryProcessing>[0]) => {
+          order.push("model")
+          return {
+            completed: 0,
+            pending: 0,
+            failures: [],
+            usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+          }
+        },
+      )
+      const reports = vi.spyOn(options.store.processingState, "report")
+      await runProcessingWorker(
+        { ...options, acquire, processEntries },
+        new AbortController().signal,
+      )
+      expect(order.slice(0, 3)).toEqual(["sources", "model", "sources"])
+      expect(processEntries).toHaveBeenCalledTimes(4)
+      const next = options.store.schedule
+        .triggers()
+        .find((item) => item.dedupeKey === `work:${root.id}`)!
+      expect(next.targets).toHaveLength(8)
+      expect(next.cutoffAt).toBe(root.cutoffAt)
+      expect(
+        reports.mock.calls.some(
+          ([, report]) =>
+            "progress" in report && (report.progress as { queued: number }).queued === 40,
+        ),
+      ).toBe(true)
+      expect(options.store.processingState.reports(root.id)[0]?.report).toMatchObject({
+        progress: { total: 40, queued: 8, deferred: 32, remaining: 40 },
+        continuation: next.id,
+      })
+    } finally {
+      options.store.close()
+    }
+  })
+
   it("未知读态不水合、不扩大空模型批，并报告等待上下文", async () => {
     const options = fixture()
     try {

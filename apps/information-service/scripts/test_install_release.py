@@ -166,6 +166,57 @@ class InstallReleaseTest(unittest.TestCase):
             ["launchctl", "bootout", "gui/501/" + installer.WEB_LABEL],
         ])
 
+    def checkpoint_database(self, phase="entries", active_input=False):
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("ALTER TABLE processing_schedule_triggers ADD COLUMN id TEXT")
+            db.execute("ALTER TABLE processing_schedule_triggers ADD COLUMN lease_token TEXT")
+            db.execute("ALTER TABLE processing_schedule_triggers ADD COLUMN lease_until TEXT")
+            db.execute("CREATE TABLE processing_trigger_reports(trigger_id TEXT, body TEXT)")
+            db.execute("INSERT INTO processing_schedule_triggers VALUES('running','original','lease','future')")
+            db.execute("INSERT INTO processing_trigger_reports VALUES('original',?)", (installer.json.dumps({"phase": phase}),))
+            db.execute("INSERT INTO processing_inputs VALUES(?)", ("running" if active_input else "succeeded",))
+
+    def test_checkpoint_rejects_active_model_and_untracked_paid_stages(self):
+        self.checkpoint_database(active_input=True)
+        with self.assertRaisesRegex(SystemExit, "首次拆分"):
+            installer.check_running(self.database, False, True)
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("UPDATE processing_inputs SET status='succeeded'")
+            db.execute("UPDATE processing_trigger_reports SET body=?", (installer.json.dumps({"phase": "dedupe"}),))
+        with self.assertRaisesRegex(SystemExit, "检查点"):
+            installer.check_running(self.database, False, True)
+
+    def test_checkpoint_handoff_requeues_only_after_old_process_exits(self):
+        self.checkpoint_database()
+        state = subprocess.CompletedProcess([], 0, stdout="pid = 888\n", stderr="")
+        signals = []
+        def kill(pid, value):
+            if value == 0:
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("SELECT status FROM processing_schedule_triggers").fetchone()[0], "running")
+                raise ProcessLookupError()
+            signals.append(value)
+        with patch.object(installer, "registered", return_value=state), patch.object(installer.os, "kill", side_effect=kill):
+            installer.stop_web("gui/501", self.database, False, True)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT status,lease_token FROM processing_schedule_triggers").fetchone(), ("pending", None))
+            self.assertEqual(db.execute("SELECT status FROM processing_inputs").fetchone()[0], "succeeded")
+        self.assertEqual(signals, [installer.signal.SIGSTOP, installer.signal.SIGKILL])
+
+    def test_checkpoint_resumes_parent_when_model_child_still_exists(self):
+        self.checkpoint_database()
+        state = subprocess.CompletedProcess([], 0, stdout="pid = 888\n", stderr="")
+        original = self.command
+        def command(args, **kwargs):
+            if args[0] == "ps":
+                return subprocess.CompletedProcess(args, 0, stdout="999 888\n", stderr="")
+            return original(args, **kwargs)
+        with patch.object(installer, "registered", return_value=state), patch.object(installer.os, "kill") as kill, patch.object(installer.subprocess, "run", side_effect=command):
+            with self.assertRaisesRegex(SystemExit, "子进程"):
+                installer.stop_web("gui/501", self.database, False, True)
+            self.assertEqual([call.args for call in kill.call_args_list], [(888, installer.signal.SIGSTOP), (888, installer.signal.SIGCONT)])
+        self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in self.calls))
+
 
 if __name__ == "__main__":
     unittest.main()

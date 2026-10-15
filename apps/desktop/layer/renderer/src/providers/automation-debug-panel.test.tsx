@@ -131,6 +131,18 @@ describe("自动化规则调试侧栏", () => {
       },
       report: {
         phase: "presentation",
+        progress: {
+          total: 294,
+          queued: 282,
+          running: 1,
+          waitingMaterial: 4,
+          waitingContext: 7,
+          failed: 74,
+          deferred: 0,
+          sourcesRemaining: 3,
+          remaining: 294,
+        },
+        continuation: "next-slice",
         entries: { completed: 4, failures: [{ code: "processing_interrupted" }] },
         dedupe: { exactDuplicates: 1, duplicates: 2, pending: 0 },
         stories: [
@@ -145,6 +157,13 @@ describe("自动化规则调试侧栏", () => {
     }
     mocks.debug.mockResolvedValue(next)
     await act(async () => vi.advanceTimersByTimeAsync(15_000))
+    expect(value("automation.debug.progress_queued")).toBe("282")
+    expect(value("automation.debug.progress_running")).toBe("1")
+    expect(value("automation.debug.progress_waiting_material")).toBe("4")
+    expect(value("automation.debug.progress_sources")).toBe("3")
+    expect(value("automation.debug.progress_continuation")).toBe(
+      "automation.debug.progress_scheduled",
+    )
     expect(value("automation.debug.exact")).toBe("1")
     expect(value("automation.debug.stories_created")).toBe("1")
     expect(value("processing.report.model_calls")).toBe("processing.report.not_collected")

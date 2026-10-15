@@ -23,6 +23,23 @@ const reportSchema = z.object({
   phase: z.string().optional(),
   progressAt: z.string().datetime().optional(),
   finishedAt: z.string().datetime().optional(),
+  // 全范围待办与当前模型小批分开，旧报告缺少的数据继续显示未采集。
+  progress: z
+    .object({
+      total: count,
+      completed: count,
+      queued: count,
+      running: count,
+      waitingMaterial: count,
+      waitingContext: count,
+      failed: count,
+      deferred: count,
+      skipped: count,
+      sourcesRemaining: count,
+      remaining: count,
+    })
+    .optional(),
+  continuation: z.string().nullable().optional(),
   inventory: z.object({ failure: z.string().nullable().optional() }).optional(),
   sources: z.array(z.object({ failure: z.string().nullable().optional() })).optional(),
   entries: z
@@ -97,7 +114,14 @@ export function ProcessingRunReport({ run, report }: { run: ProcessingRun; repor
   const rows = [
     ["processing.report.published_batches", number(metrics?.publishedBatches)],
     ["processing.report.completed", number(entries?.completed)],
-    ["processing.report.pending", number(entries?.pending)],
+    ["processing.report.pending", number(parsed?.progress?.remaining ?? entries?.pending)],
+    ["automation.debug.progress_queued", number(parsed?.progress?.queued)],
+    ["automation.debug.progress_running", number(parsed?.progress?.running)],
+    ["automation.debug.progress_waiting_material", number(parsed?.progress?.waitingMaterial)],
+    ["automation.debug.progress_waiting_context", number(parsed?.progress?.waitingContext)],
+    ["automation.debug.progress_failed", number(parsed?.progress?.failed)],
+    ["automation.debug.progress_deferred", number(parsed?.progress?.deferred)],
+    ["automation.debug.progress_sources", number(parsed?.progress?.sourcesRemaining)],
     ["processing.report.model_calls", number(metrics?.modelCalls)],
     ["processing.report.cache_hits", number(metrics?.cacheHits)],
     ["processing.report.queue_wait", elapsed(run.createdAt, run.startedAt ?? undefined)],

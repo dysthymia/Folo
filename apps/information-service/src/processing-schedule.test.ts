@@ -251,3 +251,51 @@ it("新内容分类水位在普通计划编辑时保持，旧JSON缺失时不扩
     schedule.save({ ...edited, classification: { mode: "new_content", enabledAt: "invalid" } }, 2),
   ).toThrow("invalid_schedule")
 })
+
+// 续跑保留冻结范围，并给新到的显式任务让出调度机会。
+describe("有界续跑", () => {
+  it("模型续跑保留截止时间，前台任务优先于历史与积压", () => {
+    const { schedule } = fixture()
+    configure(schedule)
+    const root = schedule.manual("root", "2026-04-01T00:00:00.000Z")
+    const claimed = schedule.claim("2026-04-01T00:00:00.000Z")!
+    schedule.finish(root.id, claimed.leaseToken!, "deferred_budget", "2026-04-01T00:01:00.000Z")
+    const next = schedule.continueProcessing(
+      root,
+      [{ sourceKey: "feed/a", itemId: "e" }],
+      "2026-04-01T00:01:00.000Z",
+    )!
+    expect(next.cutoffAt).toBe(root.cutoffAt)
+    expect(next.targets).toEqual([{ sourceKey: "feed/a", itemId: "e" }])
+    const history = schedule.reconcileHistory(["feed/a"], "2026-04-01T00:01:00.000Z")
+    expect(schedule.reconcileHistory(["feed/a"], "2026-04-01T12:00:00.000Z")[0]!.id).toBe(
+      history[0]!.id,
+    )
+    const urgent = schedule.manual("urgent", "2026-04-01T00:02:00.000Z")
+    expect(schedule.claim("2026-04-01T00:02:00.000Z")!.id).toBe(urgent.id)
+    expect(schedule.claim("2026-04-01T00:02:01.000Z")!.id).toBe(next.id)
+    expect(schedule.claim("2026-04-01T00:02:02.000Z")!.sourceKeys).toEqual(["feed/a"])
+  })
+
+  it("计划暂停或修订后不继续旧后台范围，手动任务暂停时仍可分片", () => {
+    const { schedule } = fixture()
+    configure(schedule, { enabled: false })
+    const manual = schedule.manual("manual", "2026-04-01T00:00:00.000Z")
+    expect(schedule.continueSources(manual, ["feed/a"], "2026-04-01T00:01:00.000Z")).not.toBeNull()
+    expect(
+      schedule.continueSources(
+        { ...manual, kind: "catchup" },
+        ["feed/a"],
+        "2026-04-01T00:01:00.000Z",
+      ),
+    ).toBeNull()
+    schedule.save({ ...schedule.snapshot().config!, enabled: true }, 1)
+    expect(
+      schedule.continueProcessing(
+        manual,
+        [{ sourceKey: "feed/a", itemId: "e" }],
+        "2026-04-01T00:02:00.000Z",
+      ),
+    ).toBeNull()
+  })
+})

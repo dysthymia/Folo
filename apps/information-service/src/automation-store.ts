@@ -127,6 +127,7 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS rule_set_releases (version INTEGER PRIMARY KEY AUTOINCREMENT, draft_revision INTEGER NOT NULL, activation_seq INTEGER NOT NULL, body TEXT NOT NULL, scope TEXT NOT NULL, targets TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS processing_inputs (seq INTEGER PRIMARY KEY AUTOINCREMENT, source_key TEXT NOT NULL, item_id TEXT NOT NULL, content_version TEXT NOT NULL, body TEXT NOT NULL, received_at TEXT NOT NULL, release_version INTEGER, generation INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', current INTEGER NOT NULL DEFAULT 1, decision_id TEXT);
       CREATE INDEX IF NOT EXISTS processing_input_identity ON processing_inputs(source_key,item_id,current);
+      CREATE INDEX IF NOT EXISTS processing_input_queue ON processing_inputs(current,status,source_key);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS rule_activation_requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publication_requests (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, scope TEXT NOT NULL, release_version INTEGER NOT NULL);
@@ -597,6 +598,48 @@ export class AutomationStore {
           : "SELECT * FROM processing_inputs WHERE current=1 ORDER BY seq",
       )
       .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
+      .map((row) => this.inputFromRow(row))
+  }
+
+  // 来源条件只需少量元数据，不把全库已完成正文反序列化到执行器内存。
+  contextInputs() {
+    return this.db
+      .prepare(
+        `SELECT seq,source_key,release_version,
+      json_extract(body,'$.feedId') AS feed_id,json_extract(body,'$.feedKind') AS feed_kind
+      FROM processing_inputs WHERE current=1`,
+      )
+      .all()
+      .map((row) => ({
+        seq: Number(row.seq),
+        sourceKey: String(row.source_key),
+        releaseVersion: row.release_version === null ? null : Number(row.release_version),
+        body: {
+          feedId: row.feed_id === null ? undefined : String(row.feed_id),
+          feedKind:
+            row.feed_kind === null ? undefined : (String(row.feed_kind) as SourceEntry["feedKind"]),
+        },
+      }))
+  }
+
+  // 流水线只读取当前范围的活动队列，不能在每次进度回调里解析全库已完成正文。
+  processingInputs(
+    options: {
+      sourceKeys: readonly string[]
+      historySince: string
+      cutoffAt: string
+    },
+    includeCompleted = false,
+  ) {
+    return this.db
+      .prepare(
+        `SELECT * FROM processing_inputs
+      WHERE current=1 ${includeCompleted ? "" : "AND status IN ('pending','running','failed')"}
+      AND source_key IN (SELECT value FROM json_each(?))
+      AND julianday(json_extract(body,'$.publishedAt')) BETWEEN julianday(?) AND julianday(?)
+      ORDER BY seq`,
+      )
+      .all(JSON.stringify(options.sourceKeys), options.historySince, options.cutoffAt)
       .map((row) => this.inputFromRow(row))
   }
 

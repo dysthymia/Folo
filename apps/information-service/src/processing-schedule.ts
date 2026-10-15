@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
 import type { ScheduleScope } from "@follow/information-core"
@@ -570,6 +570,75 @@ export class ProcessingScheduleStore {
     })
   }
 
+  // 一个执行片段最多处理有限小批，剩余目标独立排队，网页更新与新列表不再等待整库清空。
+  continueProcessing(trigger: ProcessingTrigger, targets: ProcessingTarget[], now: Date | string) {
+    const snapshot = this.snapshot()
+    if (
+      !targets.length ||
+      !snapshot.config ||
+      snapshot.revision !== trigger.configRevision ||
+      (!snapshot.config.enabled && trigger.kind !== "manual")
+    )
+      return null
+    const at = instant(now)
+    return this.createTrigger({
+      kind: trigger.kind === "manual" || trigger.kind === "list_loaded" ? trigger.kind : "catchup",
+      dedupeKey: `work:${trigger.id}`,
+      configRevision: trigger.configRevision,
+      sourceKeys: [...new Set(targets.map((target) => target.sourceKey))],
+      targets,
+      historySince: trigger.historySince,
+      timeZone: trigger.timeZone,
+      scheduledFor: null,
+      cutoffAt: trigger.cutoffAt,
+      createdAt: at,
+    }).trigger
+  }
+
+  // 采集也分片交还租约；续采保留原范围与截止时间，不重启头部或重复领取已完成模型。
+  continueSources(trigger: ProcessingTrigger, keys: string[], now: Date | string) {
+    const current = this.snapshot()
+    if (
+      !keys.length ||
+      !current.config ||
+      current.revision !== trigger.configRevision ||
+      (!current.config.enabled && trigger.kind !== "manual")
+    )
+      return null
+    return this.createTrigger({
+      kind: trigger.kind,
+      dedupeKey: `${trigger.dedupeKey.startsWith("history:") ? "history" : "scan"}:${trigger.id}`,
+      configRevision: trigger.configRevision,
+      sourceKeys: keys,
+      historySince: trigger.historySince,
+      timeZone: trigger.timeZone,
+      scheduledFor: null,
+      cutoffAt: trigger.cutoffAt,
+      createdAt: instant(now),
+    }).trigger
+  }
+
+  // 历史补齐和每日迟到内容复核按单来源排队；日常增量与显式列表始终优先。
+  reconcileHistory(sourceKeys: string[], now: Date | string) {
+    const snapshot = this.snapshot()
+    if (!snapshot.config?.enabled) return []
+    const at = instant(now)
+    return sourceKeys.map(
+      (sourceKey) =>
+        this.createTrigger({
+          kind: "catchup",
+          dedupeKey: `history:${snapshot.revision}:${at.slice(0, 10)}:${createHash("sha256").update(sourceKey).digest("hex").slice(0, 20)}`,
+          configRevision: snapshot.revision,
+          sourceKeys: [sourceKey],
+          historySince: snapshot.config!.historySince,
+          timeZone: snapshot.config!.timeZone,
+          scheduledFor: null,
+          cutoffAt: at,
+          createdAt: at,
+        }).trigger,
+    )
+  }
+
   listLoaded(
     targets: readonly ProcessingTarget[],
     now: Date | string,
@@ -712,7 +781,7 @@ export class ProcessingScheduleStore {
       const ownerId = this.ownerId()
       const row = this.db
         .prepare(
-          "SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND status='pending' ORDER BY created_at,id LIMIT 1",
+          "SELECT * FROM processing_schedule_triggers WHERE owner_id=? AND status='pending' ORDER BY CASE WHEN dedupe_key LIKE 'history:%' THEN 2 WHEN dedupe_key LIKE 'work:%' OR dedupe_key LIKE 'scan:%' THEN 1 ELSE 0 END,created_at,id LIMIT 1",
         )
         .get(ownerId)
       if (!row) return null
@@ -720,6 +789,9 @@ export class ProcessingScheduleStore {
       const current = this.snapshot()
       // 手动排队先保存意图，首次领取才用 worker 已刷新的清单冻结；租约恢复不扩大旧批次。
       const refreshScope =
+        !String(row.dedupe_key).startsWith("history:") &&
+        !String(row.dedupe_key).startsWith("work:") &&
+        !String(row.dedupe_key).startsWith("scan:") &&
         row.kind !== "list_loaded" &&
         row.started_at === null &&
         current.revision === Number(row.config_revision) &&

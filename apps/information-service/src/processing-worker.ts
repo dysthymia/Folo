@@ -2,10 +2,14 @@ import type { ConditionSet } from "@follow/information-core"
 
 import type { AIConfigStore } from "./ai-config"
 import { expandXContexts } from "./content-identity"
-import type { FoloReader } from "./folo"
+import type { FoloReader, SourceEntry } from "./folo"
 import { inspectMaterialContext, missingMaterialContext } from "./material-context"
 import { processingRuleInput } from "./processing-context"
-import { activeDedupeActions, runSemanticDedupe } from "./processing-dedupe"
+import {
+  activeDedupeActions,
+  MAX_SEMANTIC_DEDUPE_BATCHES,
+  runSemanticDedupe,
+} from "./processing-dedupe"
 import type { EntryProcessingResult } from "./processing-engine"
 import { runEntryProcessing, settleReadStates } from "./processing-engine"
 import { listLoadSourceKeys } from "./processing-list-load"
@@ -25,7 +29,53 @@ import type { Store } from "./store"
 import { runStoryAggregation } from "./story-engine"
 import { runStoryRepair } from "./story-repair"
 
+type PresentationResult = {
+  dedupe: Awaited<ReturnType<typeof runSemanticDedupe>>
+  repair: Awaited<ReturnType<typeof runStoryRepair>>
+  stories: Awaited<ReturnType<typeof runStoryAggregation>>[]
+}
+
+// 用量和已落实结果跨批累计，待处理状态取末次全范围结算，避免旧候选重复计入待办。
+function mergePresentationResults(passes: readonly PresentationResult[]): PresentationResult {
+  const latest = structuredClone(passes.at(-1)!)
+  if (passes.some((pass) => pass.dedupe.decisionsObservationError))
+    latest.dedupe.decisionsObservationError = "audit_unavailable"
+  for (const pass of passes.slice(0, -1)) {
+    for (const key of [
+      "batches",
+      "candidates",
+      "duplicates",
+      "exactDuplicates",
+      "sharedComparisons",
+      "relationCacheHits",
+      "dedicatedComparisons",
+      "unknownUsageRequests",
+    ] as const)
+      latest.dedupe[key] += pass.dedupe[key]
+    if (pass.dedupe.decisionsRequests)
+      latest.dedupe.decisionsRequests =
+        (latest.dedupe.decisionsRequests ?? 0) + pass.dedupe.decisionsRequests
+    for (const key of ["inputTokens", "outputTokens", "cachedInputTokens"] as const) {
+      latest.dedupe.usage[key] = (latest.dedupe.usage[key] ?? 0) + (pass.dedupe.usage[key] ?? 0)
+      latest.repair.usage[key] = (latest.repair.usage[key] ?? 0) + (pass.repair.usage[key] ?? 0)
+    }
+    latest.repair.repaired.unshift(...pass.repair.repaired)
+    latest.repair.independent.unshift(...pass.repair.independent)
+    latest.stories.unshift(
+      ...pass.stories.map((story) => ({
+        ...story,
+        pending: [],
+        failures: [],
+      })),
+    )
+  }
+  return latest
+}
+
 // 空闲轮询每秒运行，但订阅发现按分钟刷新；待处理的显式批次仍立即刷新。
+// 每个可安全交接的执行片段至多4个小批，剩余目标保留原截止时间独立续跑。
+export const MAX_PROCESSING_BATCHES_PER_RUN = 4
+const MAX_SOURCE_ROUNDS_PER_RUN = 4
 const inventoryRefreshTimes = new WeakMap<Store, number>()
 
 export type ProcessingWorkerOptions = {
@@ -85,7 +135,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
   // 失败续跑只消费既有批次当前授权的未读目标，不扩大列表范围或历史窗口。
   const failedTargets = () => {
     const active = store.automation.effective().config
-    return store.automation.inputs().filter((input) => {
+    return store.automation.processingInputs(trigger).filter((input) => {
       const publishedAt = Date.parse(input.body.publishedAt)
       if (
         !input.current ||
@@ -118,73 +168,27 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
   let status: Exclude<ProcessingTriggerStatus, "pending" | "running"> = "succeeded"
   try {
     expandXContexts(store)
-    const previousContexts = new Map(
-      store.automation
-        .inputs()
-        .map((input) => [input.seq, contextFingerprint(store, input.sourceKey, input.body)]),
-    )
-    const foloSourceKeys = listTargets
+    const metadataInputs = store.automation.contextInputs()
+    let previousContexts = contextFingerprints(store, metadataInputs)
+    const continuation = trigger.dedupeKey.startsWith("work:") && trigger.targets !== undefined
+    const history = trigger.kind === "catchup" && trigger.dedupeKey.startsWith("history:")
+    const scanContinuation =
+      trigger.dedupeKey.startsWith("scan:") ||
+      (history && trigger.dedupeKey.split(":").length === 2)
+    const skipSources = Boolean(listTargets || continuation)
+    const foloSourceKeys = skipSources
       ? []
       : trigger.sourceKeys.filter((key) => !key.startsWith("x/search/"))
     const sourceProgress = new Map<string, SourceSyncResult>()
     let remainingSourceKeys = foloSourceKeys
-    // 页预算只切分网络采集，不结束整个计划；先覆盖本轮来源，再运行付费模型。
-    // 续采只包含尚未覆盖的来源，已失败的请求留待下轮，避免网络故障形成重试风暴。
-    while (remainingSourceKeys.length && !signal.aborted) {
-      const previousKeys = remainingSourceKeys
-      const before = new Map(
-        previousKeys.map((key) => [key, JSON.stringify(store.sourceSync.state(key))]),
-      )
-      const pageResults = await (options.acquire ?? acquireSources)(
-        {
-          store,
-          reader: options.reader,
-          state: store.sourceSync,
-          inventory,
-          sourceKeys: previousKeys,
-          membershipListKeys: referencedListKeys(store),
-          historySince: trigger.historySince,
-          // 每个来源在本计划首次真正取得页时刷新头部；排在预算后的来源也不能沿用旧游标。
-          refreshHeadSourceKeys: previousKeys.filter((key) => !sourceProgress.get(key)?.pages),
-        },
-        signal,
-      )
-      for (const source of pageResults) {
-        const previous = sourceProgress.get(source.sourceKey)
-        sourceProgress.set(source.sourceKey, {
-          ...source,
-          pages: (previous?.pages ?? 0) + source.pages,
-          entries: (previous?.entries ?? 0) + source.entries,
-        })
-      }
-      remainingSourceKeys = pageResults
-        .filter((source) => source.coverage === "budget" || source.coverage === "pending")
-        .map((source) => source.sourceKey)
-      store.processingState.report(trigger.id, {
-        inventory: {
-          snapshot: inventory.snapshot,
-          failure: inventory.failure,
-          syncedAt: inventory.syncedAt,
-        },
-        sources: [...sourceProgress.values()],
-        phase: "sources",
-        progressAt: new Date().toISOString(),
-      })
-      // 游标和范围都没有推进时停止；异常分页实现不能令后台无限循环。
-      if (
-        remainingSourceKeys.length === previousKeys.length &&
-        previousKeys.every((key) => before.get(key) === JSON.stringify(store.sourceSync.state(key)))
-      )
-        break
-    }
-    const sources = [...sourceProgress.values()]
-    // X 抓取由显式搜索操作负责；处理计划可读取已保存结果，但不能暗中产生外部搜索费用。
-    for (const key of (listTargets ? [] : trigger.sourceKeys).filter((key) =>
+    const sources: SourceSyncResult[] = []
+    const xSources: SourceSyncResult[] = []
+    for (const key of (skipSources ? [] : trigger.sourceKeys).filter((key) =>
       key.startsWith("x/search/"),
     )) {
       const query = store.xQueries.list().find((item) => item.sourceKey === key)
       const state = query ? store.xQueries.state(query.id) : null
-      sources.push({
+      xSources.push({
         sourceKey: key,
         pages: 0,
         entries: 0,
@@ -192,56 +196,19 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         failure: state?.failure ?? null,
       })
     }
-    const changedSources = store.automation
-      .inputs()
-      .filter((input) => {
-        const previous = previousContexts.get(input.seq)
-        return (
-          previous !== undefined &&
-          previous !== contextFingerprint(store, input.sourceKey, input.body)
-        )
-      })
-      .map((input) => input.sourceKey)
-    if (changedSources.length)
-      store.stories.invalidateInputs(
-        store.automation.invalidateSources([...new Set(changedSources)]),
-      )
-    // 已读条目在抓详情之前就退出队列：材料水合与可读性提取都不该为它们白跑一遍。
-    const pendingBeforeRead = new Set(
-      store.automation
-        .inputs()
-        .filter(
-          (input) =>
-            input.status === "pending" &&
-            trigger.sourceKeys.includes(input.sourceKey) &&
-            targetMatches(input) &&
-            Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
-            Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
-        )
-        .map((input) => input.seq),
-    )
-    const readSettlement = settleReadStates(store, trigger.targets)
-    // 有退避和持久化次数上限；同一目标保留原 generation、发布版本和模型快照。
-    store.transaction(() => {
-      for (const input of failedTargets()) store.processingState.retryAutomatically(input)
-    })
-    const readSkipped = readSettlement.skip.filter((seq) => pendingBeforeRead.has(seq)).length
-    const hydrationInputs = store.automation
-      .inputs()
-      .filter(
-        (input) =>
-          trigger.sourceKeys.includes(input.sourceKey) &&
-          targetMatches(input) &&
-          input.status === "pending" &&
-          inputReadState(input, store.entry.bind(store)) === false &&
-          Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
-          Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
-      )
-    // 水合与模型共用公平批次，第2位保留最早普通材料，不按最新发布时间反复挤掉积压。
-    const batches = fairProcessingBatches(hydrationInputs).map((batch) =>
-      batch.map((input) => input.seq),
-    )
-    if (!batches.length) batches.push([])
+    sources.push(...xSources)
+    const sourceReady = (key: string) =>
+      skipSources ||
+      (sourceProgress.get(key)?.pages ?? 0) > 0 ||
+      xSources.some((source) => source.sourceKey === key && source.coverage === "end")
+    const attempted = new Set<string>()
+    const knownTargets = new Map<string, { sourceKey: string; itemId: string }>()
+    const identity = (input: { sourceKey: string; itemId: string }) =>
+      JSON.stringify([input.sourceKey, input.itemId])
+    const queueInputs = () => store.automation.processingInputs(trigger).filter(targetMatches)
+    let processedBatches = 0
+    let readSkipped = 0
+    let retriedFailures = false
     const sharedAnalysis = new SharedAnalysisSession({
       store,
       triggerId: trigger.id,
@@ -252,7 +219,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
     })
     await sharedAnalysis.restore(
       store.automation
-        .inputs()
+        .processingInputs(trigger, true)
         .filter(
           (input) =>
             input.current &&
@@ -270,12 +237,59 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       failures: [],
       usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
     }
-    // 在慢步骤开始前发布阶段，调试浮窗不会在去重或汇总期间仍显示「单篇处理」。
-    const reportPhase = (phase: string) => {
-      // 沿用本轮已记录的阶段结果，调试记录不依赖处理流水线的分批实现。
+    const runProgress = () => {
+      for (const input of queueInputs())
+        if (inputReadState(input, store.entry.bind(store)) !== true)
+          knownTargets.set(identity(input), { sourceKey: input.sourceKey, itemId: input.itemId })
+      const result = {
+        total: knownTargets.size,
+        completed: 0,
+        queued: 0,
+        running: 0,
+        waitingMaterial: 0,
+        waitingContext: 0,
+        failed: 0,
+        deferred: 0,
+        skipped: 0,
+        sourcesRemaining: remainingSourceKeys.length,
+        remaining: 0,
+      }
+      for (const target of knownTargets.values()) {
+        const input = store.automation.current(target.sourceKey, target.itemId)
+        if (input?.status === "succeeded") result.completed++
+        else if (
+          !input ||
+          inputReadState(input, store.entry.bind(store)) === true ||
+          input.status === "skipped"
+        )
+          result.skipped++
+        else if (input.status === "running") result.running++
+        else if (input.status === "failed") result.failed++
+        else if (inputReadState(input, store.entry.bind(store)) === null) result.waitingContext++
+        else if (["missing", "failed"].includes(store.processingState.material(input) ?? ""))
+          result.waitingMaterial++
+        else if (attempted.has(identity(input))) result.deferred++
+        else result.queued++
+      }
+      result.remaining =
+        result.queued +
+        result.running +
+        result.waitingMaterial +
+        result.waitingContext +
+        result.deferred
+      return result
+    }
+    // 在慢步骤开始前发布阶段，调试侧栏不会在去重或汇总期间仍显示「单篇处理」。
+    const reportPhase = (
+      phase: string,
+      currentEntries = entries,
+      extra: Partial<PresentationResult> = {},
+    ) => {
       const previous = store.processingState.reports(trigger.id)[0]?.report
+      const snapshot = runProgress()
       store.processingState.report(trigger.id, {
         ...(previous && typeof previous === "object" ? previous : {}),
+        ...extra,
         inventory: {
           snapshot: inventory.snapshot,
           failure: inventory.failure,
@@ -283,71 +297,329 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         },
         sources,
         material: { ...material },
-        entries,
+        entries: { ...currentEntries, pending: snapshot.remaining },
+        progress: snapshot,
         phase,
         progressAt: new Date().toISOString(),
       })
     }
-    // 紧迫条目优先按小批补读并正式发布，不等待所有普通材料串行水合完成。
-    for (const batch of batches) {
-      if (signal.aborted) break
-      reportPhase("material")
-      const hydrated = await hydrateMaterials(
-        options,
-        trigger.sourceKeys,
-        trigger.historySince,
-        trigger.cutoffAt,
-        signal,
-        batch,
-      )
-      material.complete += hydrated.complete
-      material.missing += hydrated.missing
-      material.failed += hydrated.failed
-      reportPhase("entries")
-      const result = await (options.processEntries ?? runEntryProcessing)({
+    // 每个已发布小批立即结算展示，后续慢文章不能阻塞已完成材料的去重和综述。
+    const presentationPasses: PresentationResult[] = []
+    const settlePresentation = async (
+      targets: readonly { sourceKey: string; itemId: string }[] | undefined,
+    ): Promise<PresentationResult> => {
+      // 当前单篇和旧格式身份都先经过事件登记核验，去重才能读取同一份确认归属。
+      store.synchronizeEvents()
+      // 单篇发布后先落实覆盖关系，再把保留材料交给综述，重复报道不冒充独立证据。
+      reportPhase("dedupe")
+      const dedupe = await (options.dedupe ?? runSemanticDedupe)({
         store,
         aiConfig: options.aiConfig,
         runtimeDir: options.runtimeDir,
-        sourceKeys: trigger.sourceKeys,
-        inputSeqs: hydrated.inputSeqs,
-        allowClassification:
-          trigger.kind === "list_loaded" ||
-          store.schedule.snapshot().config?.classification?.mode === "new_content",
-        // 列表显式目标允许处理旧文；后台主动分类严格遵守首次入库水位。
-        ...(trigger.kind === "list_loaded"
-          ? {}
-          : { classificationSince: store.schedule.snapshot().config?.classification?.enabledAt }),
-        sharedAnalysis,
-        historySince: trigger.historySince,
-        cutoffAt: trigger.cutoffAt,
         signal,
-        onProgress: (progress) => {
-          const combined = mergeEntryResults(entries, progress)
-          if (combined.metrics) {
-            combined.metrics.readSkipped += readSkipped
-            combined.metrics.budgetDeferred += sources.filter(
-              (source) => source.coverage === "budget",
-            ).length
-          }
-          store.processingState.report(trigger.id, {
-            inventory: {
-              snapshot: inventory.snapshot,
-              failure: inventory.failure,
-              syncedAt: inventory.syncedAt,
-            },
-            sources,
-            material: { ...material },
-            entries: combined,
-            phase: "entries",
-            progressAt: new Date().toISOString(),
-          })
-        },
+        targets,
+        sourceKeys: trigger.sourceKeys,
+        cutoffAt: trigger.cutoffAt,
+        maxBatches: Math.max(
+          0,
+          MAX_SEMANTIC_DEDUPE_BATCHES -
+            presentationPasses.reduce((sum, pass) => sum + pass.dedupe.batches, 0),
+        ),
+        preparedEvaluations: sharedAnalysis.dedupeEvaluations,
+        triggerId: trigger.id,
       })
-      entries = mergeEntryResults(entries, result)
+      const dedupeFingerprints = new Set(
+        activeDedupeActions(store.automation.effective().config).map(
+          (action) => action.fingerprint,
+        ),
+      )
+      const hiddenInputSeqs = store.dedupe.merges(dedupeFingerprints).map((merge) => merge.hide.seq)
+      // 每个已发布版本按自己的综合指令执行，不能把新草稿混进旧版本决策。
+      const decisions = store.processingState.published()
+      const releasedRuleSets = store.automation.releases().map((release) => ({
+        version: release.version,
+        config: runnableReleasedConfig(
+          store.automation.release(release.version)!,
+          store.automation.effective().config,
+        ),
+      }))
+      // 先修复既有 Story，保留原身份，再允许新增事件聚合，避免修复对象被复制成新 Story。
+      reportPhase("repair")
+      const repair = await (options.repair ?? runStoryRepair)({
+        decisions,
+        currentEntry: store.entry.bind(store),
+        ruleSets: releasedRuleSets.map((release) => release.config),
+        releasedRuleSets,
+        stories: store.stories,
+        aiConfig: options.aiConfig,
+        runtimeDir: options.runtimeDir,
+        signal,
+        targets,
+      })
+      const repairedMembers = repair.repaired.flatMap(
+        (item) =>
+          store.stories.currentSnapshot(item.storyId)?.members.map((member) => member.inputSeq) ??
+          [],
+      )
+      const versions = [...new Set(decisions.map((item) => item.input.releaseVersion))]
+      const stories = []
+      const overrides = new Map(
+        store.processingState.overrides().map((item) => [item.inputSeq, item.mode]),
+      )
+      reportPhase("stories")
+      for (const version of versions) {
+        if (signal.aborted) break
+        const publishedRuleSet = version === null ? null : store.automation.release(version)
+        if (!publishedRuleSet) continue
+        const ruleSet = runnableReleasedConfig(
+          publishedRuleSet,
+          store.automation.effective().config,
+        )
+        stories.push(
+          await (options.aggregate ?? runStoryAggregation)({
+            decisions: decisions.filter(
+              (item) =>
+                item.input.releaseVersion === version && overrides.get(item.input.seq) !== "hide",
+            ),
+            ruleSet,
+            currentEntry: store.entry.bind(store),
+            alreadyClaimedInputSeqs: repairedMembers,
+            hiddenInputSeqs,
+            sharedGroups: sharedAnalysis.storyGroups,
+            stories: store.stories,
+            aiConfig: options.aiConfig,
+            runtimeDir: options.runtimeDir,
+            signal,
+            targets,
+            sameEventEligible: (published, eventMentionIndex) => {
+              const memberships = store.events.entryEvents(published.input)
+              return (
+                (eventMentionIndex === undefined && !memberships.length) ||
+                store.events.confirmedEventIdsForMembers([
+                  {
+                    inputSeq: published.input.seq,
+                    decisionId: published.decisionId,
+                    ...(eventMentionIndex === undefined ? {} : { eventMentionIndex }),
+                  },
+                ]).length > 0
+              )
+            },
+            registeredEventId: (members) =>
+              store.events.confirmedEventIdsForMembers(members)[0] ?? null,
+          }),
+        )
+      }
+      store.synchronizeEvents()
+      return { dedupe, repair, stories }
     }
+    const processAvailable = async (limit: number, final = false) => {
+      const currentContexts = contextFingerprints(store, metadataInputs)
+      const changedSources = metadataInputs
+        .filter((input) => previousContexts.get(input.seq) !== currentContexts.get(input.seq))
+        .map((input) => input.sourceKey)
+      previousContexts = currentContexts
+      if (changedSources.length)
+        store.stories.invalidateInputs(
+          store.automation.invalidateSources([...new Set(changedSources)]),
+        )
+      // 已读条目在抓详情之前就退出队列：材料水合与可读性提取都不该为它们白跑一遍。
+      const pendingBeforeRead = new Set(
+        store.automation
+          .processingInputs(trigger)
+          .filter(
+            (input) =>
+              input.status === "pending" &&
+              trigger.sourceKeys.includes(input.sourceKey) &&
+              targetMatches(input) &&
+              Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
+              Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
+          )
+          .map((input) => input.seq),
+      )
+      const readSettlement = settleReadStates(
+        store,
+        trigger.targets,
+        queueInputs().map((input) => input.seq),
+      )
+      // 有退避和持久化次数上限；同一目标保留原 generation、发布版本和模型快照。
+      if (!retriedFailures) {
+        store.transaction(() => {
+          for (const input of failedTargets()) store.processingState.retryAutomatically(input)
+        })
+        retriedFailures = true
+      }
+      readSkipped += readSettlement.skip.filter((seq) => pendingBeforeRead.has(seq)).length
+      const hydrationInputs = store.automation
+        .processingInputs(trigger)
+        .filter(
+          (input) =>
+            trigger.sourceKeys.includes(input.sourceKey) &&
+            targetMatches(input) &&
+            input.status === "pending" &&
+            !attempted.has(identity(input)) &&
+            sourceReady(input.sourceKey) &&
+            inputReadState(input, store.entry.bind(store)) === false &&
+            Date.parse(input.body.publishedAt) >= Date.parse(trigger.historySince) &&
+            Date.parse(input.body.publishedAt) <= Date.parse(trigger.cutoffAt),
+        )
+      // 水合与模型共用公平批次，第2位保留最早普通材料，不按最新发布时间反复挤掉积压。
+      const batches = fairProcessingBatches(hydrationInputs).map((batch) =>
+        batch.map((input) => input.seq),
+      )
+      if (!batches.length && final && !processedBatches) batches.push([])
+      // 紧迫条目优先按小批补读并正式发布，不等待所有普通材料串行水合完成。
+      for (const batch of batches.slice(
+        0,
+        Math.min(limit, MAX_PROCESSING_BATCHES_PER_RUN - processedBatches),
+      )) {
+        if (signal.aborted) break
+        for (const seq of batch) {
+          const input = store.automation.inputs([seq])[0]
+          if (input) attempted.add(identity(input))
+        }
+        processedBatches++
+        runProgress()
+        reportPhase("material")
+        const hydrated = await hydrateMaterials(
+          options,
+          trigger.sourceKeys,
+          trigger.historySince,
+          trigger.cutoffAt,
+          signal,
+          batch,
+        )
+        material.complete += hydrated.complete
+        material.missing += hydrated.missing
+        material.failed += hydrated.failed
+        reportPhase("entries")
+        const result = await (options.processEntries ?? runEntryProcessing)({
+          store,
+          aiConfig: options.aiConfig,
+          runtimeDir: options.runtimeDir,
+          sourceKeys: trigger.sourceKeys,
+          inputSeqs: hydrated.inputSeqs,
+          allowClassification:
+            trigger.kind === "list_loaded" ||
+            store.schedule.snapshot().config?.classification?.mode === "new_content",
+          // 列表显式目标允许处理旧文；后台主动分类严格遵守首次入库水位。
+          ...(trigger.kind === "list_loaded"
+            ? {}
+            : { classificationSince: store.schedule.snapshot().config?.classification?.enabledAt }),
+          sharedAnalysis,
+          historySince: trigger.historySince,
+          cutoffAt: trigger.cutoffAt,
+          signal,
+          onProgress: (progress) => {
+            const combined = mergeEntryResults(entries, progress)
+            if (combined.metrics) {
+              combined.metrics.readSkipped += readSkipped
+              combined.metrics.budgetDeferred += sources.filter(
+                (source) => source.coverage === "budget",
+              ).length
+            }
+            reportPhase("entries", combined)
+          },
+        })
+        entries = mergeEntryResults(entries, result)
+        if (
+          !signal.aborted &&
+          (remainingSourceKeys.length ||
+            queueInputs().some(
+              (input) => input.status === "pending" && !attempted.has(identity(input)),
+            ))
+        ) {
+          // 只推进本批目标，可复用同范围旧材料作比较；不为尚未发布或已读材料扩展付费。
+          const publishedBatch = new Set(hydrated.inputSeqs)
+          const targets = store.automation
+            .inputs(hydrated.inputSeqs)
+            .filter((input) => input.current && publishedBatch.has(input.seq))
+            .map((input) => ({ sourceKey: input.sourceKey, itemId: input.itemId }))
+          if (targets.length) {
+            presentationPasses.push(await settlePresentation(targets))
+            reportPhase("presentation", entries, mergePresentationResults(presentationPasses))
+          }
+        }
+      }
+    }
+    // 每轮20页采集后立即处理一小批，完整覆盖继续推进，但不阻塞已取得的新材料。
+    // 续采只包含尚未覆盖的来源，已失败的请求留待下轮，避免网络故障形成重试风暴。
+    const membershipListKeys = referencedListKeys(store, metadataInputs)
+    let sourceRounds = 0
+    while (
+      remainingSourceKeys.length &&
+      !signal.aborted &&
+      sourceRounds < MAX_SOURCE_ROUNDS_PER_RUN
+    ) {
+      sourceRounds++
+      const previousKeys = remainingSourceKeys
+      const before = new Map(
+        previousKeys.map((key) => [key, JSON.stringify(store.sourceSync.state(key))]),
+      )
+      reportPhase("sources")
+      const pageResults = await (options.acquire ?? acquireSources)(
+        {
+          store,
+          reader: options.reader,
+          state: store.sourceSync,
+          inventory,
+          sourceKeys: previousKeys,
+          membershipListKeys,
+          historySince: trigger.historySince,
+          incremental: trigger.kind !== "manual" && !history,
+          // 每个来源在本计划首次真正取得页时刷新头部；排在预算后的来源也不能沿用旧游标。
+          refreshHeadSourceKeys: scanContinuation
+            ? []
+            : previousKeys.filter((key) => !sourceProgress.get(key)?.pages),
+        },
+        signal,
+      )
+      for (const source of pageResults) {
+        const previous = sourceProgress.get(source.sourceKey)
+        sourceProgress.set(source.sourceKey, {
+          ...source,
+          pages: (previous?.pages ?? 0) + source.pages,
+          entries: (previous?.entries ?? 0) + source.entries,
+        })
+      }
+      remainingSourceKeys = pageResults
+        .filter((source) => source.coverage === "budget" || source.coverage === "pending")
+        .map((source) => source.sourceKey)
+      sources.splice(0, sources.length, ...sourceProgress.values(), ...xSources)
+      reportPhase("sources")
+      await processAvailable(1)
+      // 游标和范围都没有推进时停止；异常分页实现不能令后台无限循环。
+      if (
+        remainingSourceKeys.length === previousKeys.length &&
+        previousKeys.every((key) => before.get(key) === JSON.stringify(store.sourceSync.state(key)))
+      )
+        break
+    }
+    await processAvailable(MAX_PROCESSING_BATCHES_PER_RUN, true)
+    const remainingTargets = queueInputs()
+      .filter(
+        (input) =>
+          input.status === "pending" &&
+          !attempted.has(identity(input)) &&
+          sourceReady(input.sourceKey) &&
+          inputReadState(input, store.entry.bind(store)) === false,
+      )
+      .map((input) => ({ sourceKey: input.sourceKey, itemId: input.itemId }))
+    const next = !signal.aborted
+      ? store.schedule.continueProcessing(trigger, remainingTargets, new Date())
+      : null
+    const nextSources = !signal.aborted
+      ? store.schedule.continueSources(trigger, remainingSourceKeys, new Date())
+      : null
+    if (!history && !skipSources && !signal.aborted)
+      store.schedule.reconcileHistory(
+        foloSourceKeys.filter((key) =>
+          store.sourceSync.needsHistory(key, trigger.historySince, new Date().toISOString()),
+        ),
+        new Date(),
+      )
     // 未知读态不水合也不付费，保留待同步数量，避免把整轮报告成全部处理完成。
     const readUnknown = store.automation
-      .inputs()
+      .processingInputs(trigger)
       .filter(
         (input) =>
           input.current &&
@@ -375,97 +647,8 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         (source) => source.coverage === "budget",
       ).length
     }
-    // 当前单篇和旧格式身份都先经过事件登记核验，去重才能读取同一份确认归属。
-    store.synchronizeEvents()
-    // 单篇发布后先落实覆盖关系，再把保留材料交给综述，重复报道不冒充独立证据。
-    reportPhase("dedupe")
-    const dedupe = await (options.dedupe ?? runSemanticDedupe)({
-      store,
-      aiConfig: options.aiConfig,
-      runtimeDir: options.runtimeDir,
-      signal,
-      targets: trigger.targets,
-      sourceKeys: trigger.sourceKeys,
-      cutoffAt: trigger.cutoffAt,
-      preparedEvaluations: sharedAnalysis.dedupeEvaluations,
-      triggerId: trigger.id,
-    })
-    const dedupeFingerprints = new Set(
-      activeDedupeActions(store.automation.effective().config).map((action) => action.fingerprint),
-    )
-    const hiddenInputSeqs = store.dedupe.merges(dedupeFingerprints).map((merge) => merge.hide.seq)
-    // 每个已发布版本按自己的综合指令执行，不能把新草稿混进旧版本决策。
-    const decisions = store.processingState.published()
-    const releasedRuleSets = store.automation.releases().map((release) => ({
-      version: release.version,
-      config: runnableReleasedConfig(
-        store.automation.release(release.version)!,
-        store.automation.effective().config,
-      ),
-    }))
-    // 先修复既有 Story，保留原身份，再允许新增事件聚合，避免修复对象被复制成新 Story。
-    reportPhase("repair")
-    const repair = await (options.repair ?? runStoryRepair)({
-      decisions,
-      currentEntry: store.entry.bind(store),
-      ruleSets: releasedRuleSets.map((release) => release.config),
-      releasedRuleSets,
-      stories: store.stories,
-      aiConfig: options.aiConfig,
-      runtimeDir: options.runtimeDir,
-      signal,
-      targets: trigger.targets,
-    })
-    const repairedMembers = repair.repaired.flatMap(
-      (item) =>
-        store.stories.currentSnapshot(item.storyId)?.members.map((member) => member.inputSeq) ?? [],
-    )
-    const versions = [...new Set(decisions.map((item) => item.input.releaseVersion))]
-    const stories = []
-    const overrides = new Map(
-      store.processingState.overrides().map((item) => [item.inputSeq, item.mode]),
-    )
-    reportPhase("stories")
-    for (const version of versions) {
-      if (signal.aborted) break
-      const publishedRuleSet = version === null ? null : store.automation.release(version)
-      if (!publishedRuleSet) continue
-      const ruleSet = runnableReleasedConfig(publishedRuleSet, store.automation.effective().config)
-      stories.push(
-        await (options.aggregate ?? runStoryAggregation)({
-          decisions: decisions.filter(
-            (item) =>
-              item.input.releaseVersion === version && overrides.get(item.input.seq) !== "hide",
-          ),
-          ruleSet,
-          currentEntry: store.entry.bind(store),
-          alreadyClaimedInputSeqs: repairedMembers,
-          hiddenInputSeqs,
-          sharedGroups: sharedAnalysis.storyGroups,
-          stories: store.stories,
-          aiConfig: options.aiConfig,
-          runtimeDir: options.runtimeDir,
-          signal,
-          targets: trigger.targets,
-          sameEventEligible: (published, eventMentionIndex) => {
-            const memberships = store.events.entryEvents(published.input)
-            return (
-              (eventMentionIndex === undefined && !memberships.length) ||
-              store.events.confirmedEventIdsForMembers([
-                {
-                  inputSeq: published.input.seq,
-                  decisionId: published.decisionId,
-                  ...(eventMentionIndex === undefined ? {} : { eventMentionIndex }),
-                },
-              ]).length > 0
-            )
-          },
-          registeredEventId: (members) =>
-            store.events.confirmedEventIdsForMembers(members)[0] ?? null,
-        }),
-      )
-    }
-    store.synchronizeEvents()
+    presentationPasses.push(await settlePresentation(trigger.targets))
+    const { dedupe, repair, stories } = mergePresentationResults(presentationPasses)
     const failure =
       inventory.failure !== null ||
       repair.failures.length > 0 ||
@@ -474,6 +657,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       entries.failures.length > 0 ||
       stories.some((story) => story.failures.length > 0)
     const pending =
+      Boolean(next || nextSources) ||
       repair.pending.length > 0 ||
       sources.some((source) =>
         ["pending", "budget", "timestamp_boundary"].includes(source.coverage),
@@ -494,6 +678,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
           : pending
             ? "deferred_budget"
             : "succeeded"
+    const finalProgress = runProgress()
     store.processingState.report(trigger.id, {
       inventory: {
         snapshot: inventory.snapshot,
@@ -502,7 +687,9 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
       },
       sources,
       material,
-      entries,
+      entries: { ...entries, pending: finalProgress.remaining },
+      progress: finalProgress,
+      continuation: next?.id ?? nextSources?.id ?? null,
       stories,
       repair,
       dedupe: { ...dedupe, sharedAnalysis: sharedAnalysis.dedupeCosts },
@@ -546,7 +733,7 @@ async function hydrateMaterials(
   const { store } = options
   const sources = new Map(store.sources().map((source) => [source.key, source]))
   const selected = new Set(sourceKeys)
-  const inputs = store.automation.inputs().filter(
+  const inputs = store.automation.inputs(inputSeqs).filter(
     (input) =>
       selected.has(input.sourceKey) &&
       (inputSeqs === undefined || inputSeqs.includes(input.seq)) &&
@@ -635,16 +822,36 @@ function mergeEntryResults(
   }
 }
 
-function contextFingerprint(store: Store, sourceKey: string, body: import("./folo").SourceEntry) {
-  const { metadata: _metadata, ...context } = store.sourceSync.contextFor(sourceKey, body)
-  // 同步时间自身不触发重算；来源身份、分类与实际 List 资格变化才使旧目标失效。
-  return JSON.stringify(context)
+// 同来源/原始 feed 共用条件快照，不能为每篇已完成文章重复读取完整 List 成员表。
+function contextFingerprints(
+  store: Store,
+  inputs: readonly {
+    seq: number
+    sourceKey: string
+    body: Pick<SourceEntry, "feedId" | "feedKind">
+  }[],
+) {
+  const cache = new Map<string, string>()
+  return new Map(
+    inputs.map((input) => {
+      const key = JSON.stringify([input.sourceKey, input.body.feedId ?? null])
+      let fingerprint = cache.get(key)
+      if (!fingerprint) {
+        const { metadata: _metadata, ...context } = store.sourceSync.contextFor(
+          input.sourceKey,
+          input.body,
+        )
+        fingerprint = JSON.stringify(context)
+        cache.set(key, fingerprint)
+      }
+      return [input.seq, fingerprint] as const
+    }),
+  )
 }
 
-function referencedListKeys(store: Store) {
+function referencedListKeys(store: Store, inputs: readonly { releaseVersion: number | null }[]) {
   const currentVersions = new Set(
-    store.automation
-      .inputs()
+    inputs
       .map((input) => input.releaseVersion)
       .filter((version): version is number => version !== null),
   )

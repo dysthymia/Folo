@@ -221,6 +221,30 @@ export function AutomationDebugPanel({ ownerId }: { ownerId?: string }) {
                   label={t("processing.report.completed")}
                   value={number(entries?.completed)}
                 />
+                {/* 全范围包含尚未轮到的小批，不能用当前8篇的 pending 冒充队列总量。 */}
+                {(
+                  [
+                    ["automation.debug.progress_total", report?.progress?.total],
+                    ["automation.debug.progress_queued", report?.progress?.queued],
+                    ["automation.debug.progress_running", report?.progress?.running],
+                    [
+                      "automation.debug.progress_waiting_material",
+                      report?.progress?.waitingMaterial,
+                    ],
+                    ["automation.debug.progress_waiting_context", report?.progress?.waitingContext],
+                    ["automation.debug.progress_failed", report?.progress?.failed],
+                    ["automation.debug.progress_deferred", report?.progress?.deferred],
+                    ["automation.debug.progress_sources", report?.progress?.sourcesRemaining],
+                  ] as const
+                ).map(([label, value]) => (
+                  <DebugMetric key={label} label={t(label)} value={number(value)} />
+                ))}
+                {report?.continuation && (
+                  <DebugMetric
+                    label={t("automation.debug.progress_continuation")}
+                    value={t("automation.debug.progress_scheduled")}
+                  />
+                )}
                 <DebugMetric
                   label={t("processing.report.model_calls")}
                   value={number(metrics?.modelCalls)}

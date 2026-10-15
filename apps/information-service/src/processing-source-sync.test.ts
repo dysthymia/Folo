@@ -360,10 +360,10 @@ describe("来源增量同步", () => {
     })
     expect(result).toEqual([
       expect.objectContaining({ sourceKey: "feed/1", coverage: "failed", failure: "network" }),
-      expect.objectContaining({ sourceKey: "feed/2", coverage: "end", failure: null }),
+      expect.objectContaining({ sourceKey: "feed/2", coverage: "budget", failure: null }),
       expect.objectContaining({ sourceKey: "feed/3", coverage: "budget", failure: null }),
     ])
-    expect(client.page).toHaveBeenCalledTimes(2)
+    expect(client.page).toHaveBeenCalledTimes(1)
   })
 
   it("List 成员每轮只拉取一次，失败保留 unknown 而不当成空集合", async () => {
@@ -534,4 +534,172 @@ describe("来源增量同步", () => {
     ])
     expect(client.page).toHaveBeenCalledTimes(2)
   })
+})
+
+// 日常水位与全历史覆盖分别核验，避免增量提速后丢失迟到的旧文章。
+describe("来源采集检查点", () => {
+  it("已覆盖来源只读24小时重叠，历史复核仍可发现更早的迟到文章", async () => {
+    const { state, store, saved } = fixture()
+    const historySince = "2026-01-01T00:00:00.000Z"
+    state.begin(feed.key, historySince, "2026-04-01T00:00:00.000Z")
+    state.savePage({
+      sourceKey: feed.key,
+      historySince,
+      cursor: null,
+      coverage: "end",
+      pending: false,
+      now: "2026-04-01T00:00:00.000Z",
+    })
+    const client = reader({
+      sources: [feed],
+      pages: async (_source, cursor) =>
+        cursor
+          ? page([entry("late-old", "2026-02-01T00:00:00.000Z")])
+          : page([entry("overlap", "2026-03-30T00:00:00.000Z")], { pageFull: true }),
+    })
+    const inventory = {
+      sources: [feed],
+      reader: client,
+      syncedAt: "2026-04-01T12:00:00.000Z",
+      failure: null,
+      snapshot: "fresh" as const,
+    }
+    await acquireSources({
+      store,
+      state,
+      reader: async () => client,
+      inventory,
+      sourceKeys: [feed.key],
+      historySince,
+      incremental: true,
+      refreshHeadSourceKeys: [feed.key],
+    })
+    expect(client.page).toHaveBeenCalledTimes(1)
+    expect(state.scanSince(feed.key)).toBe("2026-03-31T00:00:00.000Z")
+    expect(state.needsHistory(feed.key, historySince, "2026-04-01T12:00:00.000Z")).toBe(false)
+    expect(state.needsHistory(feed.key, historySince, "2026-04-02T00:00:00.000Z")).toBe(true)
+    await acquireSources({
+      store,
+      state,
+      reader: async () => client,
+      inventory: { ...inventory, syncedAt: "2026-04-02T00:00:00.000Z" },
+      sourceKeys: [feed.key],
+      historySince,
+      refreshHeadSourceKeys: [feed.key],
+    })
+    expect(saved.some((item) => item.id === "late-old")).toBe(true)
+    expect(state.needsHistory(feed.key, historySince, "2026-04-02T01:00:00.000Z")).toBe(false)
+  })
+
+  it("新来源增量先给出新内容，但不能冒充已完成全历史", async () => {
+    const { state, store } = fixture()
+    const historySince = "2026-01-01T00:00:00.000Z"
+    const client = reader({
+      sources: [feed],
+      pages: async () => page([entry("old")], { pageFull: true }),
+    })
+    await acquireSources({
+      store,
+      state,
+      reader: async () => client,
+      inventory: {
+        sources: [feed],
+        reader: client,
+        syncedAt: "2026-04-02T00:00:00.000Z",
+        failure: null,
+        snapshot: "fresh",
+      },
+      sourceKeys: [feed.key],
+      historySince,
+      incremental: true,
+    })
+    expect(state.needsHistory(feed.key, historySince, "2026-04-02T01:00:00.000Z")).toBe(true)
+  })
+
+  it("来源并行请求严格限制在4个，单来源页顺序和总预算不变", async () => {
+    const { state, store } = fixture()
+    const sources = Array.from({ length: 7 }, (_, index) => ({
+      ...feed,
+      key: `feed/${index}`,
+      id: String(index),
+    }))
+    let running = 0,
+      maximum = 0
+    const client = reader({
+      sources,
+      pages: async () => {
+        maximum = Math.max(maximum, ++running)
+        await Promise.resolve()
+        running--
+        return page([])
+      },
+    })
+    const result = await acquireSources({
+      store,
+      state,
+      reader: async () => client,
+      sourceKeys: sources.map((source) => source.key),
+      historySince: "2026-01-01T00:00:00Z",
+      pageBudget: 5,
+    })
+    expect(maximum).toBe(4)
+    expect(client.page).toHaveBeenCalledTimes(5)
+    expect(result.filter((item) => item.coverage === "budget")).toHaveLength(2)
+  })
+
+  it("续页复用同一次清单的 List 成员快照", async () => {
+    const { state, store } = fixture()
+    const client = reader({
+      sources: [list],
+      pages: async () => page([], { pageFull: true, nextCursor: String(Math.random()) }),
+    })
+    const inventory = {
+      sources: [list],
+      reader: client,
+      syncedAt: "2026-04-02T00:00:00.000Z",
+      failure: null,
+      snapshot: "fresh" as const,
+    }
+    const input = {
+      store,
+      state,
+      reader: async () => client,
+      inventory,
+      sourceKeys: [list.key],
+      historySince: "2026-01-01T00:00:00Z",
+      pageBudget: 1,
+    }
+    await acquireSources(input)
+    await acquireSources(input)
+    expect(client.listMembers).toHaveBeenCalledTimes(1)
+    expect(client.page).toHaveBeenCalledTimes(2)
+  })
+})
+
+// 一组并行请求全失败时，仍须给后面的来源一次预算内机会，不能因整组失败提前退出。
+it("首组4个来源失败不阻止剩余来源采集", async () => {
+  const { state, store } = fixture()
+  const sources = Array.from({ length: 6 }, (_, index) => ({
+    ...feed,
+    id: String(index),
+    key: `feed/${index}`,
+  }))
+  const client = reader({
+    sources,
+    pages: async (source) => {
+      if (Number(source.id) < 4) throw new FoloReadError("network")
+      return page([])
+    },
+  })
+  const result = await acquireSources({
+    store,
+    state,
+    reader: async () => client,
+    sourceKeys: sources.map((source) => source.key),
+    historySince: "2026-01-01T00:00:00Z",
+    pageBudget: 6,
+  })
+  expect(client.page).toHaveBeenCalledTimes(6)
+  expect(result.filter((item) => item.coverage === "end")).toHaveLength(2)
+  expect(result.filter((item) => item.failure === "network")).toHaveLength(4)
 })

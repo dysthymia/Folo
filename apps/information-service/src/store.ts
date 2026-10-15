@@ -146,8 +146,10 @@ export class Store {
           .map((source) => source.key)
       },
     )
-    this.sourceSync = new SourceSyncStore(this.db, () =>
-      this.ownerId ? this.xQueries.sources() : [],
+    this.sourceSync = new SourceSyncStore(
+      this.db,
+      () => (this.ownerId ? this.xQueries.sources() : []),
+      () => this.ownerId,
     )
     this.stories = new StoryStore(this.db, (members) => {
       // 完全未登记的旧 Story 维持兼容；已有归属时人工移出/拆分不能被重新拼回。

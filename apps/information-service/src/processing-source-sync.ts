@@ -81,6 +81,7 @@ export class SourceSyncStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly virtualSources: () => Source[] = () => [],
+    private readonly owner: () => string | null = () => null,
   ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS source_sync_inventory (
@@ -100,6 +101,11 @@ export class SourceSyncStore {
         list_key TEXT PRIMARY KEY, feed_ids TEXT NOT NULL, complete INTEGER NOT NULL,
         status TEXT NOT NULL, revision INTEGER NOT NULL, synced_at TEXT, error TEXT,
         owner_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS source_sync_checkpoints (
+        owner_id TEXT NOT NULL, source_key TEXT NOT NULL, history_since TEXT NOT NULL,
+        scan_since TEXT NOT NULL, covered_since TEXT, full_success_at TEXT,
+        PRIMARY KEY(owner_id, source_key)
       );
     `)
     const membershipColumns = db
@@ -153,10 +159,28 @@ export class SourceSyncStore {
     historySince: string,
     now: string,
     refreshHead = false,
+    incremental = false,
   ): SourceSyncState {
     const previous = this.state(sourceKey)
     // 新计划先取最新一页；同一计划的分批续采才沿用游标，避免积压期间漏掉新内容。
     if (!refreshHead && previous?.pending && previous.historySince === historySince) return previous
+    const checkpoint = this.checkpoint(sourceKey)
+    // 兼容已完整采集的旧版本状态，不把未完成的旧游标误认成历史覆盖证明。
+    const legacyCovered = previous && ["end", "history_boundary"].includes(previous.coverage)
+    const coveredSince = checkpoint?.coveredSince ?? (legacyCovered ? previous.historySince : null)
+    const fullSuccessAt =
+      checkpoint?.fullSuccessAt ?? (legacyCovered ? previous.lastSuccessAt : null)
+    const scanSince = incremental
+      ? new Date(
+          Math.max(
+            Date.parse(historySince),
+            Math.min(Date.parse(now), Date.parse(previous?.lastSuccessAt ?? now)) -
+              24 * 60 * 60_000,
+          ),
+        ).toISOString()
+      : historySince
+    // 日常只刷新水位附近并留24小时重叠；尚未覆盖的历史与每日复核由独立补历史批次完成。
+    this.writeCheckpoint(sourceKey, historySince, scanSince, coveredSince, fullSuccessAt)
     const state: SourceSyncState = {
       sourceKey,
       cursor: null,
@@ -182,6 +206,24 @@ export class SourceSyncStore {
     now: string
   }) {
     const previous = this.state(input.sourceKey)
+    const checkpoint = this.checkpoint(input.sourceKey)
+    const scanSince =
+      checkpoint?.historySince === input.historySince ? checkpoint.scanSince : input.historySince
+    if (["end", "history_boundary"].includes(input.coverage)) {
+      const coveredSince =
+        checkpoint?.coveredSince && Date.parse(checkpoint.coveredSince) < Date.parse(scanSince)
+          ? checkpoint.coveredSince
+          : scanSince
+      this.writeCheckpoint(
+        input.sourceKey,
+        input.historySince,
+        scanSince,
+        coveredSince,
+        Date.parse(scanSince) <= Date.parse(input.historySince)
+          ? input.now
+          : (checkpoint?.fullSuccessAt ?? null),
+      )
+    }
     this.writeState({
       sourceKey: input.sourceKey,
       cursor: input.cursor,
@@ -235,6 +277,52 @@ export class SourceSyncStore {
     return row ? this.stateFromRow(row) : null
   }
 
+  scanSince(sourceKey: string): string | null {
+    const checkpoint = this.checkpoint(sourceKey)
+    return checkpoint && checkpoint.historySince === this.state(sourceKey)?.historySince
+      ? checkpoint.scanSince
+      : null
+  }
+
+  needsHistory(sourceKey: string, historySince: string, now: string): boolean {
+    const state = this.state(sourceKey)
+    if (!state || state.pending || state.failure) return false
+    const checkpoint = this.checkpoint(sourceKey)
+    const covered = checkpoint?.coveredSince ?? state.historySince
+    const fullAt = checkpoint?.fullSuccessAt ?? (checkpoint ? null : state.lastSuccessAt)
+    return (
+      Date.parse(covered) > Date.parse(historySince) ||
+      !fullAt ||
+      Date.parse(now) - Date.parse(fullAt) >= 24 * 60 * 60_000
+    )
+  }
+
+  private checkpoint(sourceKey: string) {
+    const row = this.db
+      .prepare("SELECT * FROM source_sync_checkpoints WHERE owner_id=? AND source_key=?")
+      .get(this.owner() ?? "", sourceKey)
+    return row
+      ? {
+          historySince: String(row.history_since),
+          scanSince: String(row.scan_since),
+          coveredSince: row.covered_since === null ? null : String(row.covered_since),
+          fullSuccessAt: row.full_success_at === null ? null : String(row.full_success_at),
+        }
+      : null
+  }
+
+  private writeCheckpoint(
+    sourceKey: string,
+    historySince: string,
+    scanSince: string,
+    coveredSince: string | null,
+    fullSuccessAt: string | null,
+  ) {
+    this.db
+      .prepare("INSERT OR REPLACE INTO source_sync_checkpoints VALUES(?,?,?,?,?,?)")
+      .run(this.owner() ?? "", sourceKey, historySince, scanSince, coveredSince, fullSuccessAt)
+  }
+
   listMemberships(): ListMembershipSnapshot[] {
     return this.db
       .prepare("SELECT * FROM source_sync_list_memberships ORDER BY list_key")
@@ -242,7 +330,10 @@ export class SourceSyncStore {
       .map((row) => ({ listKey: String(row.list_key), ...this.membershipFromRow(row) }))
   }
 
-  contextFor(sourceKey: string, entry: SourceEntry): SourceSyncContext {
+  contextFor(
+    sourceKey: string,
+    entry: SourceEntry | Pick<SourceEntry, "feedId" | "feedKind">,
+  ): SourceSyncContext {
     const source = this.source(sourceKey)
     const actualFeedId = entry.feedId ?? (source?.kind === "feed" ? source.id : null)
     const memberships = this.listMemberships()
@@ -394,6 +485,8 @@ export type SourceInventoryRefresh = {
   syncedAt: string
   failure: string | null
   snapshot: "fresh" | "previous"
+  // 同一采集片段共用成员快照，续页不重复请求相同 List。
+  membershipKeys?: Set<string>
 }
 
 // 先刷新订阅清单，再解析规则与冻结范围；失败保留旧快照并明确记录来源。
@@ -438,6 +531,7 @@ export async function acquireSources(
     pageBudget?: number
     pageSize?: number
     refreshHeadSourceKeys?: readonly string[]
+    incremental?: boolean
   },
   signal?: AbortSignal,
 ): Promise<SourceSyncResult[]> {
@@ -504,7 +598,12 @@ export async function acquireSources(
     return []
   })
   // 规则引用的 List 只同步成员资格，不会加入 ready，因此不会扩大条目采集范围。
-  await syncListMemberships(reader, input.state, membershipSources, now, signal)
+  inventory.membershipKeys ??= new Set<string>()
+  const membershipsToSync = membershipSources.filter(
+    (source) => !inventory.membershipKeys!.has(source.key),
+  )
+  await syncListMemberships(reader, input.state, membershipsToSync, now, signal)
+  for (const source of membershipsToSync) inventory.membershipKeys.add(source.key)
 
   const progress = new Map<string, { pages: number; entries: number }>()
   const ready = [] as Array<{
@@ -526,70 +625,78 @@ export async function acquireSources(
   const attempted = new Set<string>()
   // 每轮每个来源最多先取一页；来源多于预算时，下一轮会优先未取到页的 budget 状态。
   while (remaining > 0 && ready.some((item) => !item.done)) {
-    let progressed = false
-    for (const item of ready) {
-      if (remaining === 0) break
-      if (item.done) continue
-      const { sourceKey, source } = item
-      const current =
-        item.current ??
-        input.state.begin(
-          sourceKey,
-          historySince,
-          now,
-          input.refreshHeadSourceKeys?.includes(sourceKey),
-        )
-      try {
-        abort()
-        attempted.add(sourceKey)
-        const page = await reader.page(source, {
-          cursor: current.cursor ?? undefined,
-          limit: pageSize,
-        })
-        abort()
-        const currentProgress = progress.get(sourceKey) ?? { pages: 0, entries: 0 }
-        currentProgress.pages += 1
-        currentProgress.entries += page.entries.length
-        progress.set(sourceKey, currentProgress)
+    // 不同来源最多4页并行；同一来源仍严格按游标串行，预算在发请求前扣除。
+    const round = ready
+      .filter((item) => !item.done)
+      .sort(
+        (a, b) => (progress.get(a.sourceKey)?.pages ?? 0) - (progress.get(b.sourceKey)?.pages ?? 0),
+      )
+      .slice(0, Math.min(4, remaining))
+    await Promise.all(
+      round.map(async (item) => {
         remaining -= 1
-        progressed = true
-        const timestampGap = page.pageFull && page.boundaryCount > 1
-        const repeatedCursor = page.pageFull && page.nextCursor === current.cursor
-        const reachedHistory =
-          page.entries.length > 0 && page.entries.every((entry) => entry.publishedAt < historySince)
-        const coverage: SourceCoverage =
-          timestampGap || repeatedCursor
-            ? "timestamp_boundary"
-            : !page.pageFull
-              ? "end"
-              : reachedHistory
-                ? "history_boundary"
-                : remaining === 0
-                  ? "budget"
-                  : "pending"
-        const pending = coverage === "pending" || coverage === "budget"
-        // 正文、自动化输入和游标一同提交；崩溃后只会从已保存游标继续。
-        input.store.transaction(() => {
-          for (const entry of page.entries) input.store.saveListedEntry(entry)
-          input.state.savePage({
+        const { sourceKey, source } = item
+        const current =
+          item.current ??
+          input.state.begin(
             sourceKey,
-            cursor: coverage === "timestamp_boundary" ? current.cursor : page.nextCursor,
             historySince,
-            coverage,
-            coverageBoundary: page.nextCursor,
-            pending,
             now,
+            input.refreshHeadSourceKeys?.includes(sourceKey),
+            input.incremental,
+          )
+        try {
+          abort()
+          attempted.add(sourceKey)
+          const page = await reader.page(source, {
+            cursor: current.cursor ?? undefined,
+            limit: pageSize,
           })
-        })
-        item.current = input.state.state(sourceKey)!
-        if (!pending) item.done = true
-      } catch (error) {
-        if (error instanceof SourceSyncError && error.code === "aborted") throw error
-        input.state.fail(sourceKey, historySince, now, syncFailure(error))
-        item.done = true
-      }
-    }
-    if (!progressed) break
+          abort()
+          const currentProgress = progress.get(sourceKey) ?? { pages: 0, entries: 0 }
+          currentProgress.pages += 1
+          currentProgress.entries += page.entries.length
+          progress.set(sourceKey, currentProgress)
+          const timestampGap = page.pageFull && page.boundaryCount > 1
+          const repeatedCursor = page.pageFull && page.nextCursor === current.cursor
+          const reachedHistory =
+            page.entries.length > 0 &&
+            page.entries.every(
+              (entry) => entry.publishedAt < (input.state.scanSince(sourceKey) ?? historySince),
+            )
+          const coverage: SourceCoverage =
+            timestampGap || repeatedCursor
+              ? "timestamp_boundary"
+              : !page.pageFull
+                ? "end"
+                : reachedHistory
+                  ? "history_boundary"
+                  : remaining === 0
+                    ? "budget"
+                    : "pending"
+          const pending = coverage === "pending" || coverage === "budget"
+          // 正文、自动化输入和游标一同提交；崩溃后只会从已保存游标继续。
+          input.store.transaction(() => {
+            for (const entry of page.entries) input.store.saveListedEntry(entry)
+            input.state.savePage({
+              sourceKey,
+              cursor: coverage === "timestamp_boundary" ? current.cursor : page.nextCursor,
+              historySince,
+              coverage,
+              coverageBoundary: page.nextCursor,
+              pending,
+              now,
+            })
+          })
+          item.current = input.state.state(sourceKey)!
+          if (!pending) item.done = true
+        } catch (error) {
+          if (error instanceof SourceSyncError && error.code === "aborted") throw error
+          input.state.fail(sourceKey, historySince, now, syncFailure(error))
+          item.done = true
+        }
+      }),
+    )
   }
   if (remaining === 0) {
     for (const { sourceKey } of ready) {

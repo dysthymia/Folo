@@ -28,16 +28,27 @@ def registered(domain, label):
     return subprocess.run(["launchctl", "print", f"{domain}/{label}"], capture_output=True, text=True)
 
 
-def check_running(database, split):
+def checkpoint_triggers(connection):
+    # 只有单篇队列有运行标志的阶段允许交接；去重/综述调用不得仅凭输入队列空闲判断。
+    rows = connection.execute("SELECT t.id,r.body FROM processing_schedule_triggers t LEFT JOIN processing_trigger_reports r ON r.trigger_id=t.id WHERE t.status='running'").fetchall()
+    for trigger_id, body in rows:
+        if not body or json.loads(body).get("phase") not in ("sources", "material", "exact", "entries"):
+            raise SystemExit("首次拆分需等待安全处理检查点；当前阶段可能有未结束的模型调用。")
+    return [row[0] for row in rows]
+
+
+def check_running(database, split, checkpoint=False):
     if not database.exists():
         return
     with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         # 首次从旧的单进程迁移时仍需空闲；拆分后安装不操作持锁执行器。
         if not split:
-            for table in ("jobs", "processing_inputs", "processing_schedule_triggers"):
+            for table in (("jobs", "processing_inputs") if checkpoint else ("jobs", "processing_inputs", "processing_schedule_triggers")):
                 if table in tables and connection.execute(f"SELECT COUNT(*) FROM {table} WHERE status='running'").fetchone()[0]:
                     raise SystemExit("首次拆分服务需等待当前规则或扫描任务完成；之后更新不再中断执行器。")
+            if checkpoint and "processing_schedule_triggers" in tables:
+                checkpoint_triggers(connection)
         # 手工选材研究仍由网页进程执行，继续保护其正在进行的模型调用。
         if "research_records" in tables and connection.execute(
             "SELECT COUNT(*) FROM research_records WHERE json_extract(body, '$.target.kind')='selection' AND json_extract(body, '$.status')='running'"
@@ -45,18 +56,29 @@ def check_running(database, split):
             raise SystemExit("有选材研究正在运行，请等待完成后再安装。")
 
 
-def stop_web(domain, database, split):
+def stop_web(domain, database, split, checkpoint=False):
     state = registered(domain, WEB_LABEL)
     if state.returncode != 0:
         return
     previous_pid = re.search(r"^\s*pid = (\d+)$", state.stdout, re.MULTILINE)
     pid = int(previous_pid.group(1)) if previous_pid else None
+    handoff = []
     if pid and not split:
         # 旧版不支持协作式交接，先暂停领取任务，再核对空闲状态，消除检查与停止之间的竞争。
         os.kill(pid, signal.SIGSTOP)
         stopped = False
         try:
-            check_running(database, False)
+            if checkpoint:
+                check_running(database, False, True)
+                # 冻结主进程后再次核验子进程；正在运行的 Codex 调用继续完成，不能被安装回收。
+                processes = subprocess.run(["ps", "-axo", "pid=,ppid="], check=True, capture_output=True, text=True)
+                children = {int(parts[0]): int(parts[1]) for line in processes.stdout.splitlines() if len(parts := line.split()) == 2}
+                if pid in children.values():
+                    raise SystemExit("首次拆分需等待模型子进程完成，已保留旧服务。")
+                with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+                    handoff = checkpoint_triggers(connection)
+            else:
+                check_running(database, False)
             subprocess.run(["launchctl", "bootout", f"{domain}/{WEB_LABEL}"], check=True)
             # 已确认没有运行中的调用且已取消常驻注册，终止暂停的空闲进程，不让它再领取任务。
             try:
@@ -79,6 +101,10 @@ def stop_web(domain, database, split):
             try:
                 os.kill(int(previous_pid.group(1)), 0)
             except ProcessLookupError:
+                # 旧执行器确认退出后才释放原批次租约；已成功输入和模型缓存完全保留。
+                if handoff:
+                    with closing(sqlite3.connect(database)) as connection, connection:
+                        connection.executemany("UPDATE processing_schedule_triggers SET status='pending',lease_token=NULL,lease_until=NULL WHERE id=? AND status='running'", [(trigger_id,) for trigger_id in handoff])
                 return
             if time.monotonic() >= deadline:
                 raise SystemExit("旧网页服务尚未退出，已保留部署文件，请检查日志。")
@@ -143,7 +169,7 @@ def prepare_agent(home, support, logs, node, environment, worker):
     return plist, ((pending_wrapper, wrapper), (temporary, plist))
 
 
-def install(manifest, package=None, home=None):
+def install(manifest, package=None, home=None, checkpoint=False):
     package = package or pathlib.Path(__file__).resolve().parents[1]
     home = home or pathlib.Path.home()
     node = shutil.which("node")
@@ -157,7 +183,7 @@ def install(manifest, package=None, home=None):
     worker_registered = registered(domain, WORKER_LABEL).returncode == 0
     split = existing.get("EnvironmentVariables", {}).get("FOLO_INFORMATION_PROCESS_ROLE") == "web" and worker_registered
     database = pathlib.Path(os.environ.get("FOLO_INFORMATION_DATA_DIR", str(home / ".local/share/folo-information-p0"))) / "information.sqlite"
-    check_running(database, split)
+    check_running(database, split, checkpoint)
     for directory in (support, logs, home / "Library/LaunchAgents", support / "information-releases"):
         directory.mkdir(parents=True, exist_ok=True)
     logs.chmod(0o700)
@@ -171,7 +197,7 @@ def install(manifest, package=None, home=None):
         # 再次验证源码、完整产物和迁移条件，均通过后才操作现有网页服务。
         validate_release(package.parents[1])
         validate_runtime(staging, manifest)
-        check_running(database, split)
+        check_running(database, split, checkpoint)
         # 构建文件摘要区分相同源码的重复构建，避免覆盖仍由旧执行器使用的目录。
         build = hashlib.sha256(json.dumps(manifest["files"], sort_keys=True).encode()).hexdigest()[:12]
         release = support / "information-releases" / (manifest["releaseId"] + "-" + build)
@@ -201,8 +227,8 @@ def install(manifest, package=None, home=None):
     if not worker_registered:
         worker_plist, worker_pending = prepare_agent(home, support, logs, node, worker_environment, True)
         pending += worker_pending
-    check_running(database, split)
-    stop_web(domain, database, split)
+    check_running(database, split, checkpoint)
+    stop_web(domain, database, split, checkpoint)
     activate_release(support, release)
     for source, target in pending:
         source.replace(target)
@@ -230,6 +256,7 @@ def install(manifest, package=None, home=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="只核对源码和三份构建，不操作服务")
+    parser.add_argument("--handoff-at-checkpoint", action="store_true", help="首次拆分时仅在无运行模型的检查点保存原范围并交接")
     args = parser.parse_args()
     root = pathlib.Path(__file__).resolve().parents[3]
     try:
@@ -238,7 +265,7 @@ def main():
             if args.check:
                 print(f"发布校验通过：{manifest['releaseId'][:16]}")
                 return
-            install(manifest)
+            install(manifest, checkpoint=args.handoff_at_checkpoint)
     except ReleaseError as error:
         raise SystemExit(str(error)) from error
 
