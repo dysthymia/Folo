@@ -8,7 +8,7 @@ import type { Range, VirtualItem, Virtualizer } from "@tanstack/react-virtual"
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual"
 import type { HTMLMotionProps } from "motion/react"
 import type { FC, MutableRefObject, ReactNode } from "react"
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useEventCallback } from "usehooks-ts"
 
@@ -133,6 +133,13 @@ export const EntryList: FC<EntryListProps> = memo(
     })
     const rowVirtualizer = useVirtualizer({
       count: entriesIds.length + 1,
+      // 过滤或合并会改变条目下标，行高缓存必须跟随条目身份，不能借用原位置的高度。
+      getItemKey: useCallback(
+        (index: number) => entriesIds[index] ?? `${cacheKey}:footer`,
+        [cacheKey, entriesIds],
+      ),
+      // 标签和列宽改变后同步读取当前行高，避免重新挂载时继续采用过期缓存遮住下一行。
+      measureElement: (element) => (element as HTMLElement).offsetHeight,
       estimateSize: () => 112,
       overscan: 5,
       gap,
