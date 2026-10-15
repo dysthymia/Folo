@@ -10,6 +10,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -44,12 +45,33 @@ def check_running(database, split):
             raise SystemExit("有选材研究正在运行，请等待完成后再安装。")
 
 
-def stop_web(domain):
+def stop_web(domain, database, split):
     state = registered(domain, WEB_LABEL)
     if state.returncode != 0:
         return
     previous_pid = re.search(r"^\s*pid = (\d+)$", state.stdout, re.MULTILINE)
-    subprocess.run(["launchctl", "bootout", f"{domain}/{WEB_LABEL}"], check=True)
+    pid = int(previous_pid.group(1)) if previous_pid else None
+    if pid and not split:
+        # 旧版不支持协作式交接，先暂停领取任务，再核对空闲状态，消除检查与停止之间的竞争。
+        os.kill(pid, signal.SIGSTOP)
+        stopped = False
+        try:
+            check_running(database, False)
+            subprocess.run(["launchctl", "bootout", f"{domain}/{WEB_LABEL}"], check=True)
+            # 已确认没有运行中的调用且已取消常驻注册，终止暂停的空闲进程，不让它再领取任务。
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopped = True
+        finally:
+            if not stopped:
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+    else:
+        subprocess.run(["launchctl", "bootout", f"{domain}/{WEB_LABEL}"], check=True)
     # 只停止网页进程；规则执行器从不接收部署发出的终止信号。
     if previous_pid:
         deadline = time.monotonic() + 30
@@ -87,18 +109,19 @@ def activate_release(support, release):
     return runtime
 
 
-def write_agent(home, support, logs, node, environment, worker):
+def prepare_agent(home, support, logs, node, environment, worker):
     label = WORKER_LABEL if worker else WEB_LABEL
     wrapper = support / ("run-information-worker.sh" if worker else "run-information.sh")
     # 每次启动解析当前发布到实体目录，已运行的执行器始终使用自己的完整旧版本。
-    wrapper.write_text("\n".join([
+    pending_wrapper = wrapper.with_suffix(".sh.next")
+    pending_wrapper.write_text("\n".join([
         "#!/bin/zsh", "set -eu",
         "# 发布指针变化不会改写已运行进程的代码或中断当前模型调用。",
         f"cd -P {shlex.quote(str(support / 'information-runtime'))}",
         *(['export FOLO_INFORMATION_WORKER_RUNTIME="$PWD"'] if worker else []),
         f"exec {shlex.quote(node)} --use-env-proxy index.mjs {'worker' if worker else 'serve-web'}", "",
     ]))
-    wrapper.chmod(0o700)
+    pending_wrapper.chmod(0o700)
     config = {
         "Label": label, "ProgramArguments": ["/bin/zsh", str(wrapper)],
         "WorkingDirectory": str(support), "EnvironmentVariables": environment,
@@ -115,9 +138,9 @@ def write_agent(home, support, logs, node, environment, worker):
     temporary.write_bytes(plistlib.dumps(config))
     temporary.chmod(0o600)
     subprocess.run(["/usr/bin/plutil", "-lint", str(temporary)], check=True, capture_output=True)
-    subprocess.run(["/bin/zsh", "-n", str(wrapper)], check=True)
-    temporary.replace(plist)
-    return plist
+    subprocess.run(["/bin/zsh", "-n", str(pending_wrapper)], check=True)
+    # 准备阶段不改写旧进程的启动配置，安全交接失败时旧服务仍能按原方式重启。
+    return plist, ((pending_wrapper, wrapper), (temporary, plist))
 
 
 def install(manifest, package=None, home=None):
@@ -173,11 +196,16 @@ def install(manifest, package=None, home=None):
         "FOLO_INFORMATION_WEB_ROOT": str(release / "web"),
         "FOLO_INFORMATION_MAIN_WEB_ROOT": str(release / "main-web"),
     }
-    web_plist = write_agent(home, support, logs, node, web_environment, False)
-    worker_plist = None if worker_registered else write_agent(home, support, logs, node, worker_environment, True)
+    web_plist, pending = prepare_agent(home, support, logs, node, web_environment, False)
+    worker_plist = None
+    if not worker_registered:
+        worker_plist, worker_pending = prepare_agent(home, support, logs, node, worker_environment, True)
+        pending += worker_pending
     check_running(database, split)
-    stop_web(domain)
+    stop_web(domain, database, split)
     activate_release(support, release)
+    for source, target in pending:
+        source.replace(target)
     subprocess.run(["launchctl", "bootstrap", domain, str(web_plist)], check=True)
     # 已注册的 worker 保持原 PID；当前批次结束后自行退出，由 KeepAlive 启动新版。
     if worker_plist:

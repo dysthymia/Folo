@@ -137,6 +137,35 @@ class InstallReleaseTest(unittest.TestCase):
         self.assertEqual(self.runtime.resolve(), old.resolve())
         self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in self.calls))
 
+    def test_legacy_task_started_before_handoff_resumes_without_termination(self):
+        state = subprocess.CompletedProcess([], 0, stdout="pid = 888\n", stderr="")
+        with patch.object(installer, "registered", return_value=state), \
+             patch.object(installer.os, "kill") as kill, \
+             patch.object(installer, "check_running", side_effect=SystemExit("首次拆分需等待")):
+            with self.assertRaisesRegex(SystemExit, "首次拆分"):
+                installer.stop_web("gui/501", self.database, False)
+            self.assertEqual([call.args for call in kill.call_args_list], [
+                (888, installer.signal.SIGSTOP), (888, installer.signal.SIGCONT),
+            ])
+        self.assertFalse(any(call[:2] == ["launchctl", "bootout"] for call in self.calls))
+
+    def test_idle_legacy_handoff_cannot_claim_more_work(self):
+        state = subprocess.CompletedProcess([], 0, stdout="pid = 888\n", stderr="")
+        signals = []
+        def kill(pid, value):
+            if value == 0:
+                raise ProcessLookupError()
+            signals.append(value)
+        with patch.object(installer, "registered", return_value=state), \
+             patch.object(installer.os, "kill", side_effect=kill), \
+             patch.object(installer, "check_running") as check:
+            installer.stop_web("gui/501", self.database, False)
+            check.assert_called_once_with(self.database, False)
+        self.assertEqual(signals, [installer.signal.SIGSTOP, installer.signal.SIGKILL])
+        self.assertEqual([call for call in self.calls if call[:2] == ["launchctl", "bootout"]], [
+            ["launchctl", "bootout", "gui/501/" + installer.WEB_LABEL],
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
