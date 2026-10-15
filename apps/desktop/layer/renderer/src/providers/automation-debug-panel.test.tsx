@@ -87,8 +87,8 @@ const value = (key: string) =>
   [...host.querySelectorAll("span")].find((span) => span.textContent === key)?.nextElementSibling
     ?.textContent
 
-// 检查真实浮窗的账号隔离、后台进度和刷新边界，不启动任何规则或模型。
-describe("自动化规则调试浮窗", () => {
+// 检查正文侧栏的账号隔离、后台进度和刷新边界，不启动任何规则或模型。
+describe("自动化规则调试侧栏", () => {
   it("校验调试响应，拒绝无账号快照与超量最近结果", () => {
     expect(automationDebugSchema.parse(snapshot()).ownerId).toBe("owner")
     expect(automationDebugSchema.safeParse({ ...snapshot(), ownerId: null }).success).toBe(false)
@@ -152,12 +152,9 @@ describe("自动化规则调试浮窗", () => {
     expect(host.textContent).toContain("model_failed")
   })
 
-  it("隐藏时停止刷新，折叠时降低频率，刷新失败明确标记旧数据", async () => {
+  it("隐藏时停止刷新，刷新失败明确标记旧数据", async () => {
     await render()
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-expanded="true"]')!.click())
     const count = mocks.debug.mock.calls.length
-    await act(async () => vi.advanceTimersByTimeAsync(15_000))
-    expect(mocks.debug).toHaveBeenCalledTimes(count)
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
     await act(async () => vi.advanceTimersByTimeAsync(60_000))
@@ -166,7 +163,6 @@ describe("自动化规则调试浮窗", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
     expect(host.textContent).toContain("automation.debug.stale")
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-expanded="false"]')!.click())
     expect(host.querySelector('[role="alert"]')?.textContent).toContain(
       "processing.report.load_error",
     )

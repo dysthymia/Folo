@@ -21,6 +21,7 @@ import { AIChatRoot } from "~/modules/ai-chat/components/layouts/AIChatRoot"
 import { AIChatFixedPanel } from "~/modules/app-layout/ai/AIChatFixedPanel"
 import { AIIndicator } from "~/modules/app-layout/ai/AISplineButton"
 import { EntryContentPlaceholder } from "~/modules/app-layout/entry-content/EntryContentPlaceholder"
+import { ReaderContentPanel } from "~/modules/app-layout/entry-content/ReaderContentPanel"
 import { EntryColumn } from "~/modules/entry-column"
 import { AIEntryHeader } from "~/modules/entry-content/components/entry-header"
 import { useNativeReader } from "~/modules/information/native-reader-context"
@@ -308,34 +309,36 @@ const AIEnhancedTimelineLayoutImpl = () => {
                   )}
                   style={rightColumnStyle}
                 >
-                  {showEntryContentOnRight && hasSelectedEntry ? (
-                    <div className="flex h-full flex-col overflow-hidden">
-                      <div className="absolute inset-x-0 top-0 z-10">
-                        <AIEntryHeader entryId={realEntryId} />
+                  <ReaderContentPanel enabled={showEntryDetailsColumn}>
+                    {showEntryContentOnRight && hasSelectedEntry ? (
+                      <div className="flex h-full flex-col overflow-hidden">
+                        <div className="absolute inset-x-0 top-0 z-10">
+                          <AIEntryHeader entryId={realEntryId} />
+                        </div>
+                        <div className="flex h-0 flex-1 flex-col overflow-hidden">
+                          <NativeReaderContent entryId={realEntryId} className="h-full" />
+                        </div>
                       </div>
-                      <div className="flex h-0 flex-1 flex-col overflow-hidden">
-                        <NativeReaderContent entryId={realEntryId} className="h-full" />
+                    ) : shouldShowFixedAI ? (
+                      <div className="flex h-full flex-1 items-center justify-center">
+                        <AIChatFixedPanel
+                          key="ai-chat-layout"
+                          style={
+                            {
+                              width: showEntryDetailsColumn ? "100%" : aiPanelWidth,
+                              "--ai-chat-layout-width": showEntryDetailsColumn
+                                ? "100%"
+                                : `${aiPanelWidth}px`,
+                            } as CSSProperties
+                          }
+                        />
                       </div>
-                    </div>
-                  ) : shouldShowFixedAI ? (
-                    <div className="flex h-full flex-1 items-center justify-center">
-                      <AIChatFixedPanel
-                        key="ai-chat-layout"
-                        style={
-                          {
-                            width: showEntryDetailsColumn ? "100%" : aiPanelWidth,
-                            "--ai-chat-layout-width": showEntryDetailsColumn
-                              ? "100%"
-                              : `${aiPanelWidth}px`,
-                          } as CSSProperties
-                        }
-                      />
-                    </div>
-                  ) : (
-                    <div className="flex flex-1 items-center justify-center px-8">
-                      <EntryContentPlaceholder />
-                    </div>
-                  )}
+                    ) : (
+                      <div className="flex flex-1 items-center justify-center px-8">
+                        <EntryContentPlaceholder />
+                      </div>
+                    )}
+                  </ReaderContentPanel>
                 </div>
               </>
             )}
