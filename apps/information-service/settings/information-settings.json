@@ -18,7 +18,7 @@
           "id": "reading-confirmed-noise-v1",
           "name": "已确认纯噪声：隐藏并排除综述",
           "enabled": true,
-          "order": 0,
+          "order": 1,
           "when": {
             "anyOf": [
               {
@@ -301,7 +301,7 @@
           "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
           "name": "疑似纯噪声：虚化并保留原文",
           "enabled": true,
-          "order": 1,
+          "order": 2,
           "when": {
             "anyOf": [
               {
@@ -1108,7 +1108,7 @@
           "id": "semantic-tags-blockchain",
           "name": "内容池：新内容语义分类",
           "enabled": true,
-          "order": 6,
+          "order": 0,
           "when": {
             "anyOf": [
               {
@@ -1244,7 +1244,7 @@
           "id": "reading-confirmed-noise-v1",
           "name": "已确认纯噪声：隐藏并排除综述",
           "enabled": true,
-          "order": 0,
+          "order": 1,
           "when": {
             "anyOf": [
               {
@@ -1527,7 +1527,7 @@
           "id": "31e3c300-b3ad-4897-9adb-2db6b3769091",
           "name": "疑似纯噪声：虚化并保留原文",
           "enabled": true,
-          "order": 1,
+          "order": 2,
           "when": {
             "anyOf": [
               {
@@ -2334,7 +2334,7 @@
           "id": "semantic-tags-blockchain",
           "name": "内容池：新内容语义分类",
           "enabled": true,
-          "order": 6,
+          "order": 0,
           "when": {
             "anyOf": [
               {
