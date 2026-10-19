@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 
 import type { AutomationRule, Condition, RuleInput, RuleSet } from "@follow/information-core"
 import { compileInstructions } from "@follow/information-core"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { automationApi } from "./automation-api"
 import type { Source } from "./folo"
@@ -61,6 +61,19 @@ function effective(store: Store): RuleSet {
 }
 
 describe("统一规则的单条保存生效", () => {
+  it("选源只读取一次订阅快照，新增来源在下一次请求立即参与匹配", () => {
+    const store = fixture()
+    activate(store, rule("active"))
+    store.replaceSources([source, { ...source, key: "feed/2", id: "2" }])
+    const sources = vi.spyOn(store, "sources")
+    expect(resolveAIRuleSourceKeys(store)).toEqual(["feed/1", "feed/2"])
+    // 请求内复用不等于跨请求缓存，订阅和规则变更不能被旧快照遮住。
+    expect(sources).toHaveBeenCalledTimes(1)
+    store.replaceSources([source])
+    expect(resolveAIRuleSourceKeys(store)).toEqual(["feed/1"])
+    expect(sources).toHaveBeenCalledTimes(2)
+  })
+
   it("运行概览只统计有效规则覆盖，未发布草稿不扩大范围", () => {
     const store = fixture()
     activate(store, rule("active"))
