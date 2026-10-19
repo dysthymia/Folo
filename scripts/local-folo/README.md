@@ -19,6 +19,8 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/is.folo.local.dev-web.plis
 
 使用 `pnpm --filter @follow/information-service backup:local -- --name before-<功能>` 备份业务数据库后，统一运行 `pnpm --filter @follow/information-service deploy:local`，完整构建后台、主站和信息页再一起安装。安装器核对源码及三份产物摘要，拒绝旧文件和局部构建，通过原子发布指针保留完整旧版目录。网页与规则执行器使用两个 LaunchAgent；更新只重启网页；仅界面变化时不重启执行器，后台代码变化时执行器完成当前扫描或规则批次后自动加载新版，不取消当前模型调用。首次从旧单进程拆分仍需空闲，手工选材研究运行中也暂不重启网页。模型配置和主站授权仍使用数据目录中的私有文件。可先执行 `build:local`，之后运行 `python3 apps/information-service/scripts/install-launch-agent.py` 安装；不要手工覆盖某一个运行产物。
 
+本机 Apache 的所有 2240 `ProxyPass` 使用 `disablereuse=On`。后台读取 SQLite 时可能同步阻塞事件循环；复用连接上的请求可能尚未被处理，Node 的保活计时器就先关闭连接，Apache 随后报 `AH01102` / `502 Error reading from remote server`。每次请求建立新的本地连接可消除这类空闲连接竞争，不重启处理 worker，也不自动重跑模型。修改 `output/local-folo.conf` 后先运行 `docker exec jitashe-web httpd -t`，通过后再运行 `docker exec jitashe-web httpd -k graceful`；此配置同时覆盖 HTTP 与 HTTPS 虚拟主机。
+
 主站根路径及 `/information` 都由 2240 的生产服务响应。开发时可以运行 2233，但不会自动替换域名上的生产版本。原开发代理配置可恢复到 `ProxyPass / http://host.docker.internal:2233/`，经 Apache 配置校验后平滑重载；不要重建业务库或重置 Codex 模型配置。
 
 ## 数据库快照
