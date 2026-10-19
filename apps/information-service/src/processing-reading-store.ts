@@ -45,6 +45,8 @@ export type ReadingView =
 
 // 数据变化后由独立进程重建角色投影；读取最多落后库一分钟，与时间线轮询同量级。
 const ROLE_REFRESH_INTERVAL_MS = 60_000
+// 生成源角标只是一组计数，允许一分钟的滞后以避开全量投影。
+const GENERATED_STATS_TTL_MS = 60_000
 export type ReadingSnapshotAudit = {
   cutoffAt: string
   maxSeq: number
@@ -350,6 +352,11 @@ export class ProcessingReadingStore {
       CREATE TABLE IF NOT EXISTS official_collection_sync (
         owner_id TEXT PRIMARY KEY, synced_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS processing_generated_stats (
+        owner_id TEXT PRIMARY KEY,
+        body TEXT NOT NULL,
+        built_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS processing_role_revision (
         id INTEGER PRIMARY KEY CHECK(id=1),
         revision INTEGER NOT NULL
@@ -401,17 +408,44 @@ export class ProcessingReadingStore {
 
   // 私人生成源统计直接读取当前安全投影，不创建阅读快照或把虚拟来源交给官方 API。
   generatedStats() {
+    const owner = this.requireOwner()
+    // 投影构建要扫描全部事件与发布、读态，不能挂在每次角标刷新上；按 TTL 复用上次结果。
+    if (!process.env.VITEST) {
+      const row = this.db
+        .prepare("SELECT body,built_at FROM processing_generated_stats WHERE owner_id=?")
+        .get(owner) as { body: string; built_at: string } | undefined
+      if (row) {
+        if (Date.now() - Date.parse(String(row.built_at)) >= GENERATED_STATS_TTL_MS)
+          this.scheduleProjectionRefresh()
+        return JSON.parse(String(row.body)) as {
+          feedId: string
+          total: number
+          unread: number
+          collected: number
+        }
+      }
+    }
+    return this.rebuildGeneratedStats()
+  }
+
+  /** 重建生成源角标统计；由 CLI 与首次读取调用。 */
+  rebuildGeneratedStats() {
+    const owner = this.requireOwner()
     const projection = this.generatedProjection({
       mode: "stories",
       unreadOnly: false,
       collectedOnly: false,
     })
-    return {
+    const stats = {
       feedId: GENERATED_EVENTS_FEED_ID,
       total: projection.items.length,
       unread: projection.items.filter((item) => !item.read).length,
       collected: projection.items.filter((item) => item.collected).length,
     }
+    this.db
+      .prepare("INSERT OR REPLACE INTO processing_generated_stats VALUES(?,?,?)")
+      .run(owner, JSON.stringify(stats), new Date().toISOString())
+    return stats
   }
 
   generatedPage(query: GeneratedFeedQuery) {
@@ -1427,7 +1461,7 @@ export class ProcessingReadingStore {
     }
     if (!cached) this.roleProjection = projection
     // 交给独立进程重建，请求线程只返回上一版，避免几十秒的同步读取。
-    if (String(row.fingerprint) !== this.roleFingerprint()) this.scheduleRoleRefresh()
+    if (String(row.fingerprint) !== this.roleFingerprint()) this.scheduleProjectionRefresh()
     return projection
   }
 
@@ -1476,7 +1510,7 @@ export class ProcessingReadingStore {
     return JSON.stringify([this.ownerId(), Number(row?.revision ?? 0)])
   }
 
-  private scheduleRoleRefresh() {
+  private scheduleProjectionRefresh() {
     // 测试与未打包运行不拉起子进程；那里直接同步重建，语义不变。
     if (process.env.VITEST) return
     const entry = process.argv[1] ?? ""
@@ -1485,7 +1519,7 @@ export class ProcessingReadingStore {
     if (now - this.roleRefreshStartedAt < ROLE_REFRESH_INTERVAL_MS) return
     this.roleRefreshStartedAt = now
     try {
-      const child = spawn(process.execPath, [entry, "rebuild-roles"], {
+      const child = spawn(process.execPath, [entry, "rebuild-projections"], {
         detached: true,
         stdio: "ignore",
       })

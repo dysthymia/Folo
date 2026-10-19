@@ -336,6 +336,62 @@ export class ProcessingStateStore {
     }
   }
 
+  // 状态页只读发布时固化的摘要；不再解析全部决定正文（本机约 300 MB）。
+  publishedStatusSummaries() {
+    const rows = this.db
+      .prepare(
+        `SELECT inputs.seq,inputs.source_key,inputs.release_version,status.body AS summary
+         FROM processing_inputs inputs
+         JOIN entry_decision_status status ON status.decision_id=inputs.decision_id
+           AND status.input_seq=inputs.seq
+           AND status.generation=inputs.generation
+           AND status.release_version=inputs.release_version
+         WHERE inputs.current=1 AND inputs.status='succeeded'
+         ORDER BY inputs.seq`,
+      )
+      .all() as Array<{
+      seq: number
+      source_key: string
+      release_version: number
+      summary: string
+    }>
+    return rows.map((row) => {
+      const summary = JSON.parse(String(row.summary)) as {
+        status: ProcessingDecision["status"]
+        generatedAt: string
+        matchedRuleIds: string[]
+        labels: string[]
+        factCount: number
+        pendingPolicyFieldCount: number
+        reason: string
+        model: string
+        reused: boolean
+        publishedAt: string
+        title: string | null
+      }
+      return {
+        input: {
+          seq: Number(row.seq),
+          sourceKey: String(row.source_key),
+          releaseVersion: Number(row.release_version),
+          current: true,
+          body: { publishedAt: summary.publishedAt, title: summary.title },
+        },
+        decision: {
+          status: summary.status,
+          generatedAt: summary.generatedAt,
+          matchedRuleIds: summary.matchedRuleIds ?? [],
+          labels: summary.labels ?? [],
+          factCount: summary.factCount ?? 0,
+          pendingPolicyFieldCount: summary.pendingPolicyFieldCount ?? 0,
+          reason: summary.reason ?? "",
+          model: summary.model ?? "",
+          reused: summary.reused === true,
+        },
+      }
+    })
+  }
+
   // 调试概览只需要决定元数据与事实数量，不能为每次刷新加载全库原文和证据正文。
   publishedSummaries() {
     const rows = this.db

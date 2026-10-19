@@ -70,7 +70,7 @@ export function automationApi(store: Store, method: string, path: string, body: 
     const sourceKeys = actualRange(resolveAIRuleSourceKeys(store, effective))
     const covered = new Set(sourceKeys)
     const inputs = repository.inputMetadata()
-    const published = store.processingState.publishedSummaries()
+    const published = store.processingState.publishedStatusSummaries()
     const processed = new Set(published.map((item) => item.input.seq))
     const schedule = store.schedule.readingStatus()
     const now = Date.now()
@@ -79,30 +79,10 @@ export function automationApi(store: Store, method: string, path: string, body: 
       (!scheduleConfig ||
         Date.parse(input.body.publishedAt) >= Date.parse(scheduleConfig.historySince)) &&
       Date.parse(input.body.publishedAt) <= now
-    // 最近处理按当时发布版本和已冻结上下文归属，不能用当前草稿重新匹配历史来虚增计数。
-    // 同一发布版本只解析一次规则集，不能为每个历史结果重复读取并校验完整规则。
-    const releases = new Map(
-      repository.releases().map((item) => [item.version, repository.release(item.version)]),
-    )
-    const appliedRules = new Map(
-      published.map((item) => {
-        const release =
-          item.input.releaseVersion === null ? null : releases.get(item.input.releaseVersion)
-        return [
-          item.input.seq,
-          new Set(
-            release
-              ? compileInstructions(release, item.decision.context ?? {}).matched.map(
-                  (rule) => rule.id,
-                )
-              : [],
-          ),
-        ] as const
-      }),
-    )
+    // 命中规则在发布时按当时的规则集固化，状态页不再逐条重放上下文。
     const rules = (effective?.rules ?? []).map((rule) => {
       const keys = actualRange(resolveAIRuleSourceKeys(store, { ...effective!, rules: [rule] }))
-      const matching = published.filter((item) => appliedRules.get(item.input.seq)?.has(rule.id))
+      const matching = published.filter((item) => item.decision.matchedRuleIds.includes(rule.id))
       return {
         ruleId: rule.id,
         sourceKeys: keys,

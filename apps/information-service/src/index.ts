@@ -153,9 +153,15 @@ async function main() {
       resultsShown: snapshot.results.length,
       jobs: snapshot.jobs,
     })
-  } else if (command === "rebuild-roles") {
-    // 角色投影需要读取全部已发布决定，由独立进程重建，网页进程只读结果。
-    print(store.reading.rebuildRoleProjection())
+  } else if (command === "rebuild-projections") {
+    // 时间线投影（角色、角标计数）由独立进程增量重建；历史状态摘要是一次性回填。
+    const target = positionals[1] ?? "timeline"
+    if (target === "status") {
+      print({ status: store.automation.rebuildDecisionStatusSummaries() })
+    } else if (target === "timeline") {
+      print({ roles: store.reading.rebuildRoleProjection() })
+      print({ generatedStats: store.reading.rebuildGeneratedStats() })
+    } else throw new Error("unknown_command")
   } else if (["serve", "serve-web", "worker", "run-once"].includes(command)) {
     const roles = serviceRoles(command)
     if (roles.web) {
@@ -241,8 +247,9 @@ async function main() {
               signal,
             )
             if (processing) {
-              // 执行器不服务 HTTP，可以在本轮结束后同步刷新角色投影。
+              // 执行器不服务 HTTP，可以在本轮结束后同步刷新角色投影与角标统计。
               print({ roles: store.reading.rebuildRoleProjection() })
+              print({ generatedStats: store.reading.rebuildGeneratedStats() })
               print({ processing })
             }
           },

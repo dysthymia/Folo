@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
-import type { AttentionSettings, AutomationRule, RuleSet } from "@follow/information-core"
-import { ruleRequiresSemantics, ruleSetSchema } from "@follow/information-core"
+import type {
+  AttentionSettings,
+  AutomationRule,
+  RuleInput,
+  RuleSet,
+} from "@follow/information-core"
+import { compileInstructions, ruleRequiresSemantics, ruleSetSchema } from "@follow/information-core"
 import { z } from "zod"
 
 import type { SourceEntry } from "./folo"
@@ -129,6 +134,7 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS processing_input_identity ON processing_inputs(source_key,item_id,current);
       CREATE INDEX IF NOT EXISTS processing_input_queue ON processing_inputs(current,status,source_key);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS entry_decision_status (decision_id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS rule_activation_requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publication_requests (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, scope TEXT NOT NULL, release_version INTEGER NOT NULL);
     `)
@@ -934,6 +940,16 @@ export class AutomationStore {
           JSON.stringify(decision),
           new Date().toISOString(),
         )
+      // 状态页只需要少量字段；连同命中规则一起固化，避免每次请求解析全部决定正文。
+      this.db
+        .prepare("INSERT OR REPLACE INTO entry_decision_status VALUES(?,?,?,?,?)")
+        .run(
+          id,
+          target.seq,
+          target.generation,
+          target.releaseVersion,
+          JSON.stringify(this.decisionStatusSummary(target, decision)),
+        )
       // 晚到任务保留历史，但不能覆盖新内容、新发布范围或重算后的当前结果。
       const result = this.db
         .prepare(
@@ -942,6 +958,100 @@ export class AutomationStore {
         .run(id, target.seq, target.contentVersion, target.generation, target.releaseVersion)
       return { id, published: result.changes === 1 }
     })
+  }
+
+  // 状态页读取的字段在发布时固化；命中规则按当时的发布版本计算，不能事后用新草稿重算。
+  private decisionStatusSummary(
+    target: Pick<ProcessingInput, "seq" | "releaseVersion" | "body">,
+    decision: object,
+    release?: RuleSet | null,
+  ) {
+    const record = decision as Record<string, unknown>
+    const config =
+      release === undefined
+        ? target.releaseVersion === null
+          ? null
+          : this.release(target.releaseVersion)
+        : release
+    return {
+      schemaVersion: Number(record.schemaVersion ?? 2),
+      status: String(record.status ?? "keep"),
+      reason: String(record.reason ?? ""),
+      model: String(record.model ?? ""),
+      reused: record.reused === true,
+      generatedAt: String(record.generatedAt ?? ""),
+      labels: Array.isArray(record.labels) ? record.labels.map((label) => String(label)) : [],
+      factCount: Array.isArray(record.facts) ? record.facts.length : 0,
+      pendingPolicyFieldCount: Array.isArray(record.pendingPolicyFields)
+        ? record.pendingPolicyFields.length
+        : 0,
+      matchedRuleIds: config
+        ? compileInstructions(config, (record.context ?? {}) as RuleInput).matched.map(
+            (rule) => rule.id,
+          )
+        : [],
+      publishedAt: String(target.body.publishedAt ?? ""),
+      title: target.body.title ?? null,
+    }
+  }
+
+  /** 为历史决定补写状态摘要；升级后执行一次，之后随发布增量维护。 */
+  rebuildDecisionStatusSummaries() {
+    const startedAt = Date.now()
+    const upsert = this.db.prepare("INSERT OR REPLACE INTO entry_decision_status VALUES(?,?,?,?,?)")
+    const releases = new Map<number, RuleSet | null>()
+    let updated = 0
+    let cursor = 0
+    this.transaction(() => {
+      for (;;) {
+        const rows = this.db
+          .prepare(
+            `SELECT decisions.id,decisions.body AS decision,inputs.seq,inputs.generation,
+               inputs.release_version,inputs.body AS input
+             FROM processing_inputs inputs
+             JOIN entry_decisions decisions ON inputs.decision_id=decisions.id
+             WHERE inputs.current=1 AND inputs.status='succeeded' AND inputs.seq>?
+             ORDER BY inputs.seq LIMIT 500`,
+          )
+          .all(cursor) as Array<{
+          id: string
+          decision: string
+          seq: number
+          generation: number
+          release_version: number | null
+          input: string
+        }>
+        if (!rows.length) break
+        for (const row of rows) {
+          const releaseVersion = row.release_version === null ? null : Number(row.release_version)
+          let release = releaseVersion === null ? null : releases.get(releaseVersion)
+          if (releaseVersion !== null && !releases.has(releaseVersion)) {
+            release = this.release(releaseVersion)
+            releases.set(releaseVersion, release)
+          }
+          upsert.run(
+            row.id,
+            Number(row.seq),
+            Number(row.generation),
+            Number(row.release_version),
+            JSON.stringify(
+              this.decisionStatusSummary(
+                {
+                  seq: Number(row.seq),
+                  releaseVersion,
+                  body: JSON.parse(String(row.input)) as SourceEntry,
+                },
+                JSON.parse(String(row.decision)) as object,
+                release,
+              ),
+            ),
+          )
+          updated++
+        }
+        cursor = Number(rows.at(-1)!.seq)
+      }
+    })
+    return { updated, durationMs: Date.now() - startedAt }
   }
 
   reconcileUnchangedInput(
