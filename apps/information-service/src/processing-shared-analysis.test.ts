@@ -358,14 +358,17 @@ describe("共享材料与规则分析", () => {
     const result = await process(options, execute)
     await expect(execute.mock.results[0]!.value).resolves.toBeDefined()
     expect(result).toMatchObject({ completed: 2, failures: [] })
-    expect(execute).toHaveBeenCalledTimes(2)
-    for (const [request] of execute.mock.calls) {
-      expect(request.telemetry?.tasks).toEqual(["entry"])
-      expect(request.prompt).not.toContain("同时执行以下已命中的规则")
-    }
-    const prompts = execute.mock.calls.map(([request]) => request.prompt).join("\n")
-    expect(prompts).toContain("第0-219项功能支持离线部署。")
-    expect(prompts).toContain("第1-219项功能支持离线部署。")
+    // 多篇批量上线后整批合成一次单篇调用：一条证据目录里带两篇原文，仍不做共享去重/综述。
+    expect(execute).toHaveBeenCalledTimes(1)
+    const [request] = execute.mock.calls[0]!
+    expect(request.telemetry).toMatchObject({
+      tasks: ["entry"],
+      uniqueDocumentCount: 2,
+      pairCount: 0,
+    })
+    expect(request.prompt).not.toContain("同时执行以下已命中的规则")
+    expect(request.prompt).toContain("第0-219项功能支持离线部署。")
+    expect(request.prompt).toContain("第1-219项功能支持离线部署。")
     expect(
       options.store.processingState.published().every((item) => item.decision.facts.length === 30),
     ).toBe(true)
