@@ -5,7 +5,7 @@ const localGetPaths = [
   /^(?:schedule|runs|inputs|rule-set-releases(?:\/\d+)?)$/u,
   /^(?:reading-snapshot|research-pack\/[^/]+|research-packs(?:\/[^/]+)?)$/u,
   /^stories(?:\/[^/]+(?:\/revisions\/\d+|\/split-preview)?)?$/u,
-  /^processing\/(?:model-catalog|model-settings|roles|entry-results|semantic-tags|entries)$/u,
+  /^processing\/(?:model-catalog|model-settings|decisions-settings|decisions-audit|roles|entry-results|semantic-tags|entries)$/u,
   /^processing\/entries\/\d+(?:\/(?:explanation|semantics|events|duplicates))?$/u,
   /^processing\/events(?:\/[^/]+(?:\/members)?)?$/u,
   /^processing\/stories\/[^/]+\/(?:digest|reader-state)$/u,

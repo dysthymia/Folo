@@ -57,6 +57,48 @@ function decision(fingerprint: string): ProcessingDecision {
     reused: false,
   }
 }
+
+it("persists a rule's executor across draft, activation, reload and copied identity without changing siblings", () => {
+  const { repository } = fixture()
+  const make = (id: string, order: number) => ({
+    id,
+    ownerId: "owner",
+    name: id,
+    order,
+    version: 1,
+    enabled: true,
+    executionLocation: "processing_service" as const,
+    when: { all: true as const },
+    actions: [{ type: "ai_transform" as const, prompt: "keep facts" }],
+  })
+  const first = make("first", 0),
+    second = make("second", 1)
+  repository.saveDraft({ ...config, rules: [first, second] }, 0)
+  repository.publish(1, { mode: "future" }, randomUUID())
+  repository.activateRule(second.id, { ...second, decisionModel: "decisions" }, 1, randomUUID())
+  const saved = repository.draft()
+  expect(saved.config.rules.find((rule) => rule.id === "second")?.decisionModel).toBe("decisions")
+  expect(saved.config.rules.find((rule) => rule.id === "first")).not.toHaveProperty("decisionModel")
+  expect(
+    repository.effective().config?.rules.find((rule) => rule.id === "second")?.decisionModel,
+  ).toBe("decisions")
+  const copy = {
+    ...saved.config.rules.find((rule) => rule.id === "second")!,
+    id: "copied",
+    name: "copy",
+    order: 2,
+    version: 1,
+    enabled: false,
+  }
+  repository.activateRule(copy.id, copy, saved.revision, randomUUID())
+  expect(repository.draft().config.rules.find((rule) => rule.id === "copied")).toMatchObject({
+    decisionModel: "decisions",
+    enabled: false,
+  })
+  expect(repository.draft().config.rules.find((rule) => rule.id === "first")).not.toHaveProperty(
+    "decisionModel",
+  )
+})
 afterEach(() => {
   close.splice(0).forEach((fn) => fn())
   vi.useRealTimers()

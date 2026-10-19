@@ -10,6 +10,7 @@ import type { AIConfigStore, AIProvider } from "./ai-config"
 import type { ProcessingInput } from "./automation-store"
 import type { CodexJsonOptions, CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
+import { dedupeDecisionsMode } from "./decisions-config"
 import type { PreparedDedupeEvaluation } from "./processing-dedupe"
 import { exactDuplicateDecisions, prepareSemanticDedupe } from "./processing-dedupe"
 import type { EvidenceCatalog } from "./processing-evidence"
@@ -168,13 +169,14 @@ export class SharedAnalysisSession {
       })
     // 超预算的派生任务交给后续去重/综述阶段；原文和单篇事实保持完整，不截断材料。
     if (materialIds.size > MAX_SHARED_TARGETS) return executeEntry()
+    const decisions = (await this.options.aiConfig.read()).decisions
     const plans = prepareSemanticDedupe({
       store,
       sourceKeys: this.options.sourceKeys,
       cutoffAt: this.options.cutoffAt,
       targets: materials.map(({ input }) => input),
       pendingInputs: materials.map(({ input }) => input),
-    })
+    }).filter((plan) => dedupeDecisionsMode(decisions, plan.action.decisionModel) !== "apply")
     const references = new Map<string, SemanticDuplicateCandidate["entries"][number]>()
     const pairs: SemanticDuplicateCandidate[] = []
     // 候选正文只在共享目录出现一次；额外参考材料也有单独的字符与候选数预算。
@@ -250,7 +252,7 @@ export class SharedAnalysisSession {
 
 同时执行以下已命中的规则。标题、正文及证据目录已在上面的单篇材料中出现，不要重复提取。
 必须返回 {entry: 原单篇响应, dedupe: {results: [...]}, stories: [{ruleId, output: {groups: [...]}}]}。
-单篇 entry 仍遵守原 schema。去重、综述均不得改变原文；先确定事实覆盖关系，再用保留条目生成新综述。
+单篇 entry 仍遵守原 schema。去重、综述均不得改变原文；先确定事实覆盖关系，再用保留条目生成综述。
 ${pairs.length ? comparisonRules : "没有去重候选，dedupe.results 返回空数组。"}
 去重候选（entries 的完整正文通过 itemId 查上面的证据目录或下面的只读参考）：
 ${JSON.stringify(

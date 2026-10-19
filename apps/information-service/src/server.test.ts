@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { Server } from "node:http"
 import { request as httpRequest } from "node:http"
@@ -9,9 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AIConfigStore } from "./ai-config"
 import { FoloChat } from "./chat"
+import { DECISIONS_CANONICAL_MODEL, defaultDecisionsSettings } from "./decisions-config"
 import { externalApi } from "./external-api"
 import { FoloReader } from "./folo"
 import { nativeReaderApi } from "./native-reader-api"
+import { requestDecisions } from "./openrouter-decisions"
+import { runEntryProcessing } from "./processing-engine"
 import { ProcessingTrial } from "./processing-trial"
 import { ResearchSelectionError } from "./research-selection"
 import { createInformationServer, verifyWebBuild } from "./server"
@@ -483,6 +487,126 @@ describe("information HTTP server", () => {
     Origin: "http://local.folo.is",
     "X-Folo-One-Time-Token": "valid-one-time-token",
   }
+
+  it("offline Decisions flows through HTTP settings, dedicated transport, rule publication, audit and shutdown", async () => {
+    const local = await localHeaders()
+    const path = "/information/v1/processing/decisions-settings"
+    const read = await request(path, { method: "POST", headers: { ...local, "X-Folo-Read": "1" } })
+    expect(JSON.parse(read.body)).toMatchObject({
+      enabled: false,
+      mode: "observe",
+      hasApiKey: false,
+    })
+    const input = {
+      ...defaultDecisionsSettings,
+      enabled: true,
+      mode: "apply",
+      apiKey: "offline-decision-key",
+    }
+    expect((await request(path, { method: "PUT", headers: local, body: input })).status).toBe(403)
+    const saved = await request(path, { method: "PUT", headers: signedHeaders, body: input })
+    expect(saved.status).toBe(200)
+    expect(saved.body).not.toContain(input.apiKey)
+    expect(JSON.parse(saved.body)).toMatchObject({ enabled: true, hasApiKey: true })
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...draft.config,
+        formatVersion: 5,
+        rules: [
+          {
+            id: "offline-noise",
+            ownerId: "test-owner",
+            name: "Fixture noise",
+            enabled: true,
+            order: 0,
+            version: 1,
+            executionLocation: "processing_service",
+            when: {
+              anyOf: [
+                {
+                  allOf: [
+                    {
+                      field: "entry_tag",
+                      operator: "contains_any",
+                      value: ["signal:social_chatter"],
+                      minConfidence: 0.95,
+                    },
+                  ],
+                },
+              ],
+            },
+            actions: [{ type: "reading_decision", visibility: "hide" }],
+          },
+        ],
+      },
+      draft.revision,
+    )
+    store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+    for (const target of store.automation.inputs())
+      store.processingState.setMaterial(target, "complete")
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body)) as {
+        state: object
+        questions: Record<string, { type: string }>
+      }
+      expect(payload).not.toHaveProperty("messages")
+      return new Response(
+        JSON.stringify({
+          model: DECISIONS_CANONICAL_MODEL,
+          provider: "OpenAI",
+          id: "offline-http",
+          answers: Object.fromEntries(
+            Object.entries(payload.questions).map(([id, question]) => [
+              id,
+              question.type === "noul"
+                ? { type: "noul", noul: id === "contribution" ? 0.01 : 0.99 }
+                : { type: "choice", choice: id === "contribution_evidence" ? "none" : "E000001" },
+            ]),
+          ),
+          usage: { input_tokens: 100, output_tokens: 5, cost: 0.00001 },
+        }),
+      )
+    })
+    const execute = vi.fn(async () => {
+      throw new Error("must not generate")
+    })
+    const result = await runEntryProcessing({
+      store,
+      aiConfig,
+      execute,
+      decisionsExecute: (input) => requestDecisions({ ...input, fetcher }),
+      sourceKeys: ["feed/1"],
+      runtimeDir: directory,
+      historySince: "2026-09-01T00:00:00Z",
+      signal: new AbortController().signal,
+    })
+    expect(result.completed).toBe(1)
+    const published = store.processingState.published()[0]!
+    expect(published.decision.status).toBe("hide")
+    const audit = await request("/information/v1/processing/decisions-audit", {
+      method: "POST",
+      headers: { ...local, "X-Folo-Read": "1" },
+    })
+    expect(audit.status).toBe(200)
+    expect(JSON.parse(audit.body).records[0]).toMatchObject({
+      inputSeq: published.input.seq,
+      model: DECISIONS_CANONICAL_MODEL,
+      usage: { cost: 0.00001 },
+    })
+    expect(audit.body).not.toContain(input.apiKey)
+    const disabled = await request(path, {
+      method: "PUT",
+      headers: signedHeaders,
+      body: { ...defaultDecisionsSettings, enabled: false },
+    })
+    expect(JSON.parse(disabled.body)).toMatchObject({ enabled: false, hasApiKey: true })
+    expect(store.processingState.published()[0]?.decisionId).toBe(published.decisionId)
+    expect(store.entry("feed/1", "entry-1")?.read).toBe(false)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(execute).not.toHaveBeenCalled()
+    expect(await aiConfig.execution()).toEqual({ apiKey: "private-test-key" })
+  })
 
   async function localHeaders() {
     const headers = { Host: "local.folo.is", Origin: "http://local.folo.is" }

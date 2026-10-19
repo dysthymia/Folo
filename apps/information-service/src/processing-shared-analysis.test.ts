@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { AIConfigStore } from "./ai-config"
 import type { CodexJsonOptions, runCodexJson } from "./codex"
 import { CodexRunError } from "./codex"
+import { defaultDecisionsSettings } from "./decisions-config"
 import { runSemanticDedupe } from "./processing-dedupe"
 import { runEntryProcessing, settleReadStates } from "./processing-engine"
 import { SharedAnalysisSession } from "./processing-shared-analysis"
@@ -293,6 +294,27 @@ afterEach(() => {
 })
 
 describe("共享材料与规则分析", () => {
+  it("direct Decisions mode removes dedupe questions from generation while retaining entry facts", async () => {
+    const options = fixture(false)
+    await options.aiConfig.saveDecisions({
+      ...defaultDecisionsSettings,
+      enabled: true,
+      classificationEnabled: false,
+      apiKey: "offline-key",
+      dedupeObservation: { enabled: true, mode: "apply", maxPairsPerTrigger: 8 },
+    })
+    save(options, "first", "公司发布 Core 1.0，支持离线部署。")
+    save(options, "second", "公司发布 Core 1.0，增加无需停机升级。")
+    const execute = executor(options, false, false, undefined, true)
+    expect(await process(options, execute)).toMatchObject({ completed: 2, failures: [] })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute.mock.calls[0]![0].telemetry).toMatchObject({ tasks: ["entry"], pairCount: 0 })
+    expect(execute.mock.calls[0]![0].prompt).not.toContain("同时执行以下已命中的规则")
+    expect(options.sharedAnalysis.dedupeEvaluations).toEqual([])
+    expect(
+      options.store.processingState.published().every((item) => item.decision.facts.length > 0),
+    ).toBe(true)
+  })
   it("大量已读参考只选择有限比较，参考正文仍保持完整", async () => {
     // 单个未读目标也可能拖入大量历史参考，预算必须约束真实请求而不只是目标篇数。
     const options = fixture(false)

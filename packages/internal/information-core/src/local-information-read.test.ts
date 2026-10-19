@@ -12,6 +12,8 @@ describe("本地读取范围", () => {
     ["GET", "processing/entries/42/events"],
     ["GET", "processing/entries/42/semantics"],
     ["GET", "processing/model-settings"],
+    ["GET", "processing/decisions-settings"],
+    ["GET", "processing/decisions-audit"],
     ["GET", "processing/stories/story-id/reader-state"],
     ["GET", "/information/api/settings"],
     ["GET", "/information/api/snapshot"],
@@ -27,6 +29,7 @@ describe("本地读取范围", () => {
   it.each([
     ["PUT", "configuration"],
     ["POST", "automation/debug"],
+    ["PUT", "processing/decisions-settings"],
     ["POST", "rules/trial"],
     ["PUT", "rules/custom-rule/activate"],
     ["POST", "feedback"],
