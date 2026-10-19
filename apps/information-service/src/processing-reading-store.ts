@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 
@@ -41,6 +42,9 @@ import type {
 
 export type ReadingView =
   "smart" | "standalone" | "all" | "hidden" | "pending" | "skipped" | "failed" | "stories"
+
+// 数据变化后由独立进程重建角色投影；读取最多落后库一分钟，与时间线轮询同量级。
+const ROLE_REFRESH_INTERVAL_MS = 60_000
 export type ReadingSnapshotAudit = {
   cutoffAt: string
   maxSeq: number
@@ -278,11 +282,13 @@ function isUuid(value: string): boolean {
 // 阅读快照只保存不可变指针和展示顺序，正文与决定仍从已验证的当前版本读取。
 export class ProcessingReadingStore {
   private readonly generated: GeneratedFeedStore
-  // 时间线保留完整角色缓存；详情走独立的组关系查询，不触发全库重建。
+  // 角色投影按指纹持久化：读取只解析已保存结果，重建交给独立进程完成。
   private roleProjection?: {
-    version: string
+    builtAt: string
     roles: ProcessingEntryRole[]
   }
+  // 同一进程内限制刷新频率，避免每次轮询都拉起重建进程。
+  private roleRefreshStartedAt = 0
   // 同一数据库版本的多页轮询共享投影；限制范围数量，避免长期保留历史分类结果。
   private generatedProjections?: {
     version: string
@@ -313,6 +319,12 @@ export class ProcessingReadingStore {
         max_seq INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS processing_role_projection (
+        owner_id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        body TEXT NOT NULL,
+        built_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS processing_reading_snapshot_members (
         snapshot_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL,
@@ -338,7 +350,32 @@ export class ProcessingReadingStore {
       CREATE TABLE IF NOT EXISTS official_collection_sync (
         owner_id TEXT PRIMARY KEY, synced_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS processing_role_revision (
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        revision INTEGER NOT NULL
+      );
+      INSERT OR IGNORE INTO processing_role_revision(id,revision) VALUES(1,0);
     `)
+    // 任何可能改变角色结论的写入都递增修订号；读取据此判断投影是否过期。
+    for (const table of [
+      "entry_decisions",
+      "processing_inputs",
+      "processing_source_item_overrides",
+      "processing_entry_overrides",
+      "processing_dedupe_decisions",
+      "processing_events",
+      "processing_event_members",
+      "processing_event_publications",
+      "sources",
+      "rule_set_releases",
+    ])
+      for (const event of ["insert", "update", "delete"] as const)
+        db.exec(
+          `CREATE TRIGGER IF NOT EXISTS processing_role_rev_${table}_${event}
+           AFTER ${event.toUpperCase()} ON ${table} BEGIN
+             UPDATE processing_role_revision SET revision=revision+1 WHERE id=1;
+           END;`,
+        )
     this.generated = new GeneratedFeedStore(
       db,
       ownerId,
@@ -1292,9 +1329,12 @@ export class ProcessingReadingStore {
   /**
    * 时间线角色投影；与阅读快照无关，只共用隐藏判定。
    * 未拿到发布的 input 不产生角色，时间线在服务端给出结论前保持原样。
+   *
+   * 全量重建需要读取所有已发布决定（可达数百 MB），不能放在请求线程上。
+   * 读取只解析已保存的投影；数据变化时返回上一版并异步重建。
    */
   roles(): ProcessingEntryRole[] {
-    return this.currentRoleProjection().roles.map((role) => ({
+    return this.readRoleProjection().roles.map((role) => ({
       ...role,
       relatedEntryIds: [...role.relatedEntryIds],
       ...(role.relatedEntryPreviews
@@ -1365,19 +1405,94 @@ export class ProcessingReadingStore {
       : []
   }
 
-  private currentRoleProjection() {
-    // total_changes 捕获本连接写入，data_version 捕获其他连接写入，账号也纳入身份。
-    const version = JSON.stringify([
-      this.ownerId(),
-      this.db.prepare("SELECT total_changes() AS count").get()?.count,
-      this.db.prepare("PRAGMA data_version").get()?.data_version,
-    ])
-    if (!this.db.isTransaction && this.roleProjection?.version === version)
-      return this.roleProjection
-    const roles = this.buildRoles()
-    const projection = { version, roles }
-    if (!this.db.isTransaction) this.roleProjection = projection
+  private readRoleProjection() {
+    const owner = this.ownerId()
+    if (!owner) return { builtAt: "", roles: [] as ProcessingEntryRole[] }
+    const rebuild = () => {
+      this.rebuildRoleProjection()
+      return this.roleProjection ?? { builtAt: "", roles: [] as ProcessingEntryRole[] }
+    }
+    // 测试库数据量小且要求在写入后立刻读到新角色，保留同步重建。
+    if (process.env.VITEST) return rebuild()
+    const row = this.db
+      .prepare("SELECT fingerprint,body,built_at FROM processing_role_projection WHERE owner_id=?")
+      .get(owner)
+    // 首次运行还没有投影，同步建一次；此后读取都不再重建。
+    if (!row) return rebuild()
+    const builtAt = String(row.built_at)
+    const cached = this.roleProjection?.builtAt === builtAt ? this.roleProjection : null
+    const projection = cached ?? {
+      builtAt,
+      roles: JSON.parse(String(row.body)) as ProcessingEntryRole[],
+    }
+    if (!cached) this.roleProjection = projection
+    // 交给独立进程重建，请求线程只返回上一版，避免几十秒的同步读取。
+    if (String(row.fingerprint) !== this.roleFingerprint()) this.scheduleRoleRefresh()
     return projection
+  }
+
+  /** 重建并持久化角色投影；供独立重建进程和测试调用。 */
+  rebuildRoleProjection() {
+    const owner = this.ownerId()
+    const startedAt = Date.now()
+    if (!owner) return { ownerId: null, roles: 0, changed: false, durationMs: 0 }
+    const fingerprint = this.roleFingerprint()
+    // 数据没变就不重复读取全部决定；执行器每轮都能安全调用。
+    const existing = this.db
+      .prepare("SELECT fingerprint,body,built_at FROM processing_role_projection WHERE owner_id=?")
+      .get(owner)
+    if (existing && String(existing.fingerprint) === fingerprint) {
+      const builtAt = String(existing.built_at)
+      this.roleProjection ??= {
+        builtAt,
+        roles: JSON.parse(String(existing.body)) as ProcessingEntryRole[],
+      }
+      return {
+        ownerId: owner,
+        roles: this.roleProjection.roles.length,
+        changed: false,
+        durationMs: 0,
+      }
+    }
+    const roles = this.buildRoles()
+    const builtAt = new Date().toISOString()
+    this.db
+      .prepare("INSERT OR REPLACE INTO processing_role_projection VALUES(?,?,?,?)")
+      .run(owner, fingerprint, JSON.stringify(roles), builtAt)
+    this.roleProjection = { builtAt, roles }
+    return {
+      ownerId: owner,
+      roles: roles.length,
+      changed: true,
+      durationMs: Date.now() - startedAt,
+    }
+  }
+
+  // 角色只依赖这些表；触发器把任何写入折算成一个跨进程可比的修订号。
+  private roleFingerprint() {
+    const row = this.db
+      .prepare("SELECT revision FROM processing_role_revision WHERE id=1")
+      .get() as { revision?: number } | undefined
+    return JSON.stringify([this.ownerId(), Number(row?.revision ?? 0)])
+  }
+
+  private scheduleRoleRefresh() {
+    // 测试与未打包运行不拉起子进程；那里直接同步重建，语义不变。
+    if (process.env.VITEST) return
+    const entry = process.argv[1] ?? ""
+    if (!/(?:\.mjs|\.js)$/u.test(entry)) return
+    const now = Date.now()
+    if (now - this.roleRefreshStartedAt < ROLE_REFRESH_INTERVAL_MS) return
+    this.roleRefreshStartedAt = now
+    try {
+      const child = spawn(process.execPath, [entry, "rebuild-roles"], {
+        detached: true,
+        stdio: "ignore",
+      })
+      child.unref()
+    } catch {
+      // 拉不起子进程时保留上一版投影，下一次轮询再试。
+    }
   }
 
   private buildRoles(scopedInputs?: ProcessingInput[]): ProcessingEntryRole[] {

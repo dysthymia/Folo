@@ -153,6 +153,9 @@ async function main() {
       resultsShown: snapshot.results.length,
       jobs: snapshot.jobs,
     })
+  } else if (command === "rebuild-roles") {
+    // 角色投影需要读取全部已发布决定，由独立进程重建，网页进程只读结果。
+    print(store.reading.rebuildRoleProjection())
   } else if (["serve", "serve-web", "worker", "run-once"].includes(command)) {
     const roles = serviceRoles(command)
     if (roles.web) {
@@ -237,7 +240,11 @@ async function main() {
               { store, aiConfig, reader, runtimeDir: join(dataDir, "runtime") },
               signal,
             )
-            if (processing) print({ processing })
+            if (processing) {
+              // 执行器不服务 HTTP，可以在本轮结束后同步刷新角色投影。
+              print({ roles: store.reading.rebuildRoleProjection() })
+              print({ processing })
+            }
           },
           shouldReload: () =>
             workerReleaseChanged(

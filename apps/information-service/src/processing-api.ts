@@ -716,6 +716,8 @@ export function processingApi(
         result = store.processingState.setOverride(seq, input.mode, input.expectedRevision)
         store.stories.invalidateInputs([seq])
       })
+      // 覆盖改变隐藏结论，立刻刷新角色投影，时间线重拉时不能仍看到旧结论。
+      store.reading.rebuildRoleProjection()
       return result!
     }
     if (action === "undo" && method === "POST") {
@@ -725,6 +727,7 @@ export function processingApi(
         result = store.processingState.undoOverride(seq, input.expectedRevision)
         store.stories.invalidateInputs([seq])
       })
+      store.reading.rebuildRoleProjection()
       return result!
     }
     if (action === "retry" && method === "POST") {
