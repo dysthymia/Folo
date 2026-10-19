@@ -13,7 +13,11 @@ import {
   LocalInformationReadError,
   tryLocalInformationRead,
 } from "../information/local-read-access"
-import { informationRequestInit } from "../information/request-init"
+import {
+  InformationReleaseMismatch,
+  informationRequestInit,
+  verifyInformationRelease,
+} from "../information/request-init"
 import { informationSnapshotSchema } from "../information/snapshot"
 
 const isoDateTime = z.iso.datetime({ offset: true })
@@ -707,7 +711,8 @@ export type ProcessingReleaseDetail = z.infer<typeof processingReleaseDetailSche
 export type ProcessingInput = z.infer<typeof inputsSchema>["inputs"][number]
 export class ProcessingRequestError extends Error {
   constructor(
-    public readonly kind: "authorization" | "conflict" | "referenced" | "invalid" | "request",
+    public readonly kind:
+      "authorization" | "conflict" | "referenced" | "invalid" | "request" | "version",
     public readonly code?: "target_read" | "read_state_unknown",
   ) {
     super(kind)
@@ -732,7 +737,9 @@ export function createProcessingClient(
           error instanceof LocalInformationReadError &&
             ["authorization", "account_mismatch"].includes(error.kind)
             ? "authorization"
-            : "request",
+            : error instanceof InformationReleaseMismatch
+              ? "version"
+              : "request",
         )
       },
     )
@@ -757,6 +764,13 @@ export function createProcessingClient(
           }),
         )
       })())
+    // 先检查发布号，再解释状态或解析配置，避免把旧页面误报为配置损坏。
+    try {
+      verifyInformationRelease(response)
+    } catch (error) {
+      if (error instanceof InformationReleaseMismatch) throw new ProcessingRequestError("version")
+      throw error
+    }
     if (!response.ok) {
       const detail = await response.json().catch(() => null)
       const referenced = z.object({ error: z.literal("tag_referenced") }).safeParse(detail).success

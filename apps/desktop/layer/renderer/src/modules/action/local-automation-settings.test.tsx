@@ -5,7 +5,9 @@ import { act } from "react"
 import { createRoot } from "react-dom/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { informationReleaseMismatchEvent } from "../information/request-init"
 import { LocalAutomationSettings } from "./local-automation-settings"
+import { ProcessingRequestError } from "./processing-client"
 
 const mocks = vi.hoisted(() => ({
   client: {
@@ -159,6 +161,50 @@ const render = () =>
   })
 
 describe("single local automation editor", () => {
+  it("去重规则之前显示固定的完全同文前置步骤", async () => {
+    const snapshot = editorSnapshot()
+    snapshot.editor.config.rules[0]!.actions = [{ type: "ai_dedupe", scope: { all: true } }]
+    mocks.client.loadEditor.mockResolvedValue(snapshot)
+    await render()
+    const list = container.querySelector('[aria-label="automation.editor.rules"]')!
+    expect(list.firstElementChild?.textContent).toContain("automation.editor.exact_dedupe")
+    expect(list.firstElementChild?.textContent).toContain("automation.editor.exact_dedupe_hint")
+  })
+
+  it("子面板发现版本变化时保留规则草稿，整页刷新前确认丢弃修改", async () => {
+    await render()
+    const name = Array.from(container.querySelectorAll<HTMLInputElement>("input")).find(
+      (input) => input.value === "First",
+    )!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        name,
+        "Unsaved rule",
+      )
+      name.dispatchEvent(new Event("input", { bubbles: true }))
+      window.dispatchEvent(new Event(informationReleaseMismatchEvent))
+    })
+    expect(name.value).toBe("Unsaved rule")
+    expect(container.textContent).toContain("automation.editor.error_version")
+    await click("automation.editor.reload")
+    expect(mocks.ask).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "automation.editor.discard_title" }),
+    )
+    expect(name.value).toBe("Unsaved rule")
+  })
+  it("版本不符时明确提示刷新页面，不伪装成服务失败", async () => {
+    mocks.client.loadEditor.mockRejectedValueOnce(new ProcessingRequestError("version"))
+    await render()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "automation.editor.error_version",
+    )
+    expect(container.textContent).not.toContain("automation.editor.error_request")
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent === "automation.editor.reload",
+      ),
+    ).toBe(true)
+  })
   it("首屏一次请求即可显示规则，无需等待三个独立读取", async () => {
     await render()
     expect(container.textContent).toContain("First")

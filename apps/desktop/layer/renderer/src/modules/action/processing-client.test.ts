@@ -14,6 +14,7 @@ import {
 } from "./processing-client"
 
 afterEach(() => {
+  vi.unstubAllEnvs()
   vi.unstubAllGlobals()
   document.documentElement.removeAttribute("data-information-page")
 })
@@ -206,6 +207,29 @@ const previewResponse = {
 }
 
 describe("createProcessingClient", () => {
+  it("旧页面收到不同发布号时报告版本错误，不继续解析配置或重试", async () => {
+    vi.stubGlobal("window", {
+      location: new URL("http://local.folo.is/action"),
+      dispatchEvent: vi.fn(),
+    })
+    document.documentElement.setAttribute("data-information-page", "")
+    vi.stubEnv("VITE_FOLO_LOCAL_RELEASE_ID", "old-release")
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        { error: "local_release_mismatch" },
+        {
+          status: 409,
+          headers: { "X-Folo-Local-Release": "new-release" },
+        },
+      ),
+    )
+    const generate = vi.fn(async () => "unused-official-token")
+    await expect(
+      createProcessingClient(generate, fetcher).loadEditor(new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "version" })
+    expect(generate).not.toHaveBeenCalled()
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
   it("本机规则读取使用本地会话，写入继续调用官方 generate", async () => {
     vi.stubGlobal("window", { location: new URL("http://local.folo.is:3021") })
     document.documentElement.setAttribute("data-information-page", "")
@@ -435,15 +459,23 @@ describe("createProcessingClient", () => {
 
   it("首屏一次凭据交换取得规则、生效状态和迁移检查", async () => {
     const { revision, sources, subscriptionTags, sourceTags, listMemberships } = editorResponse
+    // 后台会返回已保存的关注领域，草稿与生效配置的严格校验都必须接受此字段。
+    const config: RuleSet = {
+      ...ruleSet,
+      global: {
+        ...ruleSet.global,
+        attention: { enabled: true, interests: ["ai", "blockchain"], watchlist: [] },
+      },
+    }
     const snapshot = {
-      editor: editorResponse,
+      editor: { ...editorResponse, config },
       effective: {
         revision,
         sources,
         subscriptionTags,
         sourceTags,
         listMemberships,
-        config: ruleSet,
+        config,
         releaseVersion: 2,
       },
       upgrade: {

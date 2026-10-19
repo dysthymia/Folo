@@ -124,6 +124,8 @@ ProxyPassReverse /information http://host.docker.internal:2240/information
 
 `build:local` 在构建前后计算源码内容摘要，包含未提交源码、新文件和本机 Vite 环境文件；三份构建全部成功后才写入 `dist/local-release.json`。安装器要求清单、当前源码和每个产物文件一致，并校验复制后的文件。缺失前端、源码变化、单独重建或直接修改 bundle 都会在停服务前被拒绝；`--check` 只核对发布，不操作服务。各个原有 `build` 命令仍可用于开发，但不能独立形成可安装的发布。构建与安装共用文件锁，避免并发发布混用目录。
 
+发布号嵌入两份前端，并由后台通过 `X-Folo-Local-Release` 返回。已打开的旧标签页下次请求本地接口时，后台在鉴权和写入前拒绝不同发布号；自动化页显示“页面版本已过期”并提供整页刷新，保留未保存修改且刷新前仍确认丢弃草稿。安装就绪检查同时核对真实响应的发布号，HTTP 200 不再单独代表发布成功。
+
 日志：`~/Library/Logs/FoloInformation/service.log`、`service.error.log`；独立规则执行器使用同目录的 `worker.log`、`worker.error.log`。这是登录用户级常驻，退出账号或休眠时不保证继续工作；安装器不自行创建规则或启用计划；服务会执行用户已保存、发布并启用的处理计划。安装器只继承已有代理及运行目录，不复制认证密钥。千问模式由每次运行的独立 profile 提供配置；OpenAI 模式保留本机 Codex 登录，没有自动备用模型。
 
 ```sh

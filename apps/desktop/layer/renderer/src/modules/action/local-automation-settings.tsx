@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next"
 import { useDialog } from "~/components/ui/modal/stacked/hooks"
 
 import { getOneTimeToken } from "../ai-chat/local-provider"
+import { informationReleaseMismatchEvent } from "../information/request-init"
 import { previewDedupeDraft } from "./dedupe-draft-preview"
 import { notifyLocalAutomationChanged } from "./local-automation-events"
 import { LocalAutomationFeedback } from "./local-automation-feedback"
@@ -51,6 +52,12 @@ import { useUnSavedBlocker } from "./use-unsaved-blocker"
 const client = createProcessingClient(getOneTimeToken)
 type Selection = { rule: AutomationRule; baseline: string; legacy?: LocalActionMigrationTarget }
 
+// 版本不符保留为独立状态；重新读取数据无法更新已打开标签页中的旧 JS。
+const editorRequestError = (cause: unknown) =>
+  cause instanceof ProcessingRequestError && (cause.kind === "conflict" || cause.kind === "version")
+    ? cause.kind
+    : "request"
+
 export function LocalAutomationSettings() {
   const { t } = useTranslation("app")
   const { ask } = useDialog()
@@ -65,7 +72,7 @@ export function LocalAutomationSettings() {
   const [panel, setPanel] = useState<"rules" | "settings" | "templates" | "queue">("rules")
   const [packSaved, setPackSaved] = useState(false)
   const [error, setError] = useState<
-    "request" | "conflict" | "invalid" | "migration" | "dedupe_scope" | null
+    "request" | "conflict" | "invalid" | "migration" | "dedupe_scope" | "version" | null
   >(null)
   const [status, setStatus] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -79,6 +86,12 @@ export function LocalAutomationSettings() {
   activeOwnerRef.current = ownerId
   const dirty = !!selection && JSON.stringify(selection.rule) !== selection.baseline
   useUnSavedBlocker(dirty || preferencesDirty)
+
+  useEffect(() => {
+    const onMismatch = () => setError("version")
+    window.addEventListener(informationReleaseMismatchEvent, onMismatch)
+    return () => window.removeEventListener(informationReleaseMismatchEvent, onMismatch)
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -147,8 +160,8 @@ export function LocalAutomationSettings() {
         else if (requestedRuleId) setError("invalid")
         else if (dedupeRequested) setError("dedupe_scope")
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setError("request")
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) setError(editorRequestError(cause))
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
@@ -245,12 +258,7 @@ export function LocalAutomationSettings() {
       setSelection(next ? { rule: next, baseline: JSON.stringify(next) } : null)
       setStatus(true)
     } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(
-          cause instanceof ProcessingRequestError && cause.kind === "conflict"
-            ? "conflict"
-            : "request",
-        )
+      if (!controller.signal.aborted) setError(editorRequestError(cause))
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
@@ -309,12 +317,7 @@ export function LocalAutomationSettings() {
       setSelection({ rule: savedRule, baseline: JSON.stringify(savedRule), legacy })
       setStatus(true)
     } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(
-          cause instanceof ProcessingRequestError && cause.kind === "conflict"
-            ? "conflict"
-            : "request",
-        )
+      if (!controller.signal.aborted) setError(editorRequestError(cause))
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
@@ -343,12 +346,7 @@ export function LocalAutomationSettings() {
           setSelection(null)
           setStatus(true)
         } catch (cause) {
-          if (!controller.signal.aborted)
-            setError(
-              cause instanceof ProcessingRequestError && cause.kind === "conflict"
-                ? "conflict"
-                : "request",
-            )
+          if (!controller.signal.aborted) setError(editorRequestError(cause))
         } finally {
           if (!controller.signal.aborted) setBusy(false)
         }
@@ -406,12 +404,7 @@ export function LocalAutomationSettings() {
       if (updated) setSelection({ rule: updated, baseline: JSON.stringify(updated) })
       setStatus(true)
     } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(
-          cause instanceof ProcessingRequestError && cause.kind === "conflict"
-            ? "conflict"
-            : "request",
-        )
+      if (!controller.signal.aborted) setError(editorRequestError(cause))
     } finally {
       if (!controller.signal.aborted) setBusy(false)
     }
@@ -485,11 +478,17 @@ export function LocalAutomationSettings() {
       {error && (
         <div role="alert" className="rounded-lg bg-red/10 p-3 text-sm text-red">
           {t(`automation.editor.error_${error}`)}
-          {(error === "conflict" || (!editor && error === "request")) && (
+          {(error === "version" || error === "conflict" || (!editor && error === "request")) && (
             <button
               className={`${processingButtonClass} ml-3`}
               type="button"
-              onClick={() => guarded(() => setReload((value) => value + 1))}
+              onClick={() =>
+                guarded(() => {
+                  // 刷新前仍确认未保存修改，不能因后台更新直接丢弃用户草稿。
+                  if (error === "version") window.location.reload()
+                  else setReload((value) => value + 1)
+                })
+              }
             >
               {t("automation.editor.reload")}
             </button>
@@ -593,6 +592,17 @@ export function LocalAutomationSettings() {
             className="max-h-56 overflow-auto rounded-xl border border-fill-secondary md:max-h-none md:w-60 md:shrink-0"
             aria-label={t("automation.editor.rules")}
           >
+            {/* 完全同文是去重规则共用的固定前置步骤；不参与用户规则之间的优先级裁决。 */}
+            {editor.config.rules.some((item) =>
+              item.actions.some((action) => action.type === "ai_dedupe"),
+            ) && (
+              <div className="flex flex-col gap-1 border-b border-fill-secondary bg-fill-quinary p-3">
+                <span className="text-sm font-medium">{t("automation.editor.exact_dedupe")}</span>
+                <span className="text-xs text-text-secondary">
+                  {t("automation.editor.exact_dedupe_hint")}
+                </span>
+              </div>
+            )}
             {[...editor.config.rules]
               .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
               .map((item) => (

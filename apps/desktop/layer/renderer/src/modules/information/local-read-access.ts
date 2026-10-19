@@ -1,7 +1,7 @@
 import { isLocalInformationRead } from "@follow/information-core"
 import { z } from "zod"
 
-import { informationRequestInit } from "./request-init"
+import { informationRequestInit, verifyInformationRelease } from "./request-init"
 
 const sessionSchema = z.object({
   ownerId: z.string().min(1),
@@ -84,13 +84,17 @@ async function bootstrap(context: ReadContext, fetcher: LocalFetcher) {
   if (pending) return pending
   const request = (async () => {
     // 短时读取令牌仅保存在模块内存中，不发送或持久化任何官方 token。
-    const response = await fetcher("/information/api/local-read-session", {
-      method: "POST",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ownerId: context.ownerId }),
-    })
+    const response = await fetcher(
+      "/information/api/local-read-session",
+      informationRequestInit({
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerId: context.ownerId }),
+      }),
+    )
+    verifyInformationRelease(response)
     await verifyContext(context)
     if (response.status === 401) throw new LocalInformationReadError("authorization")
     if (response.status === 403) throw new LocalInformationReadError("account_mismatch")
@@ -157,6 +161,7 @@ export async function tryLocalInformationRead(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     )
+    verifyInformationRelease(response)
     await verifyContext(context)
     signal.throwIfAborted()
     if (response.status === 403) {
