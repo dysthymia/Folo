@@ -13,7 +13,7 @@ import {
 } from "@follow/store/subscription/hooks"
 import { subscriptionActions, subscriptionSyncService } from "@follow/store/subscription/store"
 import { getDefaultCategory } from "@follow/store/subscription/utils"
-import { useSortedIdsByUnread, useUnreadByIds } from "@follow/store/unread/hooks"
+import { useSortedIdsByUnread } from "@follow/store/unread/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { stopPropagation } from "@follow/utils/dom"
 import { cn } from "@follow/utils/utils"
@@ -403,7 +403,8 @@ function FeedCategoryImpl({
 }
 
 function FilterReadFeedCategory(props: FeedCategoryProps) {
-  const unread = useUnreadByIds(props.data)
+  // 自动隐藏空分类时也使用过滤后的数量，避免分类角标为零却仍占位。
+  const unread = useSidebarUnreadByIds(props.data)
   if (!unread) return null
   return <FeedCategoryImpl {...props} />
 }

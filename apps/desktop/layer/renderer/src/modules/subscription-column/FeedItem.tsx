@@ -15,7 +15,6 @@ import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { useListById } from "@follow/store/list/hooks"
 import { useSubscriptionByFeedId } from "@follow/store/subscription/hooks"
-import { useUnreadById, useUnreadByListId } from "@follow/store/unread/hooks"
 import { cn, isKeyForMultiSelectPressed } from "@follow/utils/utils"
 import { createElement, memo, use, useCallback, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -41,6 +40,7 @@ import { getPreferredTitle } from "~/store/feed/hooks"
 
 import { useSelectedFeedIdsState } from "./atom"
 import { DraggableContext } from "./context"
+import { useSidebarUnreadById, useSidebarUnreadByListId } from "./hooks/use-sidebar-unread"
 import { SourceRow } from "./SourceRow"
 import { feedColumnStyles } from "./styles"
 import { UnreadNumber } from "./UnreadNumber"
@@ -130,7 +130,8 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
     [feedId, navigate, setSelectedFeedIds, navigationView],
   )
 
-  const feedUnread = useUnreadById(feedId)
+  // 单个来源与分类角标复用同一套过滤后的未读口径。
+  const feedUnread = useSidebarUnreadById(feedId)
 
   const isActive = useRouteParamsSelector((routerParams) => routerParams.feedId === feedId)
 
@@ -305,7 +306,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
 }
 
 const FilterReadFeedItem: Component<FeedItemProps> = (props) => {
-  const feedUnread = useUnreadById(props.feedId)
+  const feedUnread = useSidebarUnreadById(props.feedId)
 
   if (!feedUnread) return null
   return createElement(FeedItemImpl, props)
@@ -341,7 +342,7 @@ const ListItemImpl: Component<ListItemProps> = ({
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isSubscriptionList)
   useContextMenuActionShortCutTrigger(items, when && isActive)
 
-  const listUnread = useUnreadByListId(listId)
+  const listUnread = useSidebarUnreadByListId(listId)
 
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false)
   const subscription = useSubscriptionByFeedId(listId)!
@@ -430,7 +431,7 @@ const ListItemImpl: Component<ListItemProps> = ({
 export const ListItem = memo(ListItemImpl)
 
 const FilterReadListItem: Component<ListItemProps> = (props) => {
-  const listUnread = useUnreadByListId(props.listId)
+  const listUnread = useSidebarUnreadByListId(props.listId)
 
   if (!listUnread) return null
   return createElement(ListItem, props)
@@ -457,7 +458,7 @@ const InboxItemImpl: Component<InboxItemProps> = ({ view, inboxId, className, ic
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isSubscriptionList)
   useContextMenuActionShortCutTrigger(items, when && isActive)
 
-  const inboxUnread = useUnreadById(inboxId)
+  const inboxUnread = useSidebarUnreadById(inboxId)
 
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false)
   const navigate = useNavigateEntry()
