@@ -268,9 +268,39 @@ describe("调度到处理的后台链路", () => {
       options.store.automation.publish(0, { mode: "future" }, randomUUID())
       options.store.schedule.manual(randomUUID(), new Date())
       const snapshots: number[] = []
+      // 第一批展示必须在第二批模型开始前结算，避免单篇成功后仍等待整轮积压。
+      const dedupe = vi.fn(
+        async (_input: Parameters<typeof import("./processing-dedupe").runSemanticDedupe>[0]) => ({
+          batches: 1,
+          candidates: 1,
+          duplicates: 1,
+          exactDuplicates: 0,
+          unresolved: 0,
+          sharedComparisons: 0,
+          relationCacheHits: 0,
+          dedicatedComparisons: 1,
+          unknownUsageRequests: 0,
+          pending: 0,
+          usage: { inputTokens: 3, outputTokens: 1, cachedInputTokens: 0 },
+        }),
+      )
+      const repair = vi.fn(async () => ({
+        repaired: [],
+        independent: [],
+        pending: [],
+        failures: [],
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+      }))
       const processEntries = vi.fn(
         async (input: Parameters<typeof import("./processing-engine").runEntryProcessing>[0]) => {
           snapshots.push(vi.mocked(options.sourceReader.detail).mock.calls.length)
+          if (snapshots.length === 2) {
+            expect(dedupe).toHaveBeenCalledTimes(1)
+            expect(repair).toHaveBeenCalledTimes(1)
+            expect(dedupe.mock.calls[0]?.[0]).toMatchObject({
+              targets: expect.arrayContaining([{ sourceKey: "feed/1", itemId: "e9" }]),
+            })
+          }
           if (snapshots.length === 1)
             expect(vi.mocked(options.sourceReader.detail).mock.calls[0]?.[1].title).toBe(
               "今晚截止领取资格",
@@ -285,11 +315,17 @@ describe("调度到处理的后台链路", () => {
           }
         },
       )
-      await runProcessingWorker({ ...options, processEntries }, new AbortController().signal)
+      await runProcessingWorker(
+        { ...options, processEntries, dedupe, repair },
+        new AbortController().signal,
+      )
+      expect(dedupe).toHaveBeenCalledTimes(2)
+      expect(dedupe.mock.calls.map(([input]) => input.maxBatches)).toEqual([3, 2])
       expect(snapshots).toEqual([8, 10])
       expect(processEntries).toHaveBeenCalledTimes(2)
       expect(options.store.processingState.reports()[0]?.report).toMatchObject({
         entries: { completed: 10, usage: { inputTokens: 20, outputTokens: 4 } },
+        dedupe: { batches: 2, duplicates: 2, usage: { inputTokens: 6, outputTokens: 2 } },
       })
     } finally {
       options.store.close()
@@ -1121,7 +1157,7 @@ describe("列表加载后台目标范围", () => {
           preparedEvaluations: [],
         }),
       )
-      // 单篇结果先落定，再执行去重与事件综合；原规则 order 不再代替执行依赖。
+      // 分类及标签策略先落定，再执行去重与事件综合；规则 order 不代替执行依赖。
       expect(options.processEntries.mock.invocationCallOrder[0]).toBeLessThan(
         dedupe.mock.invocationCallOrder[0]!,
       )

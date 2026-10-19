@@ -192,6 +192,8 @@
   "automation.editor.error_migration": "新しい版は有効ですが、旧ルールが変更されたか保存できませんでした。旧ルールを保持しています。確認して再保存してください。",
   "automation.editor.error_request": "保存または読み込みに失敗しました。変更は保持されています。ローカルサービスを確認してください。",
   "automation.editor.error_version": "ローカルアプリが更新され、このページのバージョンは古くなりました。変更は保持されています。編集内容をコピーしてからページを再読み込みしてください。",
+  "automation.editor.exact_dedupe": "完全同文の重複排除",
+  "automation.editor.exact_dedupe_hint": "固定の前処理 · 重複排除ルールに従い、AI は呼び出しません",
   "automation.editor.existing_local": "既存のローカルルール",
   "automation.editor.export": "エクスポートとバックアップ",
   "automation.editor.future_hint": "通常の操作は保存後に適用されます。AI の変更は今後の記事に適用され、既存の結果は自動で再計算されません。",

@@ -11,7 +11,8 @@ import {
   isJointAnnouncement,
   normalizeEventMentions,
 } from "./processing-event-mentions"
-import { unchangedStoryMaterial } from "./story-material"
+import { sourceText } from "./service"
+import { completeStoryMaterial, unchangedStoryMaterial } from "./story-material"
 
 export type StoryStatus = "active" | "merged" | "split" | "repairing"
 export type StoryFactKind = "fact" | "source_claim" | "inference"
@@ -25,6 +26,8 @@ export type StoryMemberReference = {
   eventMentionIndex?: number
   /** 同公告每个原事实到综述事实的覆盖许可证；不可用于无关事件、分析或教程。 */
   announcementCoverage?: Array<{ factIndex: number; storyFactIds: string[] }>
+  /** 主题综述仅在逐事实完整覆盖且材料完整时替代全篇，不冒充同事件许可证。 */
+  wholeEntryCoverage?: Array<{ factIndex: number; storyFactIds: string[] }>
 }
 export type StorySourceSpan = {
   id: string
@@ -1413,7 +1416,10 @@ export class StoryStore {
     }
     // 不信任调用方传入的覆盖许可证；必须逐事实校验原决定、公告范围、类型及引用归属。
     for (const member of input.members) {
-      if (!member.announcementCoverage) continue
+      const coverage = member.announcementCoverage ?? member.wholeEntryCoverage
+      if (!coverage) continue
+      if (member.announcementCoverage && member.wholeEntryCoverage)
+        throw new StoryStoreError("invalid_reference")
       const row = this.db
         .prepare(
           "SELECT decisions.body AS decision, inputs.body AS input FROM entry_decisions decisions JOIN processing_inputs inputs ON inputs.seq=decisions.input_seq WHERE decisions.id=? AND inputs.seq=?",
@@ -1423,12 +1429,19 @@ export class StoryStore {
       const original = sourceTextFromInputBody(String(row.input))
       if (
         !original ||
-        member.eventMentionIndex === undefined ||
-        !isJointAnnouncement(decision.semantic ?? {}, original, member.eventMentionIndex)
+        (member.announcementCoverage
+          ? member.eventMentionIndex === undefined ||
+            !isJointAnnouncement(decision.semantic ?? {}, original, member.eventMentionIndex)
+          : Boolean(input.eventIdentity) ||
+            member.eventMentionIndex !== undefined ||
+            !completeStoryMaterial({
+              body: JSON.parse(String(row.input)) as SourceEntry,
+              decision,
+            }))
       )
         throw new StoryStoreError("invalid_reference")
       const indexes = new Set<number>()
-      for (const coverage of member.announcementCoverage) {
+      for (const coverage of member.announcementCoverage ?? member.wholeEntryCoverage ?? []) {
         const sourceFact = decision.facts[coverage.factIndex]
         if (
           !Number.isInteger(coverage.factIndex) ||
@@ -1456,23 +1469,25 @@ export class StoryStore {
                   const known = supporting
                     ? (JSON.parse(String(supporting.body)) as ProcessingDecision)
                     : null
-                  return (other.announcementCoverage ?? []).some((item) => {
-                    const originalFact = known?.facts[item.factIndex]
-                    return (
-                      item.storyFactIds.includes(id) &&
-                      originalFact?.kind === "fact" &&
-                      fact.citationIds.some((citationId) => {
-                        const citation = input.citations.find((value) => value.id === citationId)
-                        const span = input.sourceSpans.find(
-                          (value) => value.id === citation?.sourceSpanId,
-                        )
-                        return (
-                          span?.inputSeq === other.inputSeq &&
-                          normalizeQuote(span.quote) === normalizeQuote(originalFact.quote)
-                        )
-                      })
-                    )
-                  })
+                  return (other.announcementCoverage ?? other.wholeEntryCoverage ?? []).some(
+                    (item) => {
+                      const originalFact = known?.facts[item.factIndex]
+                      return (
+                        item.storyFactIds.includes(id) &&
+                        originalFact?.kind === "fact" &&
+                        fact.citationIds.some((citationId) => {
+                          const citation = input.citations.find((value) => value.id === citationId)
+                          const span = input.sourceSpans.find(
+                            (value) => value.id === citation?.sourceSpanId,
+                          )
+                          return (
+                            span?.inputSeq === other.inputSeq &&
+                            normalizeQuote(span.quote) === normalizeQuote(originalFact.quote)
+                          )
+                        })
+                      )
+                    },
+                  )
                 })
               )) ||
             !fact.citationIds.some((citationId) => {
@@ -1487,6 +1502,12 @@ export class StoryStore {
             throw new StoryStoreError("invalid_reference")
         }
       }
+      // 主题综述的部分引用只能保留为补充，不能持有全篇折叠许可证。
+      if (
+        member.wholeEntryCoverage &&
+        (!decision.facts.length || indexes.size !== decision.facts.length)
+      )
+        throw new StoryStoreError("invalid_reference")
     }
     if (hasFactDependencyCycle(input.facts)) throw new StoryStoreError("invalid_reference")
   }
@@ -1826,17 +1847,8 @@ function sourceTextFromInputBody(body: string) {
   const source = parsed as { content?: unknown; description?: unknown }
   const raw = typeof source.content === "string" ? source.content : source.description
   if (typeof raw !== "string" || !raw.trim()) return null
-  // Folo 保存的原文可能是 HTML；片段比较基于可见文本，不能由模型任意声称 fragmentId。
-  return raw
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
+  // 与单篇证据目录共用可见文本提取，内联链接/强调不能凭空插入空格使真实引用校验失败。
+  return sourceText(raw)
 }
 function hasFactDependencyCycle(facts: StoryFact[]) {
   const dependencies = new Map(facts.map((fact) => [fact.id, fact.dependsOnFactIds]))

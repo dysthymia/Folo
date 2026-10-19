@@ -8,6 +8,18 @@ import { sourceSpanFragmentId, StoryStore, StoryStoreError } from "./story-store
 
 const databases: DatabaseSync[] = []
 
+it("综述引用按实际可见文字核验内联链接和字符实体，不接受插入的伪空格", () => {
+  const { db, store } = fixture()
+  db.prepare("UPDATE processing_inputs SET body=? WHERE seq=1").run(
+    JSON.stringify({ content: '<p>证据<a href="https://example.test">片段</a> 1</p>' }),
+  )
+  expect(() => store.create(draft([1, 2]))).not.toThrow()
+  const invalid = draft([1, 3])
+  invalid.sourceSpans[0]!.quote = "证据 片段 1"
+  invalid.sourceSpans[0]!.fragmentId = sourceSpanFragmentId("entry-1", "v1", "证据 片段 1")
+  expect(() => store.create(invalid)).toThrow("invalid_reference")
+})
+
 function fixture() {
   const db = new DatabaseSync(":memory:")
   databases.push(db)

@@ -192,6 +192,8 @@
   "automation.editor.error_migration": "新版本已生效，但旧本地规则有变化或无法保存。旧副本暂时保留，请核对后重新保存。",
   "automation.editor.error_request": "保存或加载失败，修改仍保留。请检查本机服务后重试。",
   "automation.editor.error_version": "本机应用已更新，当前页面版本已过期。修改仍保留，请先保存副本，再刷新页面。",
+  "automation.editor.exact_dedupe": "完全同文去重",
+  "automation.editor.exact_dedupe_hint": "固定前置步骤 · 随去重规则启停，不调用 AI",
   "automation.editor.existing_local": "已有本地规则",
   "automation.editor.export": "导出与备份",
   "automation.editor.future_hint": "普通动作保存后生效；AI 修改用于之后的新内容，已有处理结果不会自动重算。",

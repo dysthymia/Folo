@@ -88,6 +88,17 @@ const input = (present: SemanticTagId[], missing: SemanticTagId[] = []) => ({
 })
 
 describe("阅读规则收敛", () => {
+  it("默认规则按标签、阅读策略、去重、综述的阶段顺序展示", () => {
+    expect(config.rules.map((rule) => rule.id)).toEqual([
+      "classify",
+      "reading-confirmed-noise-v1",
+      "dim",
+      "reading-security-attention-v1",
+      "reading-important-attention-v1",
+      "dedupe",
+      "story",
+    ])
+  })
   it("分类去重综述共享范围，保留综述提示而不抢占展示策略", () => {
     for (const category of readingPoolCategories) {
       const plan = compileInstructions(config, {

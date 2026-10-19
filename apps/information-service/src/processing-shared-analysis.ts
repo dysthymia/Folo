@@ -252,7 +252,7 @@ export class SharedAnalysisSession {
 
 同时执行以下已命中的规则。标题、正文及证据目录已在上面的单篇材料中出现，不要重复提取。
 必须返回 {entry: 原单篇响应, dedupe: {results: [...]}, stories: [{ruleId, output: {groups: [...]}}]}。
-单篇 entry 仍遵守原 schema。去重、综述均不得改变原文；先确定事实覆盖关系，再用保留条目生成综述。
+单篇 entry 仍遵守原 schema。完全同文已在本地前置分组；先完成单篇分类/标签和事实提取，按阅读资格落实隐藏/虚化，再判断语义覆盖关系，最后仅用保留且允许参与的条目生成综述。去重、综述均不得改变原文。
 ${pairs.length ? comparisonRules : "没有去重候选，dedupe.results 返回空数组。"}
 去重候选（entries 的完整正文通过 itemId 查上面的证据目录或下面的只读参考）：
 ${JSON.stringify(

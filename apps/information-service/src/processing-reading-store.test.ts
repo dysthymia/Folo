@@ -881,6 +881,23 @@ describe("原生收藏与深链投影", () => {
       item: { id: "context" },
     })
   })
+
+  it("未处理深链只读取目标，缺失条目不触发全库角色或发布查询", () => {
+    const store = fixture()
+    publishRelease(store)
+    store.saveEntry(entry("pending", "2026-01-01T00:00:00.000Z"))
+    store.saveEntry(entry("unrelated", "2026-01-02T00:00:00.000Z"))
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const published = vi.spyOn(store.processingState, "published")
+    const roles = vi.spyOn(store.reading, "roles")
+    expect(store.reading.generatedEntryState("pending").status).toBe("pending")
+    expect(store.reading.generatedEntryState("unknown").status).toBe("unprocessed")
+    // 正文读取必须限定序号，不能在无展示结果时解析无关历史材料。
+    expect(inputs.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+    expect(published).toHaveBeenCalledTimes(1)
+    expect(published).toHaveBeenCalledWith([1])
+    expect(roles).not.toHaveBeenCalled()
+  })
 })
 
 describe("时间线角色投影", () => {
@@ -898,6 +915,7 @@ describe("时间线角色投影", () => {
     })
     publishDecision(store, entry("never", "2026-01-04T00:00:00.000Z"), { standalone: "never" })
     store.saveEntry(entry("pending", "2026-01-05T00:00:00.000Z"))
+    const inputs = vi.spyOn(store.automation, "inputs")
     expect(pinned.seq).toBeGreaterThan(hidden.seq)
 
     expect(rolesOf(store)).toEqual([
@@ -922,6 +940,11 @@ describe("时间线角色投影", () => {
         materialCount: 1,
       },
     ])
+    // 全局角色只加载已发布项与有效关系的参考，不再读取所有未处理正文。
+    expect(inputs.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+    expect(inputs.mock.results.flatMap((result) => result.value ?? [])).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ itemId: "pending" })]),
+    )
   })
 
   it("恢复覆盖让隐藏条目回到时间线并标注为已恢复，手动隐藏无需重新处理", () => {

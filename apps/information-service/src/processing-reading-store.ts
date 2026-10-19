@@ -29,6 +29,7 @@ import type { ProcessingStateStore } from "./processing-state"
 import { dedupeContentEvidence, SEMANTIC_DUPLICATE_CONFIDENCE_THRESHOLD } from "./semantic-dedupe"
 import { sourceText } from "./service"
 import type { Store } from "./store"
+import { completeStoryMaterial } from "./story-material"
 import type {
   Story,
   StoryFactKind,
@@ -428,17 +429,21 @@ export class ProcessingReadingStore {
 
   generatedEntryState(entryId: string) {
     this.requireOwner()
+    // 深链先按原文身份缩小范围，不能为了打开一篇文章解析整库正文。
+    const seqs = this.db
+      .prepare("SELECT seq FROM processing_inputs WHERE current=1 AND item_id=? ORDER BY seq DESC")
+      .all(entryId)
+      .map((row) => Number(row.seq))
     const inputs = this.automation
-      .inputs()
-      .filter(
-        (input) =>
-          input.current && input.itemId === entryId && this.sourceAvailable(input.sourceKey),
-      )
+      .inputs(seqs)
+      .filter((input) => this.sourceAvailable(input.sourceKey))
     const input = inputs.sort((left, right) => right.seq - left.seq)[0]
-    const published = input
-      ? this.processingState.published().find((item) => item.input.seq === input.seq)
-      : null
-    const role = this.roles().find((item) => item.itemId === entryId)
+    const published = input ? this.processingState.published([input.seq])[0] : null
+    // 未发布或待补材料不可能产生展示角色，无需触发全局角色重建。
+    const role =
+      published && published.decision.status !== "needs_context"
+        ? this.roles().find((item) => item.itemId === entryId)
+        : undefined
     const status = !input
       ? "unprocessed"
       : published?.decision.status === "needs_context"
@@ -1378,15 +1383,30 @@ export class ProcessingReadingStore {
   private buildRoles(scopedInputs?: ProcessingInput[]): ProcessingEntryRole[] {
     if (!this.ownerId()) return []
 
-    const inputs = scopedInputs ?? this.automation.inputs()
     const inputSeqs = scopedInputs?.map((input) => input.seq)
+    const publishedBySeq = new Map(
+      this.processingState.published(inputSeqs).map((value) => [value.input.seq, value]),
+    )
+    // 角色只依赖已发布条目及已保存去重关系的保留方；跳过无关的待处理和已读正文。
+    const referenceSeqs = scopedInputs
+      ? []
+      : this.db
+          .prepare(
+            "SELECT DISTINCT keep_input_seq AS seq FROM processing_dedupe_decisions WHERE duplicate=1 AND keep_input_seq IS NOT NULL",
+          )
+          .all()
+          .map((row) => Number(row.seq))
+          .filter((seq) => !publishedBySeq.has(seq))
+    const inputs =
+      scopedInputs ??
+      [
+        ...[...publishedBySeq.values()].map(({ input }) => input),
+        ...this.automation.inputs(referenceSeqs),
+      ].sort((left, right) => left.seq - right.seq)
     const inputBySeq = new Map(inputs.map((input) => [input.seq, input]))
     const inputByItem = new Map(inputs.map((input) => [input.itemId, input]))
     const sourceTitles = new Map(
       (this.contextStore?.sources() ?? []).map((source) => [source.key, source.title]),
-    )
-    const publishedBySeq = new Map(
-      this.processingState.published(inputSeqs).map((value) => [value.input.seq, value]),
     )
     const overrides = new Map(
       this.processingState.overrides(inputSeqs).map((override) => [override.inputSeq, override]),
@@ -2022,6 +2042,25 @@ function storyRepresentsWholeEntry(
   const member = revision?.members.find(
     (item) => item.inputSeq === published.input.seq && item.decisionId === published.decisionId,
   )
+  // 已校验的主题全篇覆盖允许分析/教程只显示一篇综述；缺事实或未读媒体仍保留原文。
+  if (
+    member?.wholeEntryCoverage &&
+    completeStoryMaterial({ body: published.input.body, decision: published.decision })
+  ) {
+    const covered = new Set(
+      member.wholeEntryCoverage
+        .filter(
+          (coverage) =>
+            coverage.storyFactIds.length > 0 &&
+            coverage.storyFactIds.every((id) => revision!.facts.some((fact) => fact.id === id)),
+        )
+        .map((coverage) => coverage.factIndex),
+    )
+    return (
+      published.decision.facts.length > 0 &&
+      published.decision.facts.every((_, index) => covered.has(index))
+    )
+  }
   if (
     member?.announcementCoverage &&
     member.eventMentionIndex !== undefined &&

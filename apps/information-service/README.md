@@ -120,6 +120,8 @@ ProxyPassReverse /information http://host.docker.internal:2240/information
 
 ## macOS 常驻部署
 
+处理顺序固定为：完全同文去重 → 分类/标签与事实提取 → 按标签隐藏/虚化 → 语义去重 → 综述。完全同文阶段沿用已启用去重规则的范围，只用完整一致的材料分组，并复用代表条目的模型分析；每条原文仍独立匹配阅读策略，所有来源和正文保留。规则列表最前面显示这一固定步骤，后续规则按上述阶段排列；规则优先级用于同字段冲突裁决，不能替代执行依赖。
+
 安装器将后台、主站和信息页作为完整发布复制到 `~/Library/Application Support/FoloLocal/information-releases/<发布号-文件摘要>`，`information-runtime` 原子指向当前版本，`information-runtime-previous` 指向上一版。网页/API 由 `is.folo.local.information` 管理，自动化执行器由 `is.folo.local.information.worker` 管理；二者通过同一个 WAL 数据库交换任务和结果。更新只重启网页进程；仅界面有变化时，执行器无需重启。后台代码有变化时，执行器保持原 PID 和完整旧版代码，完成当前扫描作业或规则批次后自行退出，再由 LaunchAgent 启动新版。连续发布也不会删除仍在使用的旧目录；历史目录需在确认不再使用后人工清理。首次从旧单进程迁移需等待任务空闲；手工选材研究仍在网页进程执行，其运行中暂不重启网页。数据库仍在原数据目录，后台不依赖外置工作区挂载，更新统一使用 `deploy:local`。
 
 `build:local` 在构建前后计算源码内容摘要，包含未提交源码、新文件和本机 Vite 环境文件；三份构建全部成功后才写入 `dist/local-release.json`。安装器要求清单、当前源码和每个产物文件一致，并校验复制后的文件。缺失前端、源码变化、单独重建或直接修改 bundle 都会在停服务前被拒绝；`--check` 只核对发布，不操作服务。各个原有 `build` 命令仍可用于开发，但不能独立形成可安装的发布。构建与安装共用文件锁，避免并发发布混用目录。

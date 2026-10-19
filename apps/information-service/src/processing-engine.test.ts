@@ -477,6 +477,68 @@ describe("单篇处理 engine", () => {
     }
   })
 
+  it.each([2, 3])("%i 篇材料中的跨链接同文只分析代表，并保留独立决定", async (count) => {
+    const fixture = batchStoreFixture(count)
+    const inputs = fixture.store.automation.inputs()
+    inputs[1]!.body.title = inputs[0]!.body.title
+    inputs[1]!.body.content = inputs[0]!.body.content
+    // 链接不同不再形成第二次分析；模型、提示与正文仍由缓存指纹逐项核对。
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      historySince: "2026-09-01T00:00:00.000Z",
+      exactDuplicates: new Map([[inputs[1]!.seq, inputs[0]!]]),
+      signal: new AbortController().signal,
+      execute: async <T>(request: CodexJsonOptions<T>) => {
+        // 两篇同文只剩一个代表，覆盖单篇路径；加入独立材料时同时覆盖批处理路径。
+        if (count === 2) {
+          const entryId = /必须返回 entryId=(entry-\d+)/u.exec(request.prompt)![1]!
+          expect(entryId).toBe("entry-1")
+          const catalog = JSON.parse(request.prompt.split("编号原文证据目录：\n")[1]!) as Array<{
+            evidenceId: string
+          }>
+          const output = batchSelection(entryId, catalog[0]!.evidenceId)
+          expect(request.validate(output)).toBe(true)
+          return {
+            result: output as T,
+            model: request.model,
+            durationMs: 2,
+            usage: null,
+            toolCalls: 0,
+          }
+        }
+        const materials = JSON.parse(
+          request.prompt.split("批内条目与独立证据目录：\n")[1]!,
+        ) as Array<{ entryId: string; evidenceCatalog: Array<{ evidenceId: string }> }>
+        expect(materials.map((item) => item.entryId)).toEqual(["entry-1", "entry-3"])
+        const output = {
+          items: materials.map((item) =>
+            batchSelection(item.entryId, item.evidenceCatalog[0]!.evidenceId),
+          ),
+        }
+        expect(request.validate(output)).toBe(true)
+        return {
+          result: output as T,
+          model: request.model,
+          durationMs: 2,
+          usage: null,
+          toolCalls: 0,
+        }
+      },
+    })
+    expect(result).toMatchObject({
+      completed: count,
+      failures: [],
+      metrics: { modelCalls: 1, cacheHits: 1 },
+    })
+    expect(fixture.completed.get("entry-2")).toMatchObject({
+      reused: true,
+      semantic: { entryId: "entry-2" },
+    })
+  })
+
   it("同一原帖的不同条目 ID 不重复进模型，后续等效上下文复用首批缓存", async () => {
     const fixture = batchStoreFixture(3)
     const inputs = fixture.store.automation.inputs()
@@ -1183,6 +1245,41 @@ describe("单篇处理 engine", () => {
     expect(result.completed).toBe(0)
     expect(result.pending).toBe(read === null ? 1 : 0)
     expect(result.failures).toEqual([])
+  })
+
+  // 用户明确选中的历史材料可以补做；后台默认仍跳过已读，原读态永不写回未读。
+  it("显式选择已读条目补做单篇，原始读态保持已读", async () => {
+    const fixture = storeFixture("automatic", [], true)
+    fixture.setMaterial("complete")
+    const prompts: string[] = []
+    const result = await runEntryProcessing({
+      store: fixture.store,
+      aiConfig: aiConfig as never,
+      runtimeDir: "/tmp",
+      sourceKeys: ["feed/1"],
+      inputSeqs: [1],
+      selectedReadInputSeqs: [1],
+      historySince: "2026-09-01T00:00:00.000Z",
+      signal: new AbortController().signal,
+      execute: executeWith(
+        {
+          entryId: "entry-1",
+          event: null,
+          title: "标题",
+          summary: "摘要",
+          disposition: "keep",
+          reason: "原因",
+          aggregation: false,
+          rewrite: false,
+          labels: [],
+          facts: [],
+        },
+        prompts,
+      ),
+    })
+    expect(result).toMatchObject({ completed: 1, pending: 0, failures: [] })
+    expect(prompts).toHaveLength(1)
+    expect(fixture.store.automation.inputs()[0]!.body.read).toBe(true)
   })
 
   it("已读条目不再请求模型，并在收敛时落为跳过态", async () => {

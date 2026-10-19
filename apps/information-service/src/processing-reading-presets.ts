@@ -83,6 +83,10 @@ export function convergedReadingRules(previous: RuleSet): RuleSet {
     executionLocation: "processing_service",
   })
   const additions: AutomationRule[] = [
+    // 列表按处理依赖排列；同字段冲突仍由规则优先级裁决，阶段依赖由后台保证。
+    make(classify.id, "内容池：新内容语义分类", inPool(), [
+      { type: "ai_classify", tagIds: [...semanticTagIds] },
+    ]),
     // 隐藏只接受高置信纯噪声，同时要求贡献标签明确否定；缺标签不会等同于无贡献。
     make(
       "reading-confirmed-noise-v1",
@@ -143,9 +147,6 @@ export function convergedReadingRules(previous: RuleSet): RuleSet {
     // 综述不预先赋值 auto/allow，避免抢占噪声规则的逐字段决定。
     make(dedupe.id, "内容池：语义去重", inPool(), [{ type: "ai_dedupe", scope: inPool() }]),
     make(aggregate.id, "内容池：同事件综述", inPool(), [{ ...aggregation, scope: inPool() }]),
-    make(classify.id, "内容池：新内容语义分类", inPool(), [
-      { type: "ai_classify", tagIds: [...semanticTagIds] },
-    ]),
   ]
   const migrated = new Set([
     dedupe.id,

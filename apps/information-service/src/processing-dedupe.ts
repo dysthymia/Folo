@@ -770,12 +770,18 @@ export type SemanticDedupeStore = {
 
 export type SemanticDedupePreparationOptions = {
   store: SemanticDedupeStore
+  /** 显式历史修复限定全部比较材料，禁止把未选择的历史条目折叠到所选条目。 */
+  inputSeqs?: readonly number[]
   targets?: readonly { sourceKey: string; itemId: string }[]
   sourceKeys?: readonly string[]
   /** 同一任务的固定截止时间，已读参考仅接受此前 24 小时发布的缓存材料。 */
   cutoffAt?: string
   /** 单篇统一批次可在发布决定前用已冻结且完整的输入准备相同候选。 */
   pendingInputs?: readonly ProcessingInput[]
+  /** 前置同文阶段只分组复用分析；待定标签策略不能阻塞分组，也不授权提前隐藏。 */
+  exactOnly?: boolean
+  /** 用户明确选择的历史修复只复用这些已保存条目，保留原有读态；后台默认不隐藏已读。 */
+  cachedReadInputSeqs?: readonly number[]
   // 显式启用复核后只恢复成功但低置信的 Decisions 对；生成复核结果不再次恢复。
   recheckUncertainDecisions?: boolean
 }
@@ -826,6 +832,8 @@ export function prepareSemanticDedupe(
   const sources = new Map(options.store.sources().map((source) => [source.key, source]))
   const represented = options.store.reading.representedInputSeqs()
   const pending = new Set(options.pendingInputs?.map((input) => input.seq))
+  const selectedInputs = options.inputSeqs ? new Set(options.inputSeqs) : null
+  const cachedReadInputs = new Set(options.cachedReadInputSeqs ?? [])
   const scopedSources = options.sourceKeys === undefined ? null : new Set(options.sourceKeys)
   const cutoff = Date.parse(options.cutoffAt ?? new Date().toISOString())
   const currentEntry = options.store.entry?.bind(options.store)
@@ -840,13 +848,14 @@ export function prepareSemanticDedupe(
   return actions.map((action) => {
     const participants: DedupeParticipant[] = []
     for (const input of options.store.automation.inputs()) {
+      if (selectedInputs && !selectedInputs.has(input.seq)) continue
       const source = sources.get(input.sourceKey)
       if (!input.current || !source || represented.has(input.seq)) continue
       if (scopedSources && !scopedSources.has(input.sourceKey)) continue
       if ((overrides.get(input.seq) ?? "automatic") !== "automatic" || !input.body.title) continue
       const read = inputReadState(input, currentEntry)
       if (read === null) continue
-      const readReference = read === true
+      const readReference = read === true && !cachedReadInputs.has(input.seq)
       const at = Date.parse(input.body.publishedAt)
       if (
         readReference &&
@@ -880,7 +889,7 @@ export function prepareSemanticDedupe(
       )
       const instructions = compileInstructions(latest, matchContext)
       if (
-        instructions.blocksFinalPresentation ||
+        (!options.exactOnly && instructions.blocksFinalPresentation) ||
         (instructions.policy.standalone && instructions.policy.standalone !== "auto")
       )
         continue
@@ -985,15 +994,17 @@ export function prepareSemanticDedupe(
     // 共享分析前排除本地严格同文，避免语义预筛先枚举注定被折叠的材料。
     const exact = exactDuplicateDecisions(uniqueParticipants)
     const exactHidden = new Set(exact.map((item) => item.hide.itemId))
-    const candidates = dedupeCandidates(
-      uniqueParticipants.filter((item) => !exactHidden.has(item.input.itemId)),
-      targetItemIds,
-      options.store.dedupe.candidateExcludedPairKeys(
-        fingerprints,
-        options.recheckUncertainDecisions,
-      ),
-      options.store.dedupe.settledItemIds(fingerprints, recallWatermark),
-    )
+    const candidates = options.exactOnly
+      ? []
+      : dedupeCandidates(
+          uniqueParticipants.filter((item) => !exactHidden.has(item.input.itemId)),
+          targetItemIds,
+          options.store.dedupe.candidateExcludedPairKeys(
+            fingerprints,
+            options.recheckUncertainDecisions,
+          ),
+          options.store.dedupe.settledItemIds(fingerprints, recallWatermark),
+        )
     return {
       action,
       candidates,

@@ -192,6 +192,8 @@
   "automation.editor.error_migration": "The new version is active, but the old local rule changed or could not be saved. Its copy is retained; review and save again.",
   "automation.editor.error_request": "Could not save or load. Your edits are retained. Check the local service and retry.",
   "automation.editor.error_version": "The local app was updated and this page is out of date. Your edits are retained. Copy them before refreshing the page.",
+  "automation.editor.exact_dedupe": "Exact content deduplication",
+  "automation.editor.exact_dedupe_hint": "Fixed first step · Follows deduplication rules, without AI calls",
   "automation.editor.existing_local": "Existing local rule",
   "automation.editor.export": "Export and backup",
   "automation.editor.future_hint": "Standard actions apply on save. AI changes apply to future content; existing results are not recalculated automatically.",

@@ -8,6 +8,7 @@ import type { AIChatExecution, AIConfigStore } from "./ai-config"
 import { AIConfigError, aiEndpointFingerprint } from "./ai-config"
 import type { ReasoningEffort } from "./ai-reasoning"
 import { aiReasoningEffort, reasoningFingerprint } from "./ai-reasoning"
+import type { ProcessingInput } from "./automation-store"
 import type { CodexJsonOptions, CodexUsage } from "./codex"
 import { CodexRunError, runCodexJson } from "./codex"
 import { contentIdentity } from "./content-identity"
@@ -129,6 +130,10 @@ export type EntryProcessingOptions = {
   sourceKeys: string[]
   // 水合小批只处理本批当前输入，防止反复扫描或调用其他批次。
   inputSeqs?: readonly number[]
+  /** 前置同文分组绑定完整正文版本；只复用客观分析，阅读策略仍按每条原文重算。 */
+  exactDuplicates?: ReadonlyMap<number, ProcessingInput>
+  /** 仅显式选择的已读条目可补做单篇分析；不写回未读，也不扩展其它历史输入。 */
+  selectedReadInputSeqs?: readonly number[]
   // 主动分类必须遵守调度启用水位；显式列表或单篇调用继续沿用所选规则。
   allowClassification?: boolean
   classificationSince?: string
@@ -238,12 +243,17 @@ export async function runEntryProcessing(
     .inputs(options.inputSeqs)
     .filter((candidate) => !selectedInputSeqs || selectedInputSeqs.has(candidate.seq))
   // 批次开始时读取最新持久化 read/collected 快照；循环中不再重新读取，避免状态变化自触发。
+  const selectedReadInputs = new Set(options.selectedReadInputSeqs ?? [])
   const entrySnapshots = new Map(
     candidates.map((candidate) => [
       candidate.seq,
       {
         ...candidate.body,
-        read: inputReadState(candidate, options.store.entry?.bind(options.store)),
+        read:
+          selectedReadInputs.has(candidate.seq) &&
+          inputReadState(candidate, options.store.entry?.bind(options.store)) === true
+            ? false
+            : inputReadState(candidate, options.store.entry?.bind(options.store)),
       },
     ]),
   )
@@ -386,6 +396,7 @@ export async function runEntryProcessing(
       const instructions = compileInstructions(effectiveConfig, target.snapshot.context)
       const fingerprint = entryFingerprint({
         input: target.input,
+        analysisIdentity: exactAnalysisIdentity(options, target.input),
         text,
         target: target.snapshot,
         instructions,
@@ -637,6 +648,8 @@ async function prepareNormalEntryBatches(
   for (const candidate of candidates) {
     if (
       options.signal.aborted ||
+      // 同文代表先进入模型批；重复条目留给后面的单篇路径读取刚生成的缓存。
+      options.exactDuplicates?.has(candidate.seq) ||
       !candidate.current ||
       candidate.status !== "pending" ||
       !sourceKeys.has(candidate.sourceKey) ||
@@ -709,6 +722,7 @@ async function prepareNormalEntryBatches(
       const instructions = compileInstructions(effectiveConfig, target.snapshot.context)
       const fingerprint = entryFingerprint({
         input: target.input,
+        analysisIdentity: exactAnalysisIdentity(options, target.input),
         text,
         target: target.snapshot,
         instructions,
@@ -1259,12 +1273,25 @@ ${entryDisplayRequirements(instructions.display)}
   )}`
 }
 
+// 代表正文换代即失去复用资格；首次版本分配改变 generation，但不改变客观材料。
+function exactAnalysisIdentity(options: EntryProcessingOptions, input: ProcessingInput) {
+  const representative = options.exactDuplicates?.get(input.seq)
+  if (!representative) return undefined
+  const current = options.store.automation.current(representative.sourceKey, representative.itemId)
+  return current?.current &&
+    current.seq === representative.seq &&
+    current.contentVersion === representative.contentVersion
+    ? contentIdentity(current.body)
+    : undefined
+}
+
 function entryFingerprint(input: {
   input: ReturnType<ProcessingEngineStore["automation"]["inputs"]>[number]
   text: string
   target: TargetSnapshot
   instructions: ReturnType<typeof compileInstructions>
   historySince: string
+  analysisIdentity?: string
   decisionsOnly?: boolean
 }) {
   if (input.instructions.semanticTagIds.length) {
@@ -1279,7 +1306,7 @@ function entryFingerprint(input: {
       provider: input.target.provider,
       endpointFingerprint: input.target.endpointFingerprint,
       reasoningEffort: reasoningFingerprint(input.target.reasoningEffort),
-      identity: contentIdentity(input.input.body),
+      identity: input.analysisIdentity ?? contentIdentity(input.input.body),
       text: input.text,
       sourceRole: input.target.sourceRole,
       historySince: input.historySince,
@@ -1315,7 +1342,10 @@ function entryFingerprint(input: {
     provider: input.target.provider,
     endpointFingerprint: input.target.endpointFingerprint,
     reasoningEffort: reasoningFingerprint(input.target.reasoningEffort),
-    input: { identity: contentIdentity(input.input.body), text: input.text },
+    input: {
+      identity: input.analysisIdentity ?? contentIdentity(input.input.body),
+      text: input.text,
+    },
     // 原文身份与实际模型指令一致才复用；分类等审计上下文保留在各自决定中。
     sourceRole: input.target.sourceRole,
     historySince: input.historySince,

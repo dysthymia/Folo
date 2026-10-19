@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 
 import type { RuleSet } from "@follow/information-core"
-import { matchConditions } from "@follow/information-core"
+import { matchConditions, ruleInputFor } from "@follow/information-core"
 import { join } from "pathe"
 import { z } from "zod"
 
@@ -25,6 +25,7 @@ import type { EvidenceFragment } from "./processing-evidence"
 import type { ProcessingReadStateLookup } from "./processing-read-state"
 import { inputReadState } from "./processing-read-state"
 import { independentStoryContributors, storyCandidatesWithDelta } from "./story-delta"
+import { completeStoryMaterial } from "./story-material"
 import type {
   ActiveStory,
   StoryFactKind,
@@ -104,6 +105,7 @@ type Candidate = PublishedDecision & {
   eventMentionIndex?: number
   selectedEvent?: EventIdentity
   announcementFacts?: PublishedDecision["decision"]["facts"]
+  wholeEntryFacts?: PublishedDecision["decision"]["facts"]
 }
 type PendingReason =
   | "aggregation_denied"
@@ -546,8 +548,9 @@ function candidatesForAction(
       pending.push({ ruleId, inputSeqs: [published.input.seq], reason })
       continue
     }
-    const whenState = matchConditions(when, published.decision.context).state
-    const scopeState = matchConditions(action.scope, published.decision.context).state
+    const context = ruleInputFor(ruleId, published.decision.context)
+    const whenState = matchConditions(when, context).state
+    const scopeState = matchConditions(action.scope, context).state
     const scope =
       whenState === "no_match" || scopeState === "no_match"
         ? "no_match"
@@ -575,7 +578,14 @@ function candidatesForAction(
       grouped.set(identity, [...(grouped.get(identity) ?? []), candidate])
     }
     if (action.mode !== "same_event") {
-      add({ ...published, text })
+      // 主题规则只有完整材料可申请全篇覆盖；部分材料继续只贡献引用，保留原文占位。
+      add({
+        ...published,
+        text,
+        ...(completeStoryMaterial({ body: published.input.body, decision: published.decision })
+          ? { wholeEntryFacts: published.decision.facts }
+          : {}),
+      })
       continue
     }
     if (!mentions.length) {
@@ -890,6 +900,10 @@ function draftFromGroup(
       ...(previous?.decisionId === candidate.decisionId && previous.announcementCoverage
         ? { announcementCoverage: previous.announcementCoverage }
         : {}),
+      // 同一不可变决定的主题覆盖随有效旧事实保留，后续删事实会统一撤销许可证。
+      ...(previous?.decisionId === candidate.decisionId && previous.wholeEntryCoverage
+        ? { wholeEntryCoverage: previous.wholeEntryCoverage }
+        : {}),
     })
   }
   const memberSeqs = [...memberByInput.keys()].sort((left, right) => left - right)
@@ -1064,6 +1078,16 @@ function applyFactCoverage(
   const factById = new Map(facts.map((fact) => [fact.id, fact]))
   // 续写删除旧事实时同时撤销覆盖许可证，原文自动恢复占位。
   for (const [seq, member] of members) {
+    if (
+      member.wholeEntryCoverage &&
+      member.wholeEntryCoverage.some((coverage) =>
+        coverage.storyFactIds.some((id) => !factById.has(id)),
+      )
+    ) {
+      // 删除任何被覆盖事实就撤销全篇许可证，不能让已删内容仍压住原文。
+      const { wholeEntryCoverage: _coverage, ...remaining } = member
+      members.set(seq, remaining)
+    }
     if (member.announcementCoverage)
       members.set(seq, {
         ...member,
@@ -1130,8 +1154,9 @@ function applyFactCoverage(
         : undefined
     })
     if (mapped.some((id) => !id)) throw new Error("invalid_fact_coverage")
-    if (!candidate.announcementFacts) continue
-    const originalIndex = candidate.announcementFacts.indexOf(sourceFact)
+    const originalFacts = candidate.announcementFacts ?? candidate.wholeEntryFacts
+    if (!originalFacts) continue
+    const originalIndex = originalFacts.indexOf(sourceFact)
     const list = coverageBySeq.get(coverage.inputSeq) ?? []
     if (originalIndex < 0 || list.some((item) => item.factIndex === originalIndex))
       throw new Error("invalid_fact_coverage")
@@ -1141,6 +1166,15 @@ function applyFactCoverage(
   for (const [seq, announcementCoverage] of coverageBySeq) {
     const member = members.get(seq)
     if (!member) throw new Error("invalid_fact_coverage")
+    const wholeEntryFacts = candidates.find(
+      (candidate) => candidate.input.seq === seq,
+    )?.wholeEntryFacts
+    if (wholeEntryFacts) {
+      // 部分主题摘要仍可发布，但只有所有许可事实逐一落到实际引用才替代原文。
+      if (wholeEntryFacts.length > 0 && announcementCoverage.length === wholeEntryFacts.length)
+        members.set(seq, { ...member, wholeEntryCoverage: announcementCoverage })
+      continue
+    }
     const updatedIndexes = new Set(announcementCoverage.map((item) => item.factIndex))
     members.set(seq, {
       ...member,

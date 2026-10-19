@@ -38,7 +38,7 @@ function identity(
     anchor: null,
   }
 }
-function fixture() {
+function fixture(mode: "same_event" | "topic" = "same_event", missingImages = false) {
   const store = new Store(":memory:")
   stores.push(store)
   store.bindOwner("owner")
@@ -62,7 +62,7 @@ function fixture() {
           actions: [
             {
               type: "ai_aggregate",
-              mode: "same_event",
+              mode,
               scope: { all: true },
               createPrompt: "保留所有独有事实",
               updatePrompt: "保留仍有效事实",
@@ -98,6 +98,7 @@ function fixture() {
       url: `https://example.test/arena-${index}`,
       read: false,
       publishedAt: "2026-10-09T00:00:00Z",
+      ...(missingImages && index === 0 ? { imageCount: 1 } : {}),
     }
     store.saveEntry(body)
     const input = store.automation.assign(store.automation.inputs().at(-1)!.seq)
@@ -145,9 +146,13 @@ function fixture() {
         rewrite: true,
         labels: [],
         facts: [],
-        event: primary,
+        event: mode === "topic" ? { ...primary, kind: "analysis" } : primary,
         eventMentions: [
-          { identity: primary, role: "reports", isPrimary: true },
+          {
+            identity: mode === "topic" ? { ...primary, kind: "analysis" } : primary,
+            role: mode === "topic" ? "analysis_of" : "reports",
+            isPrimary: true,
+          },
           { identity: secondary, role: "reports", isPrimary: false },
         ],
       },
@@ -255,6 +260,57 @@ it("正常后台不对已读材料重新付费，显式修复才可复用这些�
   const f = fixture()
   const result = await runStoryAggregation(f.options)
   expect(result.created).toHaveLength(0)
+})
+
+it("主题综述完整覆盖分析全文时只显示综述，读态不变且原文可恢复", async () => {
+  const f = fixture("topic")
+  const result = await runStoryAggregation({
+    ...f.options,
+    cachedReadInputSeqs: f.decisions.map(({ input }) => input.seq),
+  })
+  expect(result.created).toHaveLength(1)
+  const revision = f.store.stories.currentSnapshot(result.created[0]!.storyId)!
+  expect(revision.eventIdentity).toBeUndefined()
+  expect(revision.members.every((member) => member.wholeEntryCoverage?.length === 3)).toBe(true)
+  expect(
+    f.store.reading
+      .generatedPage(generatedFeedQuerySchema.parse({ mode: "smart" }))
+      .items.map((item) => item.kind),
+  ).toEqual(["story"])
+  expect(
+    f.decisions.map(({ input }) => f.store.entry(input.sourceKey, input.itemId)?.read),
+  ).toEqual([true, true, false])
+  const invalid = structuredClone(revision)
+  invalid.members[0]!.wholeEntryCoverage!.pop()
+  expect(() => f.store.stories.appendRevision(revision.storyId, 1, invalid)).toThrow(
+    "invalid_reference",
+  )
+  const swapped = structuredClone(revision)
+  swapped.members[0]!.wholeEntryCoverage![0]!.storyFactIds = [revision.facts.at(-1)!.id]
+  expect(() => f.store.stories.appendRevision(revision.storyId, 1, swapped)).toThrow(
+    "invalid_reference",
+  )
+  f.store.processingState.setOverride(f.decisions[0]!.input.seq, "restore", 0)
+  expect(
+    f.store.reading.generatedPage(generatedFeedQuerySchema.parse({ mode: "smart" })).items,
+  ).toContainEqual(expect.objectContaining({ kind: "entry", id: "arena-0" }))
+})
+
+it.each(["partial", "media"])("主题综述在 %s 时保留未完全覆盖的分析原文", async (reason) => {
+  const f = fixture("topic", reason === "media")
+  if (reason === "partial")
+    f.group.factCoverage = f.group.factCoverage!.filter(
+      (item) => item.inputSeq !== f.decisions[0]!.input.seq || !item.evidenceId.endsWith("-1"),
+    )
+  const result = await runStoryAggregation({
+    ...f.options,
+    cachedReadInputSeqs: f.decisions.map(({ input }) => input.seq),
+  })
+  expect(result.created).toHaveLength(1)
+  expect(f.store.reading.representedInputSeqs().has(f.decisions[0]!.input.seq)).toBe(false)
+  expect(
+    f.store.reading.generatedPage(generatedFeedQuerySchema.parse({ mode: "smart" })).items,
+  ).toContainEqual(expect.objectContaining({ kind: "entry", id: "arena-0" }))
 })
 
 it("覆盖不完整时保留原文；伪造覆盖及来源主张提升为事实均被持久化边界拒绝", async () => {

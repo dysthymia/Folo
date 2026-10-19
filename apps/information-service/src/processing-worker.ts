@@ -8,6 +8,7 @@ import { processingRuleInput } from "./processing-context"
 import {
   activeDedupeActions,
   MAX_SEMANTIC_DEDUPE_BATCHES,
+  prepareSemanticDedupe,
   runSemanticDedupe,
 } from "./processing-dedupe"
 import type { EntryProcessingResult } from "./processing-engine"
@@ -491,6 +492,19 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
         material.complete += hydrated.complete
         material.missing += hydrated.missing
         material.failed += hydrated.failed
+        const pendingInputs = store.automation.inputs(hydrated.inputSeqs)
+        // 完整同文先本地分组；分类只分析代表，重复条目复用结果后仍逐条匹配自己的标签策略。
+        reportPhase("exact")
+        const exactDuplicates = new Map(
+          prepareSemanticDedupe({
+            store,
+            exactOnly: true,
+            pendingInputs,
+            targets: pendingInputs,
+            sourceKeys: trigger.sourceKeys,
+            cutoffAt: trigger.cutoffAt,
+          }).flatMap((plan) => plan.exact.map(({ hide, keep }) => [hide.seq, keep] as const)),
+        )
         reportPhase("entries")
         const result = await (options.processEntries ?? runEntryProcessing)({
           store,
@@ -498,6 +512,7 @@ export async function runProcessingWorker(options: ProcessingWorkerOptions, sign
           runtimeDir: options.runtimeDir,
           sourceKeys: trigger.sourceKeys,
           inputSeqs: hydrated.inputSeqs,
+          exactDuplicates,
           allowClassification:
             trigger.kind === "list_loaded" ||
             store.schedule.snapshot().config?.classification?.mode === "new_content",

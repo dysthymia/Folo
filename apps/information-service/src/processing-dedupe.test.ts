@@ -15,6 +15,7 @@ import { parseDecisionsResponse } from "./openrouter-decisions"
 import type { ProcessingDecision } from "./processing-decision"
 import {
   activeDedupeActions,
+  dedupeConfigFingerprint,
   prepareSemanticDedupe,
   ProcessingDedupeStore,
   runSemanticDedupe,
@@ -770,6 +771,62 @@ describe("事件召回与扫描水位", () => {
 })
 
 describe("语义去重的服务端执行与角色落地", () => {
+  it("分类前只确认完整同文，标签待定不阻塞分组且不提前隐藏", () => {
+    const { store } = fixture()
+    const draft = store.automation.draft()
+    store.automation.saveDraft(
+      {
+        ...draft.config,
+        formatVersion: 5,
+        rules: [
+          dedupeRule({ all: true }),
+          {
+            ...dedupeRule({ all: true }),
+            id: "noise",
+            order: 1,
+            when: {
+              anyOf: [
+                {
+                  allOf: [
+                    {
+                      field: "entry_tag",
+                      operator: "contains_any",
+                      value: ["signal:pure_promotion"],
+                    },
+                  ],
+                },
+              ],
+            },
+            actions: [
+              { type: "reading_decision", visibility: "hide", aggregationEligibility: "deny" },
+            ],
+          },
+        ],
+      },
+      draft.revision,
+    )
+    store.automation.publish(draft.revision + 1, { mode: "future" }, randomUUID())
+    const body = "完整一致的事实与证据。".repeat(20)
+    for (const [id, time] of [
+      ["older", "2026-01-10T00:00:00Z"],
+      ["newer", "2026-01-10T06:00:00Z"],
+    ])
+      store.saveEntry(entry(id!, "同文报道", time!, body))
+    const pendingInputs = store.automation.inputs()
+    for (const input of pendingInputs) store.processingState.setMaterial(input, "complete")
+    expect(prepareSemanticDedupe({ store, pendingInputs })[0]?.participants).toHaveLength(0)
+    const plans = prepareSemanticDedupe({ store, pendingInputs, exactOnly: true })
+    expect(plans[0]?.exact).toEqual([
+      expect.objectContaining({
+        keep: expect.objectContaining({ itemId: "older" }),
+        hide: expect.objectContaining({ itemId: "newer" }),
+      }),
+    ])
+    expect(plans[0]?.candidates).toEqual([])
+    expect(store.dedupe.merges(fingerprintsOf(store))).toEqual([])
+    expect(store.automation.inputs().map((input) => input.status)).toEqual(["pending", "pending"])
+  })
+
   it("未证明完整覆盖时不写入隐藏关系，并保存否定判定防止重复付费", async () => {
     const { aiConfig, store } = fixture()
     publishRules(store, [dedupeRule({ all: true })])
@@ -2144,6 +2201,41 @@ describe("最近 24 小时已读参考", () => {
       await run(store, aiConfig, execute, { targets: [{ sourceKey: source.key, itemId: "read" }] }),
     ).toMatchObject({ candidates: 0 })
     expect(execute).not.toHaveBeenCalled()
+  })
+
+  it("显式选择的已读缓存可修复重复关系，保持读态且不处理未选择历史", async () => {
+    const { store, aiConfig } = fixture()
+    publishRules(store, [dedupeRule({ all: true })])
+    publishPair(store)
+    const inputs = store.automation.inputs()
+    for (const input of inputs) store.saveEntry({ ...input.body, read: true })
+    // 同题历史即使已经读过，也不能因显式修复两个目标而被连带隐藏。
+    publishDecision(store, {
+      ...entry("unselected", inputs[0]!.body.title, inputs[0]!.body.publishedAt),
+      read: true,
+    })
+    const execute = duplicateExecute()
+    expect(await run(store, aiConfig, execute)).toMatchObject({ candidates: 0 })
+    const result = await run(store, aiConfig, execute, {
+      inputSeqs: inputs.map((input) => input.seq),
+      cachedReadInputSeqs: inputs.map((input) => input.seq),
+      targets: inputs.map((input) => ({ sourceKey: input.sourceKey, itemId: input.itemId })),
+    })
+    expect(result.duplicates).toBe(1)
+    expect(inputs.map((input) => store.entry(input.sourceKey, input.itemId)?.read)).toEqual([
+      true,
+      true,
+    ])
+    expect(store.dedupe.merges(fingerprintsOf(store))).toHaveLength(1)
+  })
+
+  it("比较提示词升级继续识别正文和规则未变化的旧折叠指纹", () => {
+    const input = { ruleId: "dedupe", scope: { all: true }, when: { all: true } } as const
+    // 第 8 版已生效的关系保留资格；新模型缓存仍由提示词版本和实际证据独立隔离。
+    const previous = createHash("sha256")
+      .update(JSON.stringify({ version: 8, ...input }))
+      .digest("hex")
+    expect(dedupeConfigFingerprint(input)).toBe(previous)
   })
 
   it("准备中的未读与只读参考使用相同候选，既有扫描记录不阻断新参考", () => {
