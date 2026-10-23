@@ -39,6 +39,38 @@ function fixture(path = ":memory:") {
     store.automation.publish(0, { mode: "future" }, randomUUID())
   return store
 }
+it("标签和实体轮询的身份校验使用覆盖索引，不回读完整档案与决定", () => {
+  const store = fixture()
+  const prepare = DatabaseSync.prototype.prepare
+  const plans: string[] = []
+  // 检查实际业务查询的执行计划，防止优化器再次选择带大正文的唯一键回表路径。
+  const spy = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (
+    this: DatabaseSync,
+    sql,
+  ) {
+    if (sql.includes("JOIN entry_decisions decision INDEXED BY"))
+      plans.push(
+        prepare
+          .call(this, `EXPLAIN QUERY PLAN ${sql}`)
+          .all(...(sql.includes("entity_version=?") ? ["test-version"] : []))
+          .map((row) => String(row.detail))
+          .join(" "),
+      )
+    return prepare.call(this, sql)
+  })
+  try {
+    store.semantics.tagAssessmentsByInput()
+    store.semantics.presentEntitiesByInput()
+    expect(plans).toHaveLength(2)
+    for (const plan of plans) {
+      expect(plan).toContain("COVERING INDEX entry_decision_reader")
+      expect(plan).toContain("COVERING INDEX entry_semantic_identity")
+    }
+  } finally {
+    spy.mockRestore()
+  }
+})
+
 function assessment(
   state: TagAssessment["state"],
   extra: Partial<TagAssessment> = {},

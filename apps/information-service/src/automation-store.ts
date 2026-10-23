@@ -137,7 +137,7 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS processing_input_reader ON processing_inputs(current,status,seq,source_key,item_id,content_version,release_version,generation,decision_id);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
       -- 发布资格校验使用覆盖索引，避免列表轮询逐条回读含大正文的决定表页。
-      CREATE INDEX IF NOT EXISTS entry_decision_publication ON entry_decisions(id,generation,release_version);
+      CREATE INDEX IF NOT EXISTS entry_decision_reader ON entry_decisions(id,input_seq,generation,release_version);
       CREATE TABLE IF NOT EXISTS entry_decision_status (decision_id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS rule_activation_requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publication_requests (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, scope TEXT NOT NULL, release_version INTEGER NOT NULL);

@@ -82,6 +82,8 @@ export class ProcessingSemanticStore {
   ) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS entry_semantic_profiles(input_seq INTEGER PRIMARY KEY,content_version TEXT NOT NULL,decision_id TEXT NOT NULL,body TEXT NOT NULL);
+      -- 身份核验只读覆盖索引，避免标签与实体轮询回读完整语义档案。
+      CREATE INDEX IF NOT EXISTS entry_semantic_identity ON entry_semantic_profiles(input_seq,content_version,decision_id);
       CREATE TABLE IF NOT EXISTS entry_tag_index(input_seq INTEGER NOT NULL,tag_id TEXT NOT NULL,state TEXT NOT NULL,definition_version INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(input_seq,tag_id));
       CREATE INDEX IF NOT EXISTS entry_tag_lookup ON entry_tag_index(tag_id,state,definition_version,input_seq);
       CREATE TABLE IF NOT EXISTS entry_entity_index(input_seq INTEGER NOT NULL,entity_id TEXT NOT NULL,entity_version INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(input_seq,entity_id));
@@ -179,10 +181,10 @@ export class ProcessingSemanticStore {
     for (const row of this.db
       .prepare(
         `SELECT tags.input_seq,tags.tag_id,tags.definition_version FROM entry_tag_index tags
-         JOIN entry_semantic_profiles profile ON profile.input_seq=tags.input_seq
+         JOIN entry_semantic_profiles profile INDEXED BY entry_semantic_identity ON profile.input_seq=tags.input_seq
          JOIN processing_inputs current ON current.seq=tags.input_seq AND current.current=1
            AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id
-         JOIN entry_decisions decision ON decision.id=current.decision_id AND decision.input_seq=current.seq
+         JOIN entry_decisions decision INDEXED BY entry_decision_reader ON decision.id=current.decision_id AND decision.input_seq=current.seq
            AND decision.generation=current.generation AND decision.release_version=current.release_version
          WHERE current.status='succeeded' AND tags.state='present' ORDER BY tags.input_seq,tags.tag_id`,
       )
@@ -209,10 +211,10 @@ export class ProcessingSemanticStore {
       .prepare(
         `
       SELECT tags.input_seq,tags.body FROM entry_tag_index tags
-      JOIN entry_semantic_profiles profile ON profile.input_seq=tags.input_seq
+      JOIN entry_semantic_profiles profile INDEXED BY entry_semantic_identity ON profile.input_seq=tags.input_seq
       JOIN processing_inputs current ON current.seq=tags.input_seq AND current.current=1
         AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id
-      JOIN entry_decisions decision ON decision.id=current.decision_id AND decision.input_seq=current.seq
+      JOIN entry_decisions decision INDEXED BY entry_decision_reader ON decision.id=current.decision_id AND decision.input_seq=current.seq
         AND decision.generation=current.generation AND decision.release_version=current.release_version
       WHERE current.status='succeeded' ORDER BY tags.input_seq,tags.tag_id
     `,
@@ -241,10 +243,10 @@ export class ProcessingSemanticStore {
     const rows = this.db
       .prepare(
         `SELECT entities.input_seq,entities.body FROM entry_entity_index entities
-      JOIN entry_semantic_profiles profile ON profile.input_seq=entities.input_seq
+      JOIN entry_semantic_profiles profile INDEXED BY entry_semantic_identity ON profile.input_seq=entities.input_seq
       JOIN processing_inputs current ON current.seq=entities.input_seq AND current.current=1
         AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id
-      JOIN entry_decisions decision ON decision.id=current.decision_id AND decision.input_seq=current.seq
+      JOIN entry_decisions decision INDEXED BY entry_decision_reader ON decision.id=current.decision_id AND decision.input_seq=current.seq
         AND decision.generation=current.generation AND decision.release_version=current.release_version
       WHERE current.status='succeeded' AND entities.entity_version=? ORDER BY entities.input_seq,entities.entity_id`,
       )
@@ -389,7 +391,7 @@ export class ProcessingSemanticStore {
       const indexed = new Map<number, TagAssessment[]>()
       for (const row of this.db
         .prepare(
-          "SELECT tags.input_seq,tags.body FROM entry_tag_index tags JOIN entry_semantic_profiles profile ON profile.input_seq=tags.input_seq JOIN processing_inputs current ON current.seq=tags.input_seq AND current.current=1 AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id",
+          "SELECT tags.input_seq,tags.body FROM entry_tag_index tags JOIN entry_semantic_profiles profile INDEXED BY entry_semantic_identity ON profile.input_seq=tags.input_seq JOIN processing_inputs current ON current.seq=tags.input_seq AND current.current=1 AND current.content_version=profile.content_version AND current.decision_id=profile.decision_id",
         )
         .all()) {
         const seq = Number(row.input_seq)

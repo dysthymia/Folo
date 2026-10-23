@@ -453,7 +453,7 @@ export class ProcessingStateStore {
         `SELECT inputs.seq,inputs.source_key,inputs.item_id,inputs.content_version,
           inputs.release_version,inputs.decision_id,status.body AS summary
          FROM processing_inputs inputs
-         JOIN entry_decisions decisions ON decisions.id=inputs.decision_id
+         JOIN entry_decisions decisions INDEXED BY entry_decision_reader ON decisions.id=inputs.decision_id
          LEFT JOIN entry_decision_status status ON status.decision_id=inputs.decision_id
            AND status.input_seq=inputs.seq AND status.generation=inputs.generation
            AND status.release_version=inputs.release_version
