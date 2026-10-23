@@ -682,8 +682,8 @@ export class ProcessingReadingStore {
       overrides: Map<number, ReturnType<ProcessingStateStore["overrides"]>[number]>
     },
   ): GeneratedReaderProjection {
-    // 综述列表只需要成员正文，不能为了最后被丢弃的原文行扫描整个材料库。
-    if (query.mode === "stories") return this.computeGeneratedStoriesProjection(query)
+    // 综述和收藏只需要其成员正文，不能为了最后被丢弃的原文行扫描整个材料库。
+    if (query.mode !== "smart") return this.computeGeneratedMetadataProjection(query)
     const ownerId = this.requireOwner()
     // 空态库存只改变阅读筛选，复用当前请求的原文和决定，避免递归重扫同一批数据。
     const sourceByKey =
@@ -870,44 +870,6 @@ export class ProcessingReadingStore {
         (input) => allDecisions.get(input.seq)?.decision.status === "needs_context",
       ).length,
     }
-    if (query.mode === "collections") {
-      const originals = this.db
-        .prepare("SELECT body FROM official_collection_entries WHERE owner_id=?")
-        .all(ownerId)
-        .map((row) => JSON.parse(String(row.body)) as SourceEntry)
-        .filter(
-          (entry) =>
-            (!query.sourceKeys || query.sourceKeys.includes(entry.sourceKey)) &&
-            // 分类自身决定视图范围，全局同名分类不再被外层普通视图重复收窄。
-            (query.category || typeof query.view !== "number" || entry.view === query.view) &&
-            (!query.category ||
-              ((query.category.view === "all" ||
-                sourceByKey.get(entry.sourceKey)?.view === query.category.view) &&
-                sourceByKey.get(entry.sourceKey)?.category === query.category.name)),
-        )
-        .map((entry) => {
-          const input = inputs.find((input) => input.itemId === entry.id)
-          const published = input ? allDecisions.get(input.seq) : null
-          return {
-            ...this.generatedEntryItem(
-              entry,
-              input?.seq ?? null,
-              published?.decisionId ?? null,
-              published?.decision,
-              input ? (storyIdsBySeq.get(input.seq) ?? []) : [],
-            ),
-            officialCollection: true as const,
-          }
-        })
-        .filter((item) => matchesGeneratedItem(item, query))
-      // 不折叠显式收藏，即使原文也是某个已收藏 Story 的材料。
-      const items = [...storyItems.filter((item) => item.collected), ...originals].sort(
-        (left, right) =>
-          Date.parse(right.collectedAt ?? right.publishedAt) -
-            Date.parse(left.collectedAt ?? left.publishedAt) || compare(left, right),
-      )
-      return { items, reservoir: items, counts }
-    }
     return {
       items: [...storyItems, ...entries].sort(compare),
       reservoir: reservoir.sort(compare),
@@ -948,7 +910,7 @@ export class ProcessingReadingStore {
   }
 
   // 原文库存只读轻量发布投影；仅综述和已有去重关系涉及的材料按序号读取正文。
-  private computeGeneratedStoriesProjection(query: GeneratedFeedScope): GeneratedReaderProjection {
+  private computeGeneratedMetadataProjection(query: GeneratedFeedScope): GeneratedReaderProjection {
     const ownerId = this.requireOwner()
     const sourceByKey = new Map(
       this.db
@@ -985,7 +947,7 @@ export class ProcessingReadingStore {
     const inputs = this.db
       .prepare(
         `
-      SELECT inputs.seq,inputs.source_key,inputs.status,inputs.release_version,
+      SELECT inputs.seq,inputs.source_key,inputs.item_id,inputs.status,inputs.release_version,
         decisions.id AS valid_decision_id,status.body AS summary
       FROM processing_inputs inputs
       LEFT JOIN entry_decisions decisions ON inputs.status='succeeded'
@@ -993,7 +955,7 @@ export class ProcessingReadingStore {
         AND decisions.release_version=inputs.release_version
       LEFT JOIN entry_decision_status status ON status.decision_id=decisions.id AND status.input_seq=inputs.seq
         AND status.generation=inputs.generation AND status.release_version=inputs.release_version
-      WHERE inputs.current=1
+      WHERE inputs.current=1 ORDER BY inputs.seq
     `,
       )
       .all()
@@ -1020,6 +982,7 @@ export class ProcessingReadingStore {
         return [
           {
             seq: Number(row.seq),
+            itemId: String(row.item_id),
             status: String(row.status),
             releaseVersion: row.release_version,
             decision:
@@ -1062,16 +1025,47 @@ export class ProcessingReadingStore {
     const memberSeqs = linkedStories.flatMap(({ revision }) =>
       revision.members.map((member) => member.inputSeq),
     )
-    const detailSeqs = [...new Set([...memberSeqs, ...dedupeSeqs])]
+    // 官方收藏是独立库存，保留未处理和已失效来源的收藏；分类/view仍沿用收藏自身范围。
+    const collectionEntries =
+      query.mode === "collections"
+        ? this.db
+            .prepare("SELECT body FROM official_collection_entries WHERE owner_id=?")
+            .all(ownerId)
+            .map((row) => JSON.parse(String(row.body)) as SourceEntry)
+            .filter(
+              (entry) =>
+                (!query.sourceKeys || query.sourceKeys.includes(entry.sourceKey)) &&
+                (query.category || typeof query.view !== "number" || entry.view === query.view) &&
+                (!query.category ||
+                  ((query.category.view === "all" ||
+                    sourceByKey.get(entry.sourceKey)?.view === query.category.view) &&
+                    sourceByKey.get(entry.sourceKey)?.category === query.category.name)),
+            )
+        : []
+    // 同一原帖可能存在多个来源上下文，保留既有按最早current序号关联决定的口径。
+    const inputByItemId = new Map<string, (typeof inputs)[number]>()
+    for (const input of inputs)
+      if (!inputByItemId.has(input.itemId)) inputByItemId.set(input.itemId, input)
+    const collectionSeqs = collectionEntries.flatMap((entry) => {
+      const input = inputByItemId.get(entry.id)
+      return input ? [input.seq] : []
+    })
+    const detailSeqs = [...new Set([...memberSeqs, ...dedupeSeqs, ...collectionSeqs])]
     const decisions = new Map(
       this.processingState.published(detailSeqs).map((item) => [item.input.seq, item]),
     )
     const storyItems: GeneratedReaderItem[] = []
+    const storyIdsBySeq = new Map<number, string[]>()
     const represented = new Set<number>()
     for (const { story, revision } of linkedStories) {
       if (!this.revisionAvailable(revision, decisions)) continue
       const members = revision.members.map((member) => decisions.get(member.inputSeq)!)
       const item = this.generatedStoryItem(story, revision, members, ownerId)
+      for (const member of members)
+        storyIdsBySeq.set(member.input.seq, [
+          ...(storyIdsBySeq.get(member.input.seq) ?? []),
+          story.id,
+        ])
       if (matchesGeneratedItem(item, query)) storyItems.push(item)
       // 库存计数始终在搜索、读态、主题与时间过滤前计算，无需递归重建第二次投影。
       if (!preserveSourceEntries)
@@ -1110,12 +1104,36 @@ export class ProcessingReadingStore {
         overrides.get(input.seq)?.mode === "restore" ||
         input.decision?.policy.standalone === "always",
     )
-    const items = storyItems.sort(
-      (left, right) =>
-        Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
-        left.id.localeCompare(right.id) ||
-        left.sourceKeys.join().localeCompare(right.sourceKeys.join()),
-    )
+    const compare = (left: GeneratedReaderItem, right: GeneratedReaderItem) =>
+      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
+      left.kind.localeCompare(right.kind) ||
+      left.id.localeCompare(right.id) ||
+      left.sourceKeys.join().localeCompare(right.sourceKeys.join())
+    const originals = collectionEntries
+      .map((entry) => {
+        const input = inputByItemId.get(entry.id)
+        const published = input ? decisions.get(input.seq) : null
+        return {
+          ...this.generatedEntryItem(
+            entry,
+            input?.seq ?? null,
+            published?.decisionId ?? null,
+            published?.decision,
+            input ? (storyIdsBySeq.get(input.seq) ?? []) : [],
+          ),
+          officialCollection: true as const,
+        }
+      })
+      .filter((item) => matchesGeneratedItem(item, query))
+    // 显式收藏保留每一篇原文，不因它已并入被收藏的综述而折叠。
+    const items =
+      query.mode === "collections"
+        ? [...storyItems.filter((item) => item.collected), ...originals].sort(
+            (left, right) =>
+              Date.parse(right.collectedAt ?? right.publishedAt) -
+                Date.parse(left.collectedAt ?? left.publishedAt) || compare(left, right),
+          )
+        : storyItems.sort(compare)
     return {
       items,
       reservoir: items,

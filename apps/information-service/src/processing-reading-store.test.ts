@@ -713,6 +713,64 @@ describe("原生收藏与深链投影", () => {
     expect(store.reading.generatedPage(query).items.map((item) => item.id)).toEqual(["one"])
   })
 
+  it("收藏投影只读取官方收藏及其综述成员，不读取无关材料正文", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishInput(store, entry("member", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, entry("other-member", "2026-01-02T00:00:00.000Z"))
+    const collected = publishInput(store, entry("collected", "2026-01-03T00:00:00.000Z"))
+    publishInput(store, entry("unrelated", "2026-01-04T00:00:00.000Z"))
+    const storyId = createAggregateStory(store, [first, second], "收藏综述")
+    store.reading.generatedStoryState(storyId, { collected: true })
+    store.reading.replaceOfficialCollections([
+      { ...entry("member", "2026-01-01T00:00:00.000Z"), collected: true, view: 0 },
+      {
+        ...entry("collected", "2026-01-03T00:00:00.000Z"),
+        collected: true,
+        collectedAt: "2099-01-01T00:00:00.000Z",
+        view: 0,
+      },
+      { ...entry("unprocessed", "2026-01-05T00:00:00.000Z"), collected: true, view: 0 },
+    ])
+    const baseline = store.reading.generatedPage(
+      generatedFeedQuerySchema.parse({ mode: "stories" }),
+    ).counts
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const published = vi.spyOn(store.processingState, "published")
+    const page = store.reading.generatedPage(
+      generatedFeedQuerySchema.parse({ mode: "collections" }),
+    )
+    expect(page.items.map((item) => item.id)).toEqual([
+      "collected",
+      storyId,
+      "unprocessed",
+      "member",
+    ])
+    expect(page.items.find((item) => item.id === "member")).toMatchObject({
+      inputSeq: first.seq,
+      storyIds: [storyId],
+      officialCollection: true,
+    })
+    expect(page.items.find((item) => item.id === "unprocessed")).toMatchObject({
+      inputSeq: null,
+      decisionId: null,
+    })
+    expect(page.counts).toEqual(baseline)
+    // 收藏和成员之外的已发布原文不参与查询；未处理收藏也不会触发全库扫描。
+    expect(published).toHaveBeenCalledWith([first.seq, second.seq, collected.seq])
+    expect(inputs.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+    expect([...new Set(inputs.mock.calls.flatMap(([seqs]) => seqs ?? []))].sort()).toEqual([
+      first.seq,
+      second.seq,
+      collected.seq,
+    ])
+    const empty = store.reading.generatedPage(
+      generatedFeedQuerySchema.parse({ mode: "collections", search: "不存在", unreadOnly: true }),
+    )
+    expect(empty.items).toEqual([])
+    expect(empty.counts).toEqual(baseline)
+  })
+
   it("保留未处理、待补、隐藏和已并入 Story 的全部显式收藏原文", () => {
     const store = fixture()
     publishRelease(store)

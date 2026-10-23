@@ -133,6 +133,8 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS processing_inputs (seq INTEGER PRIMARY KEY AUTOINCREMENT, source_key TEXT NOT NULL, item_id TEXT NOT NULL, content_version TEXT NOT NULL, body TEXT NOT NULL, received_at TEXT NOT NULL, release_version INTEGER, generation INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', current INTEGER NOT NULL DEFAULT 1, decision_id TEXT);
       CREATE INDEX IF NOT EXISTS processing_input_identity ON processing_inputs(source_key,item_id,current);
       CREATE INDEX IF NOT EXISTS processing_input_queue ON processing_inputs(current,status,source_key);
+      -- 列表库存和发布指针的元数据全部在索引中，避免扫描输入大正文所在表页。
+      CREATE INDEX IF NOT EXISTS processing_input_reader ON processing_inputs(current,status,seq,source_key,item_id,content_version,release_version,generation,decision_id);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
       -- 发布资格校验使用覆盖索引，避免列表轮询逐条回读含大正文的决定表页。
       CREATE INDEX IF NOT EXISTS entry_decision_publication ON entry_decisions(id,generation,release_version);
