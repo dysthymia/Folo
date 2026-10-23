@@ -8,6 +8,7 @@ import type {
 import { merge } from "es-toolkit/compat"
 
 import { createImmerSetter, createZustandStore } from "../../lib/helper"
+import { getFilterFieldType } from "./constant"
 import type { ActionItem, ActionModel } from "./store"
 
 interface LocalActionStore {
@@ -330,6 +331,22 @@ export const localActionActions = {
       if (!group) return
 
       group[index.conditionIndex] = merge(group[index.conditionIndex], condition)
+      sanitizeRuleAtIndex(state, index.ruleIndex)
+      state.isDirty = true
+      bumpLocalActionRevision(state)
+    })
+  },
+  changeConditionField: (index: ActionConditionIndex, field: ActionFeedField) => {
+    set((state) => {
+      const group = state.rules[index.ruleIndex]?.condition[index.groupIndex]
+      const item = group?.[index.conditionIndex]
+      if (!group || !item) return
+
+      // 字段类型变化时清除旧运算符和值，与云端规则编辑保持一致。
+      group[index.conditionIndex] =
+        getFilterFieldType(item.field) === getFilterFieldType(field)
+          ? { ...item, field }
+          : { field }
       sanitizeRuleAtIndex(state, index.ruleIndex)
       state.isDirty = true
       bumpLocalActionRevision(state)

@@ -1,9 +1,8 @@
 import { StatusBar } from "expo-status-bar"
 import type { PrimitiveAtom } from "jotai"
-import { atom, useAtomValue, useStore } from "jotai"
+import { atom, useAtomValue, useAtomValueRawSync, useStore } from "jotai"
 import type { FC, PropsWithChildren } from "react"
-import { memo, use, useEffect, useMemo, useRef, useState } from "react"
-import type { ScrollView } from "react-native"
+import { memo, use, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { StyleSheet } from "react-native"
 import {
   SafeAreaFrameContext,
@@ -15,20 +14,19 @@ import type { ScreenStackHeaderConfigProps } from "react-native-screens"
 import { ScreenStack } from "react-native-screens"
 
 import { isAndroid, isIOS } from "../platform"
-import {
-  AttachNavigationScrollViewContext,
-  SetAttachNavigationScrollViewContext,
-} from "./AttachNavigationScrollViewContext"
 import type { Route } from "./ChainNavigationContext"
 import { ChainNavigationContext } from "./ChainNavigationContext"
 import { GroupedNavigationRouteContext } from "./GroupedNavigationRouteContext"
 import { useNavigation } from "./hooks"
 import { Navigation } from "./Navigation"
+import { createNavigationScrollTargets } from "./navigation-scroll-targets"
 import { NavigationInstanceContext } from "./NavigationInstanceContext"
+import { NavigationScrollTargetsContext } from "./NavigationScrollTargetsContext"
 import { ScreenNameContext } from "./ScreenNameContext"
 import type { ScreenOptionsContextType } from "./ScreenOptionsContext"
 import { ModalScreenItemOptionsContext } from "./ScreenOptionsContext"
 import type { NavigationControllerView } from "./types"
+import { setScreenHasUnsavedChanges } from "./unsaved-changes"
 import { WrappedScreenItem } from "./WrappedScreenItem"
 
 interface RootStackNavigationProps {
@@ -37,37 +35,40 @@ interface RootStackNavigationProps {
   headerConfig?: ScreenStackHeaderConfigProps
 }
 export const RootStackNavigation = ({ children, headerConfig }: RootStackNavigationProps) => {
+  // Initial session resolution or a JS reload can queue a modal before the
+  // native root has appeared. Retain those routes until its onAppear event
+  // before mounting the native screens that present them.
+  const [nativeRootReady, setNativeRootReady] = useState(false)
+  const handleRootAppear = useCallback(() => setNativeRootReady(true), [])
+
   return (
-    <AttachNavigationScrollViewProvider>
+    <NavigationScrollTargetsProvider>
       <ScreenNameContext value={useMemo(() => atom(""), [])}>
         <ChainNavigationContext value={Navigation.rootNavigation.__dangerous_getCtxValue()}>
           <NavigationInstanceContext value={Navigation.rootNavigation}>
             <ScreenStack style={StyleSheet.absoluteFill}>
-              <WrappedScreenItem headerConfig={headerConfig} screenId="root">
+              <WrappedScreenItem
+                headerConfig={headerConfig}
+                screenId="root"
+                onNativeAppear={handleRootAppear}
+              >
                 {children}
               </WrappedScreenItem>
 
-              <ScreenItemsMapper />
+              {nativeRootReady && <ScreenItemsMapper />}
               <StateHandler />
             </ScreenStack>
           </NavigationInstanceContext>
         </ChainNavigationContext>
       </ScreenNameContext>
-    </AttachNavigationScrollViewProvider>
+    </NavigationScrollTargetsProvider>
   )
 }
 
-const AttachNavigationScrollViewProvider: FC<PropsWithChildren> = ({ children }) => {
-  const [attachNavigationScrollViewRef, setAttachNavigationScrollViewRef] =
-    useState<React.RefObject<ScrollView> | null>(null)
+const NavigationScrollTargetsProvider: FC<PropsWithChildren> = ({ children }) => {
+  const [targets] = useState(createNavigationScrollTargets)
 
-  return (
-    <AttachNavigationScrollViewContext value={attachNavigationScrollViewRef}>
-      <SetAttachNavigationScrollViewContext value={setAttachNavigationScrollViewRef}>
-        {children}
-      </SetAttachNavigationScrollViewContext>
-    </AttachNavigationScrollViewContext>
-  )
+  return <NavigationScrollTargetsContext value={targets}>{children}</NavigationScrollTargetsContext>
 }
 const StateHandler = () => {
   const navigation = useNavigation()
@@ -174,7 +175,17 @@ const ModalScreenStackItems: FC<{
     [],
   )
 
-  const modalScreenOptions = useAtomValue(modalScreenOptionsCtxValue)
+  // Modal screens set their options from effects in the commit that mounts this group
+  const modalScreenOptions = useAtomValueRawSync(modalScreenOptionsCtxValue)
+
+  // Lets the Android back button ask before it drops the edits, as the swipe does on iOS
+  const rootModalRouteId = rootModalRoute?.id
+  const hasUnsavedChanges = !!modalScreenOptions.preventNativeDismiss
+  useEffect(() => {
+    if (!rootModalRouteId) return
+    setScreenHasUnsavedChanges(rootModalRouteId, hasUnsavedChanges)
+    return () => setScreenHasUnsavedChanges(rootModalRouteId, false)
+  }, [hasUnsavedChanges, rootModalRouteId])
 
   if (!rootModalRoute) {
     return null

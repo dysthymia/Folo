@@ -21,7 +21,7 @@ export const ShortcutItem = ({ shortcut, onDelete, onToggle, onEdit }: ShortcutI
     {
       icon: "i-mgc-edit-cute-re",
       onClick: () => onEdit(shortcut),
-      title: "Edit shortcut",
+      title: t("shortcuts.actions.edit"),
     },
   ]
 
@@ -29,7 +29,7 @@ export const ShortcutItem = ({ shortcut, onDelete, onToggle, onEdit }: ShortcutI
     actions.push({
       icon: "i-mgc-delete-2-cute-re",
       onClick: () => onDelete(shortcut.id),
-      title: "Delete shortcut",
+      title: t("shortcuts.actions.delete"),
     })
   }
 
@@ -61,6 +61,7 @@ export const ShortcutItem = ({ shortcut, onDelete, onToggle, onEdit }: ShortcutI
         <ItemActions
           actions={actions}
           enabled={shortcut.enabled}
+          toggleLabel={shortcut.name}
           onToggle={(enabled) => onToggle(shortcut.id, enabled)}
         />
       </div>

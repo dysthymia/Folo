@@ -3,7 +3,6 @@ import {
   useActionRules,
   useIsActionDataDirty,
   usePrefetchActions,
-  useUpdateActionsMutation,
 } from "@follow/store/action/hooks"
 import {
   useIsLocalActionDataDirty,
@@ -15,6 +14,8 @@ import { localActionActions } from "@follow/store/action/local-store"
 import type { ActionItem } from "@follow/store/action/store"
 import { actionActions } from "@follow/store/action/store"
 import { createContext, use } from "react"
+
+import { useSaveActionRules } from "./use-save-action-rules"
 
 export type ActionScope = "cloud" | "local"
 
@@ -71,10 +72,11 @@ export const useScopedPrefetchActions = () => {
 }
 
 export const useScopedUpdateActionsMutation = (
-  options?: Parameters<typeof useUpdateActionsMutation>[0],
+  options?: Parameters<typeof useUpdateLocalActionsMutation>[0],
 ) => {
   const scope = useActionScope()
-  const cloudMutation = useUpdateActionsMutation(options)
+  // 云端沿用上游版本冲突交互，本地规则仍写入本机存储。
+  const cloudMutation = useSaveActionRules(options)
   const localMutation = useUpdateLocalActionsMutation(options)
 
   return scope === "local" ? localMutation : cloudMutation

@@ -98,6 +98,7 @@ export default defineConfig(
     yaml: false,
     ignores: [
       ".context/**",
+      ".claude/worktrees/**",
       "resources/**",
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
@@ -189,6 +190,27 @@ export default defineConfig(
       tailwindcss: {
         config: path.join(import.meta.dirname, "apps/mobile/tailwind.config.ts"),
       },
+    },
+  },
+  {
+    // NativeWind runs `animate-*` keyframes as endless Reanimated animations that keep running
+    // after their view unmounts
+    files: ["apps/mobile/src/**/*.tsx"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name=/[cC]lassName$/] Literal[value=/(^|\\s)animate-/]",
+          message:
+            "Animate with Reanimated instead of `animate-*` classes; placeholders use SkeletonPulse.",
+        },
+        {
+          selector:
+            "JSXAttribute[name.name=/[cC]lassName$/] TemplateElement[value.raw=/(^|\\s)animate-/]",
+          message:
+            "Animate with Reanimated instead of `animate-*` classes; placeholders use SkeletonPulse.",
+        },
+      ],
     },
   },
   {

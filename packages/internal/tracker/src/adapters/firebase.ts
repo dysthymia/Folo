@@ -1,18 +1,26 @@
-import type { FirebaseAnalyticsTypes } from "@react-native-firebase/analytics"
-
 import { TrackerMapper } from "../enums"
 import type { IdentifyPayload, TrackerAdapter, TrackPayload } from "./base"
 
+export interface FirebaseTracker {
+  logEvent: (name: string, properties?: Record<string, unknown>) => void | Promise<void>
+  setUserId: (id: string | null) => Promise<void>
+  setUserProperties: (properties: Record<string, string | null>) => Promise<void>
+}
+
+/**
+ * Who the user is stays out of Google Analytics, which gets the user id only, as the API's GA4
+ * proxy also makes sure. They are set to null rather than left out, which clears the values
+ * earlier versions stored in Firebase on the device.
+ */
+const IDENTITY_PROPERTY_KEYS = new Set(["email", "name", "image", "handle"])
+
 export interface FirebaseAdapterConfig {
-  instance: Pick<FirebaseAnalyticsTypes.Module, "logEvent" | "setUserId" | "setUserProperties">
+  instance: FirebaseTracker
   enabled?: boolean
 }
 
 export class FirebaseAdapter implements TrackerAdapter {
-  private firebaseInstance: Pick<
-    FirebaseAnalyticsTypes.Module,
-    "logEvent" | "setUserId" | "setUserProperties"
-  >
+  private firebaseInstance: FirebaseTracker
   private enabled: boolean
 
   constructor(config: FirebaseAdapterConfig) {
@@ -114,12 +122,6 @@ export class FirebaseAdapter implements TrackerAdapter {
 
     try {
       await this.firebaseInstance.setUserId(payload.id)
-      await this.firebaseInstance.setUserProperties({
-        email: payload.email ?? null,
-        name: payload.name ?? null,
-        image: payload.image ?? null,
-        handle: payload.handle ?? null,
-      })
     } catch (error) {
       console.error("[Firebase] Failed to identify user:", error)
     }
@@ -132,7 +134,10 @@ export class FirebaseAdapter implements TrackerAdapter {
       // Convert properties to Firebase's expected format
       const firebaseProperties: Record<string, string | null> = {}
       for (const [key, value] of Object.entries(properties)) {
-        firebaseProperties[key] = value === null || value === undefined ? null : String(value)
+        firebaseProperties[key] =
+          value === null || value === undefined || IDENTITY_PROPERTY_KEYS.has(key)
+            ? null
+            : String(value)
       }
       await this.firebaseInstance.setUserProperties(firebaseProperties)
     } catch (error) {

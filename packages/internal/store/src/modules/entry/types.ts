@@ -2,6 +2,7 @@ import type { FeedViewType } from "@follow/constants"
 import type { EntrySchema } from "@follow/database/schemas/types"
 
 export type EntryModel = EntrySchema
+export type EntrySortOrder = "asc" | "desc"
 export type FetchEntriesProps = {
   feedId?: string
   feedIdList?: string[]
@@ -14,11 +15,13 @@ export type FetchEntriesProps = {
   isCollection?: boolean
   excludePrivate?: boolean
   aiSort?: boolean
+  sortOrder?: EntrySortOrder
 }
 
 export type FetchEntriesPropsSettings = {
   hidePrivateSubscriptionsInTimeline?: boolean
   unreadOnly?: boolean
+  sortOrder?: EntrySortOrder
 }
 
 export type UseEntriesProps = {

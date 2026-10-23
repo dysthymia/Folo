@@ -63,9 +63,10 @@ export const EditRuleScreen: NavigationControllerView<{
 const RuleImpl: React.FC<{
   index: number
 }> = ({ index }) => {
+  const { t } = useTranslation("settings")
   const rule = useActionRule(index)
   if (!rule) {
-    return <Text>No rule available</Text>
+    return <Text>{t("actions.no_rule")}</Text>
   }
   return (
     <View className="gap-6">
@@ -212,7 +213,7 @@ const ConditionSection: React.FC<{
                         currentValue,
                       ]
                         .filter(Boolean)
-                        .join(" ") || "Unknown"
+                        .join(" ") || t("actions.unknown_condition")
                     }
                     onPress={() => {
                       navigation.pushControllerView(EditConditionScreen, {
@@ -311,22 +312,20 @@ const ActionSection: React.FC<{
               },
             ]}
           >
-            <View className="flex-row items-center gap-2">
-              {action.onNavigate ? (
-                <GroupedInsetListActionCell
-                  label={t(action.label)}
-                  icon={action.icon}
-                  onPress={() => action.onNavigate?.(navigation, index)}
-                />
-              ) : (
-                <GroupedInsetListCell
-                  label={t(action.label)}
-                  icon={action.icon}
-                  leftClassName="flex-none"
-                  rightClassName="flex-1 flex-row justify-end"
-                />
-              )}
-            </View>
+            {action.onNavigate ? (
+              <GroupedInsetListActionCell
+                label={t(action.label)}
+                icon={action.icon}
+                onPress={() => action.onNavigate?.(navigation, index)}
+              />
+            ) : (
+              <GroupedInsetListCell
+                label={t(action.label)}
+                icon={action.icon}
+                leftClassName="flex-none"
+                rightClassName="flex-1 flex-row justify-end"
+              />
+            )}
           </SwipeableItem>
         ))}
         {notEnabledActions.length > 0 && (

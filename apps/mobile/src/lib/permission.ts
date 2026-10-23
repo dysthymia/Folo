@@ -1,4 +1,5 @@
 import * as Notifications from "expo-notifications"
+import { t } from "i18next"
 import { Platform } from "react-native"
 
 import { getUISettings } from "../atoms/settings/ui"
@@ -21,23 +22,27 @@ export async function requestNotificationPermission() {
     finalStatus = status
   }
   if (finalStatus !== "granted") {
-    toast.error("Permission not granted for notification!")
+    toast.error(t("permission.notification_denied"))
     return false
   }
   return true
 }
 
+/**
+ * Only checks the notification permission; asking for it is left to the user's own action,
+ * see the badge setting.
+ */
 export async function setBadgeCountAsyncWithPermission(
   badgeCount: number,
-  skipSettingCheck = false,
+  { skipSettingCheck = false }: { skipSettingCheck?: boolean } = {},
 ) {
   const { showUnreadCountBadgeMobile } = getUISettings()
   if (!showUnreadCountBadgeMobile && !skipSettingCheck) {
     return false
   }
 
-  const permissionGranted = await requestNotificationPermission()
-  if (!permissionGranted) {
+  const { status } = await Notifications.getPermissionsAsync()
+  if (status !== "granted") {
     return false
   }
 

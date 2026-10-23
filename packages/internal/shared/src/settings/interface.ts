@@ -7,6 +7,7 @@ export interface GeneralSettings {
   actionLanguage: string
   sendAnonymousData: boolean
   unreadOnly: boolean
+  timelineSortOrder: "asc" | "desc"
   scrollMarkUnread: boolean
   hoverMarkUnread: boolean
   renderMarkUnread: boolean

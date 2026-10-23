@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "bc6f825f-4499-4ff5-8d50-346a4071b725",
+  "id": "50e32239-adc2-4eaf-8f95-d24f40de57a2",
   "prevId": "f6cb39bb-84e8-47fd-90d8-373f18bd6472",
   "tables": {
     "ai_chat_messages": {
@@ -356,62 +356,6 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "entry_open_stats": {
-      "name": "entry_open_stats",
-      "columns": {
-        "entry_id": {
-          "name": "entry_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "feed_id": {
-          "name": "feed_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "published_at": {
-          "name": "published_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "first_opened_at": {
-          "name": "first_opened_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "open_source": {
-          "name": "open_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "idx_entry_open_stats_feed_published_at": {
-          "name": "idx_entry_open_stats_feed_published_at",
-          "columns": ["feed_id", "published_at"],
-          "isUnique": false
-        },
-        "idx_entry_open_stats_feed_first_opened_at": {
-          "name": "idx_entry_open_stats_feed_first_opened_at",
-          "columns": ["feed_id", "first_opened_at"],
-          "isUnique": false
-        }
-      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -813,6 +757,50 @@
           "name": "unq",
           "columns": ["entry_id", "language"],
           "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "sync_transactions": {
+      "name": "sync_transactions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "payload": {
+          "name": "payload",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_sync_transactions_created_at": {
+          "name": "idx_sync_transactions_created_at",
+          "columns": ["created_at"],
+          "isUnique": false
         }
       },
       "foreignKeys": {},

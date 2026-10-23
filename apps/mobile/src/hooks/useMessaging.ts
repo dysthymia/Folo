@@ -3,8 +3,16 @@ import { ROUTE_FEED_IN_INBOX } from "@follow/store/constants/app"
 import { useWhoami } from "@follow/store/user/hooks"
 import { tracker } from "@follow/tracker"
 import { getApp } from "@react-native-firebase/app"
-import type { FirebaseMessagingTypes } from "@react-native-firebase/messaging"
-import { getMessaging } from "@react-native-firebase/messaging"
+import type { RemoteMessage } from "@react-native-firebase/messaging"
+import {
+  getAPNSToken,
+  getInitialNotification,
+  getMessaging,
+  getToken,
+  onNotificationOpenedApp,
+  onTokenRefresh,
+  registerDeviceForRemoteMessages,
+} from "@react-native-firebase/messaging"
 import { useMutation } from "@tanstack/react-query"
 import { useEffect } from "react"
 import { Platform } from "react-native"
@@ -17,13 +25,12 @@ import {
 } from "@/src/lib/messaging-registration"
 import { useNavigation } from "@/src/lib/navigation/hooks"
 import { requestNotificationPermission } from "@/src/lib/permission"
+import { PUSH_TOKEN_STORAGE_KEY } from "@/src/lib/push-token"
 import { EntryDetailScreen } from "@/src/screens/(stack)/entries/[entryId]/EntryDetailScreen"
-
-const FIREBASE_MESSAGING_TOKEN_STORAGE_KEY = "firebase_messaging_token"
 
 async function saveMessagingToken(token: string) {
   await followClient.api.messaging.createToken({ token, channel: Platform.OS })
-  kv.set(FIREBASE_MESSAGING_TOKEN_STORAGE_KEY, token)
+  kv.set(PUSH_TOKEN_STORAGE_KEY, token)
 }
 
 export function useUpdateMessagingToken() {
@@ -41,9 +48,9 @@ export function useUpdateMessagingToken() {
       return registerMessagingToken({
         platform: Platform.OS,
         requestPermission: requestNotificationPermission,
-        registerDeviceForRemoteMessages: () => messaging.registerDeviceForRemoteMessages(),
-        getAPNSToken: () => messaging.getAPNSToken(),
-        getToken: () => messaging.getToken(),
+        registerDeviceForRemoteMessages: () => registerDeviceForRemoteMessages(messaging),
+        getAPNSToken: () => getAPNSToken(messaging),
+        getToken: () => getToken(messaging),
         saveToken: saveMessagingToken,
       })
     },
@@ -63,7 +70,7 @@ export function useUpdateMessagingToken() {
     if (!whoami?.id || !hasNotificationActions) return
 
     const messaging = getMessaging(getApp())
-    const unsubscribe = messaging.onTokenRefresh((token) => {
+    const unsubscribe = onTokenRefresh(messaging, (token) => {
       mutate({ token })
     })
 
@@ -75,7 +82,7 @@ export function useUpdateMessagingToken() {
 export function useMessaging() {
   const navigation = useNavigation()
   useEffect(() => {
-    function navigateToEntry(message: FirebaseMessagingTypes.RemoteMessage) {
+    function navigateToEntry(message: RemoteMessage) {
       if (
         !message.data ||
         message.data.type !== "new-entry" ||
@@ -94,7 +101,7 @@ export function useMessaging() {
 
     const app = getApp()
     async function init() {
-      const message = await getMessaging(app).getInitialNotification()
+      const message = await getInitialNotification(getMessaging(app))
       if (message) {
         navigateToEntry(message)
       }
@@ -102,7 +109,7 @@ export function useMessaging() {
 
     init()
 
-    const unsubscribe = getMessaging(app).onNotificationOpenedApp((remoteMessage) => {
+    const unsubscribe = onNotificationOpenedApp(getMessaging(app), (remoteMessage) => {
       navigateToEntry(remoteMessage)
     })
 

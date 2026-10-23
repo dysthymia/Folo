@@ -11,8 +11,9 @@ import {
   useRef,
   useState,
 } from "react"
+import { useTranslation } from "react-i18next"
 import type { LayoutChangeEvent, StyleProp, ViewStyle } from "react-native"
-import { Alert, Pressable, StyleSheet, View } from "react-native"
+import { Pressable, StyleSheet, View } from "react-native"
 import type { AnimatedProps } from "react-native-reanimated"
 import Animated, {
   useAnimatedReaction,
@@ -36,6 +37,8 @@ import {
   useScreenIsInSheetModal,
 } from "@/src/lib/navigation/hooks"
 import { ScreenItemContext } from "@/src/lib/navigation/ScreenItemContext"
+import { confirmLeaveWithUnsavedChanges } from "@/src/lib/navigation/unsaved-changes"
+import { useHeaderWindowControlsInsets } from "@/src/lib/window-controls"
 
 import { ThemedBlurView } from "../../common/ThemedBlurView"
 import { PlatformActivityIndicator } from "../../ui/loading/PlatformActivityIndicator"
@@ -147,17 +150,9 @@ const useHideableBottom = (
 }
 export interface InternalNavigationHeaderProps
   extends Omit<AnimatedProps<ViewProps>, "children">, PropsWithChildren {
-  headerLeft?:
-    | FC<{
-        canGoBack: boolean
-      }>
-    | ReactNode
+  headerLeft?: FC<NavigationHeaderButtonProps> | ReactNode
   promptBeforeLeave?: boolean
-  headerRight?:
-    | FC<{
-        canGoBack: boolean
-      }>
-    | ReactNode
+  headerRight?: FC<NavigationHeaderButtonProps> | ReactNode
   title?: string
 
   hideableBottom?: ReactNode
@@ -188,6 +183,7 @@ export const InternalNavigationHeader = ({
 }: InternalNavigationHeaderProps) => {
   const insets = useSafeAreaInsets()
   const frame = useSafeAreaFrame()
+  const windowControlsInsets = useHeaderWindowControlsInsets()
 
   const sheetModal = useScreenIsInSheetModal()
   const { headerHeight: defaultHeight, headerTopInset } = useMemo(
@@ -280,6 +276,14 @@ export const InternalNavigationHeader = ({
       setRightWidth(width)
     })
   }, [rightRef])
+  // The title is centered with the button widths, which can change after the first measure, e.g.
+  // the timeline actions only show once the user is known to be signed in
+  const onLeftLayout = useCallback((e: LayoutChangeEvent) => {
+    setLeftWidth(e.nativeEvent.layout.width)
+  }, [])
+  const onRightLayout = useCallback((e: LayoutChangeEvent) => {
+    setRightWidth(e.nativeEvent.layout.width)
+  }, [])
 
   return (
     <Animated.View
@@ -303,8 +307,9 @@ export const InternalNavigationHeader = ({
       <View
         className="relative flex-row items-center"
         style={{
-          marginLeft: insets.left,
-          marginRight: insets.right,
+          // Also clear of the iPadOS window controls, which sit over the back button otherwise
+          marginLeft: insets.left + windowControlsInsets.left,
+          marginRight: insets.right + windowControlsInsets.right,
           height: defaultHeight - headerTopInset,
           paddingHorizontal: titlebarPaddingHorizontal,
         }}
@@ -313,6 +318,7 @@ export const InternalNavigationHeader = ({
         {/* Left */}
         <View
           ref={leftRef}
+          onLayout={onLeftLayout}
           className="flex min-w-6 shrink-0 flex-row items-center justify-start"
           pointerEvents={"box-none"}
         >
@@ -361,6 +367,7 @@ export const InternalNavigationHeader = ({
         {/* Right */}
         <View
           ref={rightRef}
+          onLayout={onRightLayout}
           className="flex min-w-6 shrink-0 flex-row items-center justify-end"
           pointerEvents={"box-none"}
         >
@@ -391,8 +398,14 @@ export const DefaultHeaderBackButton = ({
   canGoBack,
   canDismiss,
   promptBeforeLeave,
-}: NavigationHeaderButtonProps) => {
-  const label = useColor("label")
+  color,
+}: NavigationHeaderButtonProps & {
+  // The icon color, the label color by default
+  color?: string
+}) => {
+  const { t } = useTranslation()
+  const labelColor = useColor("label")
+  const label = color ?? labelColor
   const navigation = useNavigation()
 
   const isTopRouteInGroup = useIsTopRouteInGroup()
@@ -403,6 +416,9 @@ export const DefaultHeaderBackButton = ({
   return (
     <UINavigationHeaderActionButton
       testID="navigation-back"
+      accessibilityLabel={
+        showCloseIcon ? t("words.close", { ns: "common" }) : t("words.back", { ns: "common" })
+      }
       onPress={() => {
         const leave = () => {
           if (canGoBack) {
@@ -413,18 +429,7 @@ export const DefaultHeaderBackButton = ({
         }
 
         if (promptBeforeLeave) {
-          Alert.alert("Are you sure you want to exit?", "You have unsaved changes.", [
-            {
-              text: "Cancel",
-              style: "cancel",
-            },
-            {
-              text: "Exit",
-              onPress: () => {
-                leave()
-              },
-            },
-          ])
+          confirmLeaveWithUnsavedChanges(leave)
         } else {
           leave()
         }
@@ -446,6 +451,7 @@ export const UINavigationHeaderActionButton = ({
   className,
   style,
   testID,
+  accessibilityLabel,
 }: {
   children: ReactNode
   onPress?: () => void
@@ -453,11 +459,16 @@ export const UINavigationHeaderActionButton = ({
   className?: string
   style?: StyleProp<ViewStyle>
   testID?: string
+  /** Required for icon-only buttons, which screen readers can't name otherwise */
+  accessibilityLabel?: string
 }) => {
   return (
     <Pressable
       hitSlop={5}
       testID={testID}
+      accessibilityRole={onPress ? "button" : undefined}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={disabled ? { disabled } : undefined}
       className={cn("p-2", className)}
       onPress={onPress}
       disabled={disabled}

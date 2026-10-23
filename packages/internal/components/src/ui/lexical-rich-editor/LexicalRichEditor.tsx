@@ -17,6 +17,7 @@ import { TabIndentationPlugin } from "@lexical/react/LexicalTabIndentationPlugin
 import type { LexicalEditor } from "lexical"
 import { $getRoot } from "lexical"
 import { useImperativeHandle, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import { LexicalRichEditorNodes } from "./nodes"
 import {
@@ -63,12 +64,12 @@ const MATCHERS = [
 ]
 export const LexicalRichEditor = function LexicalRichEditor({
   ref,
-  placeholder = "Enter your message...",
+  placeholder: placeholderProp,
   className,
   namespace = "LexicalRichEditor",
   autoFocus = false,
   theme = defaultLexicalTheme,
-  enabledPlugins = defaultEnabledPlugins,
+  enabledPlugins: enabledPluginsProp,
   initalEditorState,
   plugins,
   accessories,
@@ -77,6 +78,11 @@ export const LexicalRichEditor = function LexicalRichEditor({
   onChange,
   onLengthChange,
 }: LexicalRichEditorProps & { ref?: React.RefObject<LexicalRichEditorRef | null> }) {
+  const { t } = useTranslation("common")
+  // Callers only list the built-in plugins they turn on or off
+  const enabledPlugins = { ...defaultEnabledPlugins, ...enabledPluginsProp }
+  // `null` hides the placeholder, so only an omitted prop falls back to the default text
+  const placeholder = placeholderProp === undefined ? t("placeholder.message") : placeholderProp
   const [editorRef, setEditorRef] = useState<LexicalEditor | null>(null)
 
   // Collect nodes from plugins

@@ -1,11 +1,16 @@
 import { FeedViewType } from "@follow/constants"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { FollowAPIError } from "@follow-app/client-sdk"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { apiContext } from "../../context"
+import { clearAccountInSession, startSessionCheck } from "../../sync/account"
+import type { SyncEngineHandle } from "../../sync/sync-status"
+import { registerSyncEngine, setSyncEngineActive } from "../../sync/sync-status"
+import { transactionQueue } from "../../sync/transaction-queue"
 import type { FollowAPI } from "../../types"
 import { entryActions, useEntryStore } from "../entry/store"
 import type { EntryModel } from "../entry/types"
-import { unreadSyncService, useUnreadStore } from "./store"
+import { unreadActions, unreadSyncService, useUnreadStore } from "./store"
 
 const { entryPatchManyMock, unreadUpsertManyMock } = vi.hoisted(() => ({
   entryPatchManyMock: vi.fn(),
@@ -26,6 +31,37 @@ vi.mock("@follow/database/services/unread", () => ({
   },
 }))
 
+vi.mock("@follow/database/services/sync-meta", () => ({
+  SyncMetaService: {
+    get: vi.fn(async () => null),
+    set: vi.fn(async () => {}),
+    delete: vi.fn(async () => {}),
+    reset: vi.fn(async () => {}),
+  },
+}))
+
+vi.mock("@follow/database/services/sync-transaction", () => ({
+  SyncTransactionService: {
+    insert: vi.fn(async () => {}),
+    deleteMany: vi.fn(async () => {}),
+    getAll: vi.fn(async () => []),
+    reset: vi.fn(async () => {}),
+  },
+}))
+
+/** Counters as the server confirmed them, which is what a hydrated client starts from. */
+const seedUnread = (counts: Record<string, number>) => {
+  unreadActions.upsertManyInSession(
+    Object.entries(counts).map(([id, count]) => ({ id, count })),
+    { reset: true },
+  )
+}
+
+const flushQueue = async () => {
+  await vi.advanceTimersByTimeAsync(100)
+  await transactionQueue.whenIdle()
+}
+
 const createEntry = (
   id: string,
   feedId: string,
@@ -44,10 +80,16 @@ const createEntry = (
 describe("unreadSyncService", () => {
   const markAsReadMock = vi.fn()
   const markAllAsReadMock = vi.fn()
+  const markAsUnreadMock = vi.fn()
+  const getUnreadMock = vi.fn()
 
   beforeEach(() => {
+    vi.useFakeTimers()
     vi.clearAllMocks()
-    entryActions.clearLocalReadProtectionInSession()
+    transactionQueue.clearInSession()
+    // Signed in as the account the local data belongs to.
+    clearAccountInSession()
+    startSessionCheck().confirm("user-1")
 
     useEntryStore.setState({
       data: {},
@@ -66,13 +108,21 @@ describe("unreadSyncService", () => {
       entryIdByList: {},
       entryIdSet: new Set(),
     })
-    useUnreadStore.setState({ data: {} })
+    seedUnread({})
     apiContext.provide({
       reads: {
         markAllAsRead: markAllAsReadMock,
         markAsRead: markAsReadMock,
+        markAsUnread: markAsUnreadMock,
+        get: getUnreadMock,
       },
     } as unknown as FollowAPI)
+  })
+
+  afterEach(() => {
+    transactionQueue.clearInSession()
+    setSyncEngineActive(false)
+    vi.useRealTimers()
   })
 
   it("marks multiple feed entries as read with one request and one local patch", async () => {
@@ -85,10 +135,15 @@ describe("unreadSyncService", () => {
       data: entries,
       entryIdSet: new Set(Object.keys(entries)),
     }))
-    useUnreadStore.setState({ data: { feed1: 2 } })
+    seedUnread({ feed1: 2 })
     markAsReadMock.mockResolvedValue({ data: null })
 
     await unreadSyncService.markEntriesAsRead(["entry1", "entry2"])
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+    expect(useUnreadStore.getState().data.feed1).toBe(0)
+    expect(markAsReadMock).not.toHaveBeenCalled()
+
+    await flushQueue()
 
     expect(markAsReadMock).toHaveBeenCalledTimes(1)
     expect(markAsReadMock).toHaveBeenCalledWith({
@@ -116,7 +171,7 @@ describe("unreadSyncService", () => {
       data: entries,
       entryIdSet: new Set(Object.keys(entries)),
     }))
-    useUnreadStore.setState({ data: { feed1: 3 } })
+    seedUnread({ feed1: 3 })
 
     let resolveMarkAllAsRead!: (value: { data: { read: Record<string, number> } }) => void
     markAllAsReadMock.mockReturnValue(
@@ -125,7 +180,7 @@ describe("unreadSyncService", () => {
       }),
     )
 
-    const markBatchAsRead = unreadSyncService.markBatchAsRead({
+    await unreadSyncService.markBatchAsRead({
       view: FeedViewType.Articles,
       filter: {
         feedIdList: ["feed1"],
@@ -136,17 +191,26 @@ describe("unreadSyncService", () => {
       },
       excludePrivate: false,
     })
-    await Promise.resolve()
 
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
     expect(useEntryStore.getState().data.entry2?.read).toBe(true)
     expect(useEntryStore.getState().data.entry3?.read).toBe(false)
     expect(useUnreadStore.getState().data.feed1).toBe(1)
 
+    await vi.advanceTimersByTimeAsync(100)
+    expect(markAllAsReadMock).toHaveBeenCalledTimes(1)
     resolveMarkAllAsRead({ data: { read: { feed1: 2 } } })
-    await markBatchAsRead
+    await transactionQueue.whenIdle()
 
     expect(useUnreadStore.getState().data.feed1).toBe(1)
+    expect(entryPatchManyMock).toHaveBeenCalledWith({
+      feedIds: ["feed1"],
+      entry: { read: true },
+      time: {
+        startTime: new Date("2026-01-01T00:02:00.000Z").getTime(),
+        endTime: new Date("2026-01-01T00:06:00.000Z").getTime(),
+      },
+    })
   })
 
   it("keeps entries inserted after the rendered list snapshot unread", async () => {
@@ -172,7 +236,8 @@ describe("unreadSyncService", () => {
       data: entries,
       entryIdSet: new Set(Object.keys(entries)),
     }))
-    useUnreadStore.setState({ data: { feed1: 2 } })
+    // 同步队列使用已确认计数作为基线，快照后到达的条目不进入这次批量操作。
+    seedUnread({ feed1: 2 })
     markAllAsReadMock.mockResolvedValue({ data: { read: { feed1: 1 } } })
 
     await unreadSyncService.markBatchAsRead({
@@ -186,6 +251,8 @@ describe("unreadSyncService", () => {
       excludePrivate: false,
     })
 
+    await flushQueue()
+
     expect(markAllAsReadMock).toHaveBeenCalledWith({
       view: FeedViewType.Articles,
       feedIdList: ["feed1"],
@@ -198,37 +265,237 @@ describe("unreadSyncService", () => {
   })
 
   it("queues rapid read marks into one batched request", async () => {
-    vi.useFakeTimers()
-
-    try {
-      const entries = {
-        entry1: createEntry("entry1", "feed1"),
-        entry2: createEntry("entry2", "feed1"),
-      }
-      useEntryStore.setState((state) => ({
-        ...state,
-        data: entries,
-        entryIdSet: new Set(Object.keys(entries)),
-      }))
-      useUnreadStore.setState({ data: { feed1: 2 } })
-      markAsReadMock.mockResolvedValue({ data: null })
-
-      const firstFlush = unreadSyncService.queueEntriesAsRead(["entry1"])
-      const secondFlush = unreadSyncService.queueEntriesAsRead(["entry2"])
-
-      expect(markAsReadMock).not.toHaveBeenCalled()
-
-      await vi.advanceTimersByTimeAsync(100)
-      await Promise.all([firstFlush, secondFlush])
-
-      expect(markAsReadMock).toHaveBeenCalledTimes(1)
-      expect(markAsReadMock).toHaveBeenCalledWith({
-        entryIds: ["entry1", "entry2"],
-        isInbox: false,
-      })
-    } finally {
-      vi.useRealTimers()
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+      entry2: createEntry("entry2", "feed1"),
     }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 2 })
+    markAsReadMock.mockResolvedValue({ data: null })
+
+    await unreadSyncService.queueEntriesAsRead(["entry1"])
+    await unreadSyncService.queueEntriesAsRead(["entry2"])
+
+    expect(markAsReadMock).not.toHaveBeenCalled()
+
+    await flushQueue()
+
+    expect(markAsReadMock).toHaveBeenCalledTimes(1)
+    expect(markAsReadMock).toHaveBeenCalledWith({
+      entryIds: ["entry1", "entry2"],
+      isInbox: false,
+    })
+  })
+
+  it("keeps optimistic read marks and retries when the network is down", async () => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 1 })
+    markAsReadMock
+      .mockRejectedValueOnce(new TypeError("Network request failed"))
+      .mockResolvedValue({ data: null })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await vi.advanceTimersByTimeAsync(100)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(markAsReadMock).toHaveBeenCalledTimes(1)
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+    expect(useUnreadStore.getState().data.feed1).toBe(0)
+    expect(entryPatchManyMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await transactionQueue.whenIdle()
+
+    expect(markAsReadMock).toHaveBeenCalledTimes(2)
+    expect(entryPatchManyMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("rolls back read marks the server rejects", async () => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 1 })
+    markAsReadMock.mockRejectedValue(new FollowAPIError("forbidden", 403))
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+    expect(useUnreadStore.getState().data.feed1).toBe(0)
+
+    await flushQueue()
+
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+    expect(useUnreadStore.getState().data.feed1).toBe(1)
+    expect(entryPatchManyMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["rejects it", () => new FollowAPIError("unprocessable", 422)],
+    ["rejects it and the recount fails too", () => new FollowAPIError("bad request", 400)],
+  ])("restores the counts of a mark-all-read when the server %s", async (label, error) => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+      entry2: createEntry("entry2", "feed1"),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 17, feed2: 3 })
+    markAllAsReadMock.mockRejectedValue(error())
+    // The recount returns what the client already confirmed, or nothing at all.
+    if (label.includes("recount fails")) {
+      getUnreadMock.mockRejectedValue(new Error("fetch failed: offline"))
+    } else {
+      getUnreadMock.mockResolvedValue({ data: { feed1: 17, feed2: 3 } })
+    }
+
+    await unreadSyncService.markFeedAsRead("feed1")
+    expect(useUnreadStore.getState().data.feed1).toBe(0)
+
+    await flushQueue()
+
+    expect(useUnreadStore.getState().data).toMatchObject({ feed1: 17, feed2: 3 })
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+    expect(useEntryStore.getState().data.entry2?.read).toBe(false)
+  })
+
+  it("commits the predicted effect when the server has no change log", async () => {
+    const entries = { entry1: createEntry("entry1", "feed1") }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 3 })
+    markAsReadMock.mockResolvedValue({ code: 0 })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
+
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+    expect(unreadUpsertManyMock).toHaveBeenLastCalledWith([{ id: "feed1", count: 2 }])
+
+    // Releasing the acknowledged transaction later must not apply or undo it again.
+    await vi.advanceTimersByTimeAsync(31_000)
+    transactionQueue.getOverlays()
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+  })
+
+  it("leaves the counters to the change log when the server numbered the mark", async () => {
+    const entries = { entry1: createEntry("entry1", "feed1") }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 3 })
+    setSyncEngineActive(true)
+    markAsReadMock.mockResolvedValue({ code: 0, lastSyncId: 12 })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
+
+    // Still shown as read by this client, but nothing was written as confirmed state.
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+    expect(unreadUpsertManyMock).not.toHaveBeenCalled()
+
+    // The change log reports the flip before the engine moves its cursor past it.
+    await unreadActions.applyConfirmedDelta({ feed1: -1 })
+    expect(unreadUpsertManyMock).toHaveBeenLastCalledWith([{ id: "feed1", count: 2 }])
+    transactionQueue.markSynced(12)
+
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+  })
+
+  it("restores the counter when the server reports that a mark flipped nothing", async () => {
+    const entries = { entry1: createEntry("entry1", "feed1") }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 3 })
+    setSyncEngineActive(true)
+    markAsReadMock.mockResolvedValue({ code: 0, lastSyncId: 12 })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+
+    // The entry was outside the retention window: no action, so the confirmed count stands.
+    transactionQueue.markSynced(12)
+
+    expect(useUnreadStore.getState().data.feed1).toBe(3)
+  })
+
+  it("treats zero as confirmed after marking whole feeds as read, and clamps the reported flips", async () => {
+    seedUnread({ feed1: 12, feed2: 4 })
+    setSyncEngineActive(true)
+    markAllAsReadMock.mockResolvedValue({ code: 0, data: { read: { feed1: 10 } }, lastSyncId: 20 })
+
+    await unreadSyncService.markFeedAsRead("feed1")
+    await flushQueue()
+
+    expect(useUnreadStore.getState().data).toMatchObject({ feed1: 0, feed2: 4 })
+    expect(unreadUpsertManyMock).toHaveBeenLastCalledWith([{ id: "feed1", count: 0 }], {
+      reset: undefined,
+    })
+
+    // The local counter had drifted to 12 while the server only had 10 unread rows.
+    await unreadActions.applyConfirmedDelta({ feed1: -10 })
+    transactionQueue.markSynced(20)
+    expect(useUnreadStore.getState().data.feed1).toBe(0)
+
+    // Entries arriving afterwards count from zero.
+    await unreadActions.applyConfirmedDelta({ feed1: 2 })
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+  })
+
+  it("rebases pending read marks on top of unread counts fetched from the server", async () => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+      entry2: createEntry("entry2", "feed2"),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 3, feed2: 1 })
+    markAsReadMock.mockReturnValue(new Promise(() => {}))
+    getUnreadMock.mockResolvedValue({ data: { feed1: 3, feed2: 1, feed3: 4 } })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    expect(useUnreadStore.getState().data.feed1).toBe(2)
+
+    await unreadSyncService.resetFromRemote()
+
+    expect(useUnreadStore.getState().data).toEqual({ feed1: 2, feed2: 1, feed3: 4 })
+    expect(unreadUpsertManyMock).toHaveBeenLastCalledWith(
+      [
+        { id: "feed1", count: 3 },
+        { id: "feed2", count: 1 },
+        { id: "feed3", count: 4 },
+      ],
+      { reset: true },
+    )
   })
 
   it("keeps entries locally read when a stale entry fetch returns during the request", async () => {
@@ -240,7 +507,7 @@ describe("unreadSyncService", () => {
       data: entries,
       entryIdSet: new Set(Object.keys(entries)),
     }))
-    useUnreadStore.setState({ data: { feed1: 1 } })
+    seedUnread({ feed1: 1 })
 
     let resolveMarkAsRead!: () => void
     markAsReadMock.mockReturnValue(
@@ -249,14 +516,16 @@ describe("unreadSyncService", () => {
       }),
     )
 
-    const markAsRead = unreadSyncService.markEntriesAsRead(["entry1"])
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await vi.advanceTimersByTimeAsync(100)
+    expect(markAsReadMock).toHaveBeenCalledTimes(1)
 
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
     entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
 
     resolveMarkAsRead()
-    await markAsRead
+    await transactionQueue.whenIdle()
 
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
   })
@@ -270,10 +539,11 @@ describe("unreadSyncService", () => {
       data: entries,
       entryIdSet: new Set(Object.keys(entries)),
     }))
-    useUnreadStore.setState({ data: { feed1: 1 } })
+    seedUnread({ feed1: 1 })
     markAsReadMock.mockResolvedValue({ data: null })
 
     await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
 
     entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
@@ -281,31 +551,122 @@ describe("unreadSyncService", () => {
     expect(useEntryStore.getState().data.entry1?.read).toBe(true)
   })
 
-  it("allows remote unread after the local read protection window expires", async () => {
-    vi.useFakeTimers()
+  it("allows remote unread after the acknowledgement grace window expires", async () => {
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
 
-    try {
-      const entries = {
-        entry1: createEntry("entry1", "feed1"),
-      }
-      useEntryStore.setState((state) => ({
-        ...state,
-        data: entries,
-        entryIdSet: new Set(Object.keys(entries)),
-      }))
-      useUnreadStore.setState({ data: { feed1: 1 } })
-      markAsReadMock.mockResolvedValue({ data: null })
-
-      await unreadSyncService.markEntriesAsRead(["entry1"])
-      expect(useEntryStore.getState().data.entry1?.read).toBe(true)
-
-      vi.advanceTimersByTime(31_000)
-      entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
-
-      expect(useEntryStore.getState().data.entry1?.read).toBe(false)
-    } finally {
-      vi.useRealTimers()
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
     }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 1 })
+    markAsReadMock.mockResolvedValue({ data: null })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+
+    vi.advanceTimersByTime(31_000)
+    entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
+
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+  })
+
+  it("stops protecting a read mark once the sync engine passed its sync id", async () => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1"),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 1 })
+    markAsReadMock.mockResolvedValue({ code: 0, lastSyncId: 12 })
+
+    await unreadSyncService.markEntriesAsRead(["entry1"])
+    await flushQueue()
+
+    entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
+    expect(useEntryStore.getState().data.entry1?.read).toBe(true)
+
+    transactionQueue.markSynced(12)
+    entryActions.upsertManyInSession([createEntry("entry1", "feed1")])
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+  })
+
+  it("keeps a pending unread mark when a stale fetch says the entry is read", async () => {
+    const entries = {
+      entry1: createEntry("entry1", "feed1", true),
+    }
+    useEntryStore.setState((state) => ({
+      ...state,
+      data: entries,
+      entryIdSet: new Set(Object.keys(entries)),
+    }))
+    seedUnread({ feed1: 0 })
+    markAsUnreadMock.mockReturnValue(new Promise(() => {}))
+
+    await unreadSyncService.markEntryAsUnread("entry1")
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+    expect(useUnreadStore.getState().data.feed1).toBe(1)
+
+    entryActions.upsertManyInSession([createEntry("entry1", "feed1", true)])
+    expect(useEntryStore.getState().data.entry1?.read).toBe(false)
+  })
+
+  describe("with the sync engine", () => {
+    const engine = (): SyncEngineHandle & {
+      requestUnreadCalibration: ReturnType<typeof vi.fn>
+      recordUnreadSnapshot: ReturnType<typeof vi.fn>
+    } => ({
+      ensureSynced: vi.fn(async () => true),
+      catchUp: vi.fn(async () => true),
+      requestUnreadCalibration: vi.fn(async () => {}),
+      recordUnreadSnapshot: vi.fn(async () => {}),
+    })
+
+    afterEach(() => {
+      registerSyncEngine(null)
+    })
+
+    it("recounts through the engine only when the refresh asks for it", async () => {
+      const handle = engine()
+      registerSyncEngine(handle)
+      setSyncEngineActive(true)
+
+      await unreadSyncService.refresh()
+      expect(handle.ensureSynced).toHaveBeenCalledTimes(1)
+      expect(handle.requestUnreadCalibration).not.toHaveBeenCalled()
+      expect(getUnreadMock).not.toHaveBeenCalled()
+
+      await unreadSyncService.refresh({ calibrate: true })
+      expect(handle.requestUnreadCalibration).toHaveBeenCalledTimes(1)
+      expect(getUnreadMock).not.toHaveBeenCalled()
+    })
+
+    it("tells the engine which sync id a snapshot reflects", async () => {
+      const handle = engine()
+      registerSyncEngine(handle)
+      setSyncEngineActive(true)
+      getUnreadMock.mockResolvedValue({ data: { feed1: 2 }, lastSyncId: 42 })
+
+      await unreadSyncService.resetFromRemote({ fallbackSyncId: 7 })
+      expect(handle.recordUnreadSnapshot).toHaveBeenCalledWith(42)
+
+      // Without an id in the answer the caller's fallback stands in.
+      getUnreadMock.mockResolvedValue({ data: { feed1: 2 } })
+      await unreadSyncService.resetFromRemote({ fallbackSyncId: 7 })
+      expect(handle.recordUnreadSnapshot).toHaveBeenLastCalledWith(7)
+
+      // A snapshot that changes nothing is still a snapshot.
+      handle.recordUnreadSnapshot.mockClear()
+      await unreadSyncService.resetFromRemote()
+      expect(handle.recordUnreadSnapshot).not.toHaveBeenCalled()
+      expect(useUnreadStore.getState().data).toEqual({ feed1: 2 })
+    })
   })
 })

@@ -37,6 +37,10 @@ const { defineSettingItem, SettingBuilder } = createSetting(
   useIntegrationSettingValue,
   setIntegrationSetting,
 )
+// Their save actions are only registered in the desktop app (Obsidian and Eagle work with local
+// apps and files), so on the web they could be set up but never used
+const desktopOnlyIntegrations = new Set(["obsidian", "outline", "eagle"])
+
 const ObsidianVaultPathPicker: FC = () => {
   const vaultPath = useIntegrationSettingValue().obsidianVaultPath
   const { t } = useTranslation("settings")
@@ -387,13 +391,15 @@ export const SettingIntegration = () => {
   }, [t, settings])
 
   const filteredIntegrations = useMemo(() => {
-    const allIntegrations = integrationCategories.flatMap((category) =>
-      category.integrations.map((integration) => ({
-        ...integration,
-        categoryTitle: category.title,
-        categoryIcon: category.icon,
-      })),
-    )
+    const allIntegrations = integrationCategories
+      .flatMap((category) =>
+        category.integrations.map((integration) => ({
+          ...integration,
+          categoryTitle: category.title,
+          categoryIcon: category.icon,
+        })),
+      )
+      .filter((integration) => IN_ELECTRON || !desktopOnlyIntegrations.has(integration.key))
 
     if (!searchQuery) return allIntegrations
 
@@ -423,7 +429,7 @@ export const SettingIntegration = () => {
             setSearchQuery(e.target.value)
           }, [])}
           className="h-9"
-          aria-label="Search integrations"
+          aria-label={t("integration.search.label")}
         />
       </div>
 
@@ -465,8 +471,10 @@ export const SettingIntegration = () => {
               <SettingSectionTitle title={t("integration.builtin.title")} />
               <span className="flex items-center gap-1 text-sm text-text-tertiary">
                 <span className="size-2 rounded-full bg-green" />
-                {filteredIntegrations.filter((i) => i.configured).length}/
-                {filteredIntegrations.length} configured
+                {t("integration.builtin.configured_count", {
+                  configured: filteredIntegrations.filter((i) => i.configured).length,
+                  total: filteredIntegrations.length,
+                })}
               </span>
             </div>
 
@@ -520,7 +528,7 @@ export const SettingIntegration = () => {
         <div className="text-center">
           <i className="i-mingcute-document-line mb-3 text-2xl text-text-tertiary" />
           <p className="mb-2 text-sm font-medium text-text-tertiary">
-            No built-in integration found
+            {t("integration.builtin.search_empty")}
           </p>
         </div>
       )}
@@ -542,7 +550,7 @@ const BottomTip = () => {
     try {
       const settings = getIntegrationSettings()
       const jsonData = JSON.stringify(settings, null, 2)
-      const filename = `follow-integration-settings-${new Date().toISOString().split("T")[0]}.json`
+      const filename = `folo-integration-settings-${new Date().toISOString().split("T")[0]}.json`
       downloadJsonFile(jsonData, filename)
       toast.success(t("integration.export.success"))
     } catch (error) {

@@ -22,6 +22,7 @@ export const defaultGeneralSettings: GeneralSettings = {
 
   // view
   unreadOnly: false,
+  timelineSortOrder: "desc",
   // mark unread
   scrollMarkUnread: true,
   hoverMarkUnread: false,

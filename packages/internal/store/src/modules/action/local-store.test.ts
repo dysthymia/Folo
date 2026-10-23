@@ -43,6 +43,24 @@ describe("disablePublishedMigrationTargets", () => {
     Reflect.deleteProperty(globalThis, "window")
   })
 
+  // 切换字段类型后保存并读回，避免无效的旧值重新进入本地持久化规则。
+  it("切换字段保留同类型条件，跨类型清除并持久化", () => {
+    const index = { ruleIndex: 0, groupIndex: 0, conditionIndex: 0 }
+    localActionActions.changeConditionField(index, "entry_content")
+    expect(useLocalActionStore.getState().rules[0]?.condition[0]?.[0]).toEqual({
+      field: "entry_content",
+      operator: "contains",
+      value: "AI",
+    })
+    localActionActions.changeConditionField(index, "view")
+    expect(useLocalActionStore.getState().rules[0]?.condition[0]?.[0]).toEqual({ field: "view" })
+    expect(useLocalActionStore.getState()).toMatchObject({ isDirty: true, revision: 3 })
+    localActionActions.saveRules()
+    expect(JSON.parse(String(storage.setItem.mock.calls.at(-1)?.[1])).rules[0].condition).toEqual([
+      [{ field: "view" }],
+    ])
+  })
+
   it("精确匹配后先持久化，再停用同一条本地旧规则", () => {
     expect(localActionSyncService.disablePublishedMigrationTargets("owner", [target])).toEqual({
       switched: true,

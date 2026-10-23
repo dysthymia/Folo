@@ -20,6 +20,7 @@ import { persistConfig, queryClient } from "~/lib/query-client"
 import { FollowCommandManager } from "~/modules/command/command-manager"
 import { ReviewPromptProvider } from "~/modules/review-prompt/provider"
 
+import { ApiConnectionProvider } from "./api-connection-provider"
 import { ExtensionExposeProvider } from "./extension-expose-provider"
 import { HotkeyProvider } from "./hotkey-provider"
 import { I18nProvider } from "./i18n-provider"
@@ -48,6 +49,7 @@ export const RootProviders: FC<PropsWithChildren> = ({ children }) => (
               <I18nProvider>
                 <ModalStackProvider>
                   <Toaster />
+                  <ApiConnectionProvider />
                   <EventProvider />
 
                   <UserProvider />

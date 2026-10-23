@@ -1,10 +1,13 @@
 import { env } from "@follow/shared/env.desktop"
 import type { HttpChatTransportInitOptions, UIMessageChunk } from "ai"
 import { HttpChatTransport, parseJsonEventStream, uiMessageChunkSchema } from "ai"
+import { t } from "i18next"
 
 import { getAIModelState } from "../atoms/session"
 import { getOneTimeToken, isLocalFoloHost } from "../local-provider"
 import { AIPersistService } from "../services"
+import { createChatStreamTimeout } from "../utils/chat-stream-timeout"
+import { withInactivityTimeout } from "../utils/stream-timeout"
 import type { BizUIMessage } from "./types"
 
 type TitleHandlerPersistOption = boolean | ((title: string) => void | Promise<void>)
@@ -126,7 +129,7 @@ class ExtendChatTransport extends HttpChatTransport<BizUIMessage> {
   ): ReadableStream<UIMessageChunk> {
     const { onValue, localProvider } = this.options || {}
     const handleGeneratedTitle = this.handleGeneratedTitle.bind(this)
-    return parseJsonEventStream({
+    const chunks = parseJsonEventStream({
       stream,
       schema: uiMessageChunkSchema,
     }).pipeThrough(
@@ -149,6 +152,14 @@ class ExtendChatTransport extends HttpChatTransport<BizUIMessage> {
           controller.enqueue(parsedChunk)
         },
       }),
+    )
+
+    // The server ends a stalled reply with an error chunk that says why; this only ends a reply
+    // whose connection died, which would otherwise stay on "Thinking..." until the user stops it.
+    return withInactivityTimeout(
+      chunks,
+      createChatStreamTimeout(),
+      () => new Error(t("chat.error.stream_timeout", { ns: "ai" })),
     )
   }
 

@@ -1,13 +1,19 @@
-import { useEffect, useRef } from "react"
+import TrackPlayer, { Event } from "@rntp/player"
+import { useEffect, useRef, useState } from "react"
 import { StyleSheet, View } from "react-native"
 import type { WebViewProps } from "react-native-webview"
 import { WebView } from "react-native-webview"
 
+import { FocusBlockerView } from "@/src/components/native/FocusBlockerView"
+
+import { handleNativePlaybackStarted } from "./entry-tts"
 import { ttsStreamController } from "./tts-stream-controller"
 import { TTS_STREAM_WEBVIEW_HTML } from "./tts-stream-webview-html"
 
 export const TtsStreamProvider = () => {
   const webViewRef = useRef<WebView<WebViewProps>>(null)
+  // Bumped to mount a fresh WebView after the system killed the content process of the old one
+  const [webViewKey, setWebViewKey] = useState(0)
 
   useEffect(() => {
     ttsStreamController.attachWebView(webViewRef.current)
@@ -15,23 +21,45 @@ export const TtsStreamProvider = () => {
     return () => {
       ttsStreamController.attachWebView(null)
     }
+  }, [webViewKey])
+
+  useEffect(() => {
+    const subscription = TrackPlayer.addEventListener(Event.IsPlayingChanged, ({ playing }) => {
+      if (playing) {
+        void handleNativePlaybackStarted()
+      }
+    })
+
+    return () => {
+      subscription.remove()
+    }
   }, [])
+
+  const recreateWebView = () => {
+    setWebViewKey((key) => key + 1)
+  }
 
   return (
     <View pointerEvents="none" style={styles.container}>
-      <WebView<WebViewProps>
-        ref={webViewRef}
-        allowsInlineMediaPlayback
-        androidLayerType="software"
-        cacheEnabled={false}
-        javaScriptEnabled
-        mediaPlaybackRequiresUserAction={false}
-        onMessage={ttsStreamController.handleMessage}
-        originWhitelist={["*"]}
-        scrollEnabled={false}
-        source={{ html: TTS_STREAM_WEBVIEW_HTML }}
-        style={styles.webView}
-      />
+      {/* Android would otherwise move the focus, and the open keyboard, of a closing form here */}
+      <FocusBlockerView style={styles.webView}>
+        <WebView<WebViewProps>
+          key={webViewKey}
+          ref={webViewRef}
+          allowsInlineMediaPlayback
+          androidLayerType="software"
+          cacheEnabled={false}
+          javaScriptEnabled
+          mediaPlaybackRequiresUserAction={false}
+          onContentProcessDidTerminate={recreateWebView}
+          onMessage={ttsStreamController.handleMessage}
+          onRenderProcessGone={recreateWebView}
+          originWhitelist={["*"]}
+          scrollEnabled={false}
+          source={{ html: TTS_STREAM_WEBVIEW_HTML }}
+          style={styles.webView}
+        />
+      </FocusBlockerView>
     </View>
   )
 }

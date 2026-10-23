@@ -8,6 +8,7 @@ import { transformVideoUrl } from "@follow/utils/url-for-video"
 import { cn } from "@follow/utils/utils"
 import { useHover } from "@use-gesture/react"
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import { AudioPlayer } from "~/atoms/player"
 import { useSpotlightSettingKey } from "~/atoms/settings/spotlight"
@@ -41,6 +42,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   preferFullSize = false,
   translation,
 }) => {
+  const { t } = useTranslation()
   const entry = useEntry(entryId, (state) => {
     const { url, media } = state
 
@@ -164,7 +166,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         ) : (
           <div className="center aspect-video w-full flex-col gap-1 rounded-md bg-material-medium text-xs text-text-secondary">
             <i className="i-mgc-sad-cute-re size-6" />
-            No video available
+            {t("entry_content.no_video")}
           </div>
         )}
         {!!entry.duration && showDuration && (

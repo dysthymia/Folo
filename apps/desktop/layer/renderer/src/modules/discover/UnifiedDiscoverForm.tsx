@@ -16,6 +16,7 @@ import type { DiscoveryItem } from "@follow-app/client-sdk"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { repository } from "@pkg"
 import { useMutation } from "@tanstack/react-query"
+import i18next from "i18next"
 import { produce } from "immer"
 import type { ChangeEvent, CompositionEvent } from "react"
 import { startTransition, useCallback, useEffect, useMemo, useRef } from "react"
@@ -27,6 +28,7 @@ import { z } from "zod"
 import { useModalStack } from "~/components/ui/modal/stacked/hooks"
 import { useRequireLogin } from "~/hooks/common/useRequireLogin"
 import { followClient } from "~/lib/api-client"
+import { createErrorToaster } from "~/lib/error-parser"
 
 import {
   getDiscoverSearchData,
@@ -45,6 +47,8 @@ const isFeedLikeUrl = (value: string) => {
   return /^(?:https?:\/\/|rsshub:\/\/|folo:\/\/|follow:\/\/)/.test(trimmed)
 }
 
+const isWebUrl = (value: string) => /^https?:\/\//.test(value.trim())
+
 // Auto-detect input type
 function detectInputType(value: string): "rss" | "rsshub" | "search" {
   const trimmed = value.trim()
@@ -57,22 +61,25 @@ function detectInputType(value: string): "rss" | "rsshub" | "search" {
   return "search"
 }
 
-const searchSchema = z.object({
-  keyword: z.string().min(1),
+const rsshubRouteSchema = z.string().url().startsWith("rsshub://")
+
+const discoverSchema = z.object({
+  keyword: z
+    .string()
+    .min(1, { error: () => i18next.t("discover.keyword_required") })
+    .refine(
+      (keyword) =>
+        detectInputType(keyword) !== "rsshub" ||
+        rsshubRouteSchema.safeParse(keyword.trim()).success,
+      {
+        // Resolved at validation time so the message follows the current language.
+        error: () => i18next.t("discover.invalid_rsshub_route"),
+      },
+    ),
   target: z.enum(["feeds", "lists"]),
 })
 
-const rssSchema = z.object({
-  keyword: z.string().refine(isFeedLikeUrl, {
-    message: "Invalid RSS URL",
-  }),
-})
-
-const rsshubSchema = z.object({
-  keyword: z.string().url().startsWith("rsshub://"),
-})
-
-type SearchFormData = z.infer<typeof searchSchema>
+type DiscoverFormData = z.infer<typeof discoverSchema>
 
 // Compact Tool Link Component
 interface ToolLinkProps {
@@ -114,14 +121,15 @@ export function UnifiedDiscoverForm() {
     return "search"
   }, [keywordFromSearch])
 
-  // Use search form by default, but validate based on detected type
-  const form = useForm<SearchFormData>({
-    resolver: zodResolver(searchSchema),
+  const form = useForm<DiscoverFormData>({
+    resolver: zodResolver(discoverSchema),
     defaultValues: {
       keyword: keywordFromSearch || "",
       target: "feeds",
     },
-    mode: "all",
+    // Not on blur: leaving the autofocused empty box would show an error before any typing, and
+    // the message pushes down the tool links under the mouse, so the click that blurred it missed
+    mode: "onChange",
   })
 
   const { watch, trigger } = form
@@ -140,34 +148,6 @@ export function UnifiedDiscoverForm() {
 
   const mutation = useMutation({
     mutationFn: async ({ keyword, target }: { keyword: string; target: "feeds" | "lists" }) => {
-      const inputType = detectInputType(keyword)
-
-      // For RSS/RSSHub, validate and show feed form modal directly
-      if (inputType === "rss") {
-        const validated = rssSchema.safeParse({ keyword })
-        if (!validated.success) {
-          throw new Error("Invalid RSS URL")
-        }
-        present({
-          title: t("feed_form.add_feed"),
-          content: () => <FeedForm url={keyword} onSuccess={dismissAll} />,
-        })
-        return []
-      }
-
-      if (inputType === "rsshub") {
-        const validated = rsshubSchema.safeParse({ keyword })
-        if (!validated.success) {
-          throw new Error("Invalid RSSHub route")
-        }
-        present({
-          title: t("feed_form.add_feed"),
-          content: () => <FeedForm url={keyword} onSuccess={dismissAll} />,
-        })
-        return []
-      }
-
-      // For search, perform discovery
       const { data } = await followClient.api.discover.discover({
         keyword: keyword.trim(),
         target,
@@ -180,6 +160,7 @@ export function UnifiedDiscoverForm() {
 
       return data
     },
+    onError: createErrorToaster(t("discover.search_failed")),
   })
 
   const handleKeywordChange = useCallback(
@@ -283,12 +264,47 @@ export function UnifiedDiscoverForm() {
     [form],
   )
 
-  function onSubmit(values: SearchFormData) {
+  function onSubmit(values: DiscoverFormData) {
     if (!ensureLogin()) {
       return
     }
-    atomKey.current = values.keyword + values.target
-    mutation.mutate({ keyword: values.keyword, target: values.target })
+
+    const inputType = detectInputType(values.keyword)
+    const url = values.keyword.trim()
+    const presentFeedForm = () =>
+      present({
+        title: t("feed_form.add_feed"),
+        content: () => <FeedForm url={url} onSuccess={dismissAll} />,
+      })
+
+    // RSSHub routes and app links open the feed preview directly
+    if (inputType === "rsshub" || (inputType === "rss" && !isWebUrl(url))) {
+      presentFeedForm()
+      return
+    }
+
+    // A web address may be a site rather than a feed, so it goes through discovery,
+    // which finds the site's feeds; a feed address still opens its preview directly
+    const target = inputType === "search" ? values.target : "feeds"
+    atomKey.current = values.keyword + target
+    mutation.mutate(
+      { keyword: values.keyword, target },
+      {
+        onSuccess: (data) => {
+          if (inputType !== "rss") return
+          // Discovery knows only feeds someone follows or a page links to, so a new feed
+          // address finds nothing and is previewed directly instead of "No feeds found"
+          if (data.length === 0) {
+            mutation.reset()
+            presentFeedForm()
+            return
+          }
+          if (data.length === 1 && data[0]?.feed?.url === url) {
+            presentFeedForm()
+          }
+        },
+      },
+    )
   }
 
   const showTargetSelector = detectedType === "search"
@@ -318,7 +334,7 @@ export function UnifiedDiscoverForm() {
                       value={field.value || ""}
                       onChange={handleKeywordChange}
                       onCompositionEnd={handleCompositionEnd}
-                      placeholder="Enter URL, RSSHub route, or keyword..."
+                      placeholder={t("discover.search_input_placeholder")}
                       className="h-12 text-base"
                     />
                   </FormControl>
@@ -355,7 +371,7 @@ export function UnifiedDiscoverForm() {
                           className="inline-flex items-center gap-1 rounded-full border border-accent px-2 py-px text-accent hover:bg-accent/10"
                         >
                           <i className="i-mgc-book-6-cute-re" />
-                          <span>RSSHub Docs</span>
+                          <span>{t("discover.rsshub_docs")}</span>
                         </a>
                       </>
                     )}
@@ -468,12 +484,16 @@ export function UnifiedDiscoverForm() {
       <div className="mt-8 w-full max-w-2xl">
         {(mutation.isSuccess || !!discoverSearchData?.length) && (
           <div className="mb-4 flex items-center gap-2 text-sm text-text-secondary">
-            {t("discover.search.results", { count: discoverSearchData?.length || 0 })}
+            {/* Named after what the search looked for, which the segment may no longer show */}
+            {(mutation.variables?.target ?? target) === "lists"
+              ? t("discover.search.list_results", { count: discoverSearchData?.length || 0 })
+              : t("discover.search.results", { count: discoverSearchData?.length || 0 })}
 
             {discoverSearchData && discoverSearchData.length > 0 && (
               <MotionButtonBase
                 className="flex cursor-button items-center justify-between gap-2 hover:text-accent"
                 type="button"
+                aria-label={t("discover.search.clear_results")}
                 onClick={() => {
                   setDiscoverSearchData({})
                   mutation.reset()

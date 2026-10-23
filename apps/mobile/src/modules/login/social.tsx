@@ -11,7 +11,9 @@ import { Image } from "@/src/components/ui/image/Image"
 import { PlatformActivityIndicator } from "@/src/components/ui/loading/PlatformActivityIndicator"
 import { Text } from "@/src/components/ui/typography/Text"
 import type { AuthProvider } from "@/src/lib/auth"
-import { signIn, useAuthProviders } from "@/src/lib/auth"
+import { signIn, signInWithSocialProvider, useAuthProviders } from "@/src/lib/auth"
+import { getSocialSignInErrorCode, getSocialSignInFailureMessageKey } from "@/src/lib/social-auth"
+import { toast } from "@/src/lib/toast"
 
 import { loginWithSocialProvider } from "./social-login"
 
@@ -66,6 +68,15 @@ export function SocialLogin({ onPressEmail }: { isRegister: boolean; onPressEmai
       ) : null}
 
       {socialProviders.map(([key, provider]) => {
+        // Says why the server refused the sign-in when it names a reason the app explains
+        const showFailure = (code: string | undefined) => {
+          const messageKey = getSocialSignInFailureMessageKey(code)
+          toast.error(
+            messageKey
+              ? t(messageKey, { ns: "common" })
+              : t("login.social_sign_in_failed", { provider: provider.name }),
+          )
+        }
         return (
           <Pressable
             key={key}
@@ -77,12 +88,8 @@ export function SocialLogin({ onPressEmail }: { isRegister: boolean; onPressEmai
               void loginWithSocialProvider({
                 providerId: provider.id,
                 setPendingProviderId,
-                signInWithProvider: async (providerId, { callbackURL }) => {
-                  await signIn.social({
-                    provider: providerId as any,
-                    callbackURL,
-                  })
-                },
+                signInWithProvider: (providerId, { callbackURL }) =>
+                  signInWithSocialProvider(providerId, callbackURL),
                 signInWithAppleIdentityToken: async () => {
                   const credential = await AppleAuthentication.signInAsync({
                     requestedScopes: [
@@ -94,12 +101,18 @@ export function SocialLogin({ onPressEmail }: { isRegister: boolean; onPressEmai
                     throw new Error("No identityToken.")
                   }
 
-                  await signIn.social({
+                  const res = await signIn.social({
                     provider: "apple",
                     idToken: {
                       token: credential.identityToken,
                     },
                   })
+                  // The auth client resolves with the error instead of throwing
+                  if (res.error) {
+                    throw Object.assign(new Error(res.error.message || res.error.statusText), {
+                      code: getSocialSignInErrorCode(res.error),
+                    })
+                  }
                 },
                 syncSession: async () => {
                   const session = await userSyncService.whoami().catch((error) => {
@@ -115,6 +128,14 @@ export function SocialLogin({ onPressEmail }: { isRegister: boolean; onPressEmai
                 },
                 onError: (error) => {
                   console.error(error)
+                  const code = (error as { code?: string } | null)?.code
+                  // Closing the Apple sign-in sheet is not a failure
+                  if (code === "ERR_REQUEST_CANCELED") return
+                  showFailure(code)
+                },
+                onFailure: (error) => {
+                  console.error(`[auth] ${provider.id} sign-in failed: ${error}`)
+                  showFailure(error)
                 },
               })
             }}

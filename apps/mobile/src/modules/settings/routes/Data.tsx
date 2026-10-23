@@ -14,7 +14,9 @@ import {
   GroupedInsetListSectionHeader,
 } from "@/src/components/ui/grouped/GroupedList"
 import { Switch } from "@/src/components/ui/switch/Switch"
-import { getDbPath } from "@/src/database"
+import { setAnonymousDataEnabled } from "@/src/initialize/analytics"
+import { scheduleLocalDataReset } from "@/src/lib/local-data-reset"
+import { reloadApp } from "@/src/lib/reload-app"
 import { toast } from "@/src/lib/toast"
 
 import { exportLocalDatabase, importOpml } from "../utils"
@@ -39,6 +41,7 @@ export const DataScreen = () => {
             value={sendAnonymousData}
             onValueChange={(val) => {
               setDataSetting("sendAnonymousData", val)
+              void setAnonymousDataEnabled(val).catch(console.error)
             }}
           />
         </GroupedInsetListCell>
@@ -78,9 +81,8 @@ export const DataScreen = () => {
                   text: t("general.rebuild_database.button"),
                   style: "destructive",
                   onPress: async () => {
-                    const dbPath = getDbPath()
-                    await FileSystem.deleteAsync(dbPath)
-                    await expo.reloadAppAsync("Clear Sqlite Data")
+                    scheduleLocalDataReset()
+                    await reloadApp("Clear Sqlite Data")
                   },
                 },
               ],
@@ -108,7 +110,7 @@ export const DataScreen = () => {
                     if (cacheDir) {
                       await FileSystem.deleteAsync(cacheDir, { idempotent: true })
                     }
-                    toast.success("Cache cleared")
+                    toast.success(t("data_control.clean_cache.success"))
                   },
                 },
               ],

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  *
  */
+import { useTranslation } from "react-i18next"
 import type { ViewStyle } from "react-native"
 import { Pressable, StyleSheet, View } from "react-native"
 import { useSafeAreaInsets } from "react-native-safe-area-context"
@@ -12,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { CloseCuteReIcon } from "@/src/icons/close_cute_re"
 import { Download2CuteReIcon } from "@/src/icons/download_2_cute_re"
 import { ShareForwardCuteReIcon } from "@/src/icons/share_forward_cute_re"
+import { useWindowControlsInsets } from "@/src/lib/window-controls"
 
 type Props = {
   onRequestClose: () => void
@@ -26,13 +28,20 @@ const ImageDefaultHeader = ({
   onPressShare,
   currentImageUri,
 }: Props) => {
+  const { t } = useTranslation()
   const insets = useSafeAreaInsets()
+  // The viewer covers the window, whose controls sit over the close button otherwise
+  const windowControlsInsets = useWindowControlsInsets()
 
   return (
     <View
       style={[
         styles.root,
-        { marginTop: insets.top, marginLeft: insets.left, marginRight: insets.right },
+        {
+          marginTop: insets.top,
+          marginLeft: insets.left + windowControlsInsets.left,
+          marginRight: insets.right + windowControlsInsets.right,
+        },
       ]}
     >
       {/* Left side - Close button */}
@@ -42,8 +51,8 @@ const ImageDefaultHeader = ({
           onPress={onRequestClose}
           hitSlop={16}
           accessibilityRole="button"
-          accessibilityLabel="Close image"
-          accessibilityHint="Closes viewer for header image"
+          accessibilityLabel={t("image.close")}
+          accessibilityHint={t("image.close_hint")}
           onAccessibilityEscape={onRequestClose}
         >
           <CloseCuteReIcon color="#fff" width={20} height={20} />
@@ -59,8 +68,8 @@ const ImageDefaultHeader = ({
               onPress={() => onPressSave(currentImageUri)}
               hitSlop={16}
               accessibilityRole="button"
-              accessibilityLabel="Save image"
-              accessibilityHint="Saves image to photo library"
+              accessibilityLabel={t("image.save")}
+              accessibilityHint={t("image.save_hint")}
             >
               <Download2CuteReIcon color="#fff" width={20} height={20} />
             </Pressable>
@@ -70,8 +79,8 @@ const ImageDefaultHeader = ({
               onPress={() => onPressShare(currentImageUri)}
               hitSlop={16}
               accessibilityRole="button"
-              accessibilityLabel="Share image"
-              accessibilityHint="Shares image with other apps"
+              accessibilityLabel={t("image.share")}
+              accessibilityHint={t("image.share_hint")}
             >
               <ShareForwardCuteReIcon color="#fff" width={20} height={20} />
             </Pressable>

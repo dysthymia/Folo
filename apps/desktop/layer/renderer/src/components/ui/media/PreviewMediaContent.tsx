@@ -10,7 +10,7 @@ import { useAnimationControls } from "motion/react"
 import type { FC } from "react"
 import * as React from "react"
 import { Fragment, use, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useTranslation } from "react-i18next"
+import { Trans, useTranslation } from "react-i18next"
 import type { ReactZoomPanPinchRef, ReactZoomPanPinchState } from "react-zoom-pan-pinch"
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch"
 
@@ -212,8 +212,10 @@ const HeaderActions: FC<{
 
   const { dismiss } = useCurrentModal()
   return (
+    // `safe-inset-top` keeps the actions below the custom Windows title bar, whose window
+    // controls would otherwise cover the close button
     <m.div
-      className="pointer-events-none absolute inset-x-0 top-0 z-[100] flex h-16 items-center justify-end gap-2 px-3"
+      className="pointer-events-none absolute inset-x-0 z-[100] flex h-16 items-center justify-end gap-2 px-3 safe-inset-top"
       variants={headerActionsVariants}
       initial="initial"
       animate="animate"
@@ -265,6 +267,7 @@ export const PreviewMediaContent: FC<{
   children?: React.ReactNode
   onZoomChange?: (isZoomed: boolean) => void
 }> = ({ media, initialIndex = 0, children, onZoomChange }) => {
+  const { t } = useTranslation()
   const videoRefs = useRef<(VideoPlayerRef | null)[]>([])
   const [emblaRef, emblaApi] = useEmblaCarousel({ loop: true, startIndex: initialIndex }, [
     WheelGesturesPlugin(),
@@ -329,6 +332,7 @@ export const PreviewMediaContent: FC<{
                 src={src}
                 controls
                 autoPlay
+                autoFocus
                 muted
                 className={cn("h-full w-auto object-contain", !!children && "rounded-l-xl")}
                 onClick={stopPropagation}
@@ -386,6 +390,7 @@ export const PreviewMediaContent: FC<{
 
           {currentSlideIndex > 0 && (
             <GlassButton
+              description={t("media.previous")}
               className={`absolute left-2 top-1/2 z-[100] flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-white opacity-0 backdrop-blur-sm duration-200 hover:bg-black/40 group-hover:opacity-100 lg:left-4 lg:size-10`}
               onClick={() => {
                 emblaApi?.scrollPrev()
@@ -397,6 +402,7 @@ export const PreviewMediaContent: FC<{
 
           {currentSlideIndex < media.length - 1 && (
             <GlassButton
+              description={t("media.next")}
               className={`absolute right-2 top-1/2 z-[100] flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-white opacity-0 backdrop-blur-sm duration-200 hover:bg-black/40 group-hover:opacity-100 lg:right-4 lg:size-10`}
               onClick={() => {
                 emblaApi?.scrollNext()
@@ -421,6 +427,7 @@ const FallbackableImage: FC<
     onZoomChange?: (isZoomed: boolean) => void
   }
 > = ({ src, fallbackUrl, containerClassName, onZoomChange, loading }) => {
+  const { t } = useTranslation()
   const replaceImgUrlIfNeed = useReplaceImgUrlIfNeed()
   const [currentSrc, setCurrentSrc] = useState(() => replaceImgUrlIfNeed(src))
   const [isAllError, setIsAllError] = useState(false)
@@ -431,19 +438,20 @@ const FallbackableImage: FC<
     currentSrc === src ? "origin" : "proxy",
   )
 
+  // Start over from the first source, so a retry goes through every source again
+  const retry = () => {
+    const firstSrc = replaceImgUrlIfNeed(src)
+    setCurrentSrc(firstSrc)
+    setCurrentState(firstSrc === src ? "origin" : "proxy")
+    setIsLoading(true)
+    setIsAllError(false)
+  }
+
   const handleError = useCallback(() => {
     switch (currentState) {
       case "proxy": {
-        if (currentSrc !== src) {
-          setCurrentSrc(src)
-          setCurrentState("origin")
-        } else {
-          if (fallbackUrl) {
-            setCurrentSrc(fallbackUrl)
-            setCurrentState("fallback")
-          }
-        }
-
+        setCurrentSrc(src)
+        setCurrentState("origin")
         break
       }
       case "origin": {
@@ -459,7 +467,7 @@ const FallbackableImage: FC<
         setIsAllError(true)
       }
     }
-  }, [currentSrc, currentState, fallbackUrl, src])
+  }, [currentState, fallbackUrl, src])
 
   return (
     <div className={cn("relative size-full", containerClassName)}>
@@ -468,7 +476,7 @@ const FallbackableImage: FC<
           minZoom={1}
           maxZoom={2}
           src={currentSrc}
-          alt="preview"
+          alt={t("media.preview")}
           loading={loading}
           highResLoaded={!isLoading}
           onLoad={() => setIsLoading(false)}
@@ -484,48 +492,49 @@ const FallbackableImage: FC<
         >
           <i className="i-mgc-close-cute-re text-[60px] text-red-400" />
 
-          <span>Failed to load image</span>
+          <span>{t("media.image_load_failed")}</span>
           <div className="center gap-2">
-            <MotionButtonBase
-              className="pointer-events-auto underline underline-offset-4"
-              onClick={() => {
-                setCurrentSrc(replaceImgUrlIfNeed(src))
-                setIsAllError(false)
+            <Trans
+              t={t}
+              i18nKey="media.image_load_failed_actions"
+              components={{
+                Retry: (
+                  <MotionButtonBase
+                    className="pointer-events-auto underline underline-offset-4"
+                    onClick={retry}
+                  />
+                ),
+                Link: (
+                  <a
+                    className="pointer-events-auto underline underline-offset-4"
+                    href={src}
+                    target="_blank"
+                    rel="noreferrer"
+                  />
+                ),
               }}
-            >
-              Retry
-            </MotionButtonBase>
-            or
-            <a
-              className="pointer-events-auto underline underline-offset-4"
-              href={src}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Visit Original
-            </a>
+            />
           </div>
         </div>
       )}
 
       {currentState === "fallback" && (
         <div className="absolute bottom-8 left-1/2 mt-4 -translate-x-1/2 rounded-lg bg-material-thick px-3 py-2 text-center text-xs text-text opacity-70 backdrop-blur-background">
-          <span>
-            This image is preview in low quality, because the original image is not available.
-          </span>
-          <br />
-          <span>
-            You can{" "}
-            <a
-              href={src}
-              target="_blank"
-              rel="noreferrer"
-              className="underline duration-200 hover:text-accent"
-            >
-              visit the original image
-            </a>{" "}
-            if you want to see the full quality.
-          </span>
+          <Trans
+            t={t}
+            i18nKey="media.low_quality_preview"
+            components={{
+              br: <br />,
+              Link: (
+                <a
+                  href={src}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline duration-200 hover:text-accent"
+                />
+              ),
+            }}
+          />
         </div>
       )}
     </div>

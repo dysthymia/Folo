@@ -1,4 +1,6 @@
-import { userActions } from "@follow/store/user/store"
+import { whoami } from "@follow/store/user/getters"
+import { userActions, userSyncService } from "@follow/store/user/store"
+import { trackApiConnection } from "@follow/utils/api-connection"
 import { createMobileAPIHeaders } from "@follow/utils/headers"
 import { FollowClient } from "@follow-app/client-sdk"
 import { fetch } from "expo/fetch"
@@ -6,20 +8,28 @@ import { nativeApplicationVersion } from "expo-application"
 import { Platform } from "react-native"
 import DeviceInfo from "react-native-device-info"
 
+import { setApiUnreachable } from "@/src/atoms/api-connection"
+
 import { getAuthStateRevision, getCookie, getLastAuthStateChangeAt } from "./auth"
 import { getClientId, getSessionId } from "./client-session"
 import { getUserAgent } from "./native/user-agent"
 import { destination } from "./navigation/biz/Destination"
+import { trackFetch } from "./network-activity"
 import { proxyEnv } from "./proxy-env"
+import { createUnauthorizedSessionCheck } from "./session-check"
+
+// Tracked so a runtime reload can wait for the requests to settle first (see `reload-app.ts`).
+const trackedFetch = trackFetch(fetch)
 
 export const followClient = new FollowClient({
   credentials: "omit",
   timeout: 60_000,
   baseURL: proxyEnv.API_URL,
-  fetch: async (input, options = {}) => fetch(input.toString(), options as any) as any,
+  fetch: async (input, options = {}) => trackedFetch(input.toString(), options as any) as any,
 })
 
 export const followApi = followClient.api
+
 followClient.addRequestInterceptor(async (ctx) => {
   const { url } = ctx
 
@@ -42,7 +52,7 @@ followClient.addRequestInterceptor(async (ctx) => {
   header["X-Client-Id"] = getClientId()
   header["X-Session-Id"] = getSessionId()
   header["User-Agent"] = await getUserAgent()
-  header["cookie"] = getCookie()
+  header["cookie"] = await getCookie()
 
   const apiHeader = createMobileAPIHeaders({
     version: nativeApplicationVersion || "",
@@ -81,10 +91,23 @@ const getRequestAuthRevision = (options: Record<string, unknown>) => {
   return typeof revision === "number" ? revision : undefined
 }
 
+const signOutLocally = async () => {
+  await userActions.removeCurrentUser()
+  destination.Login()
+}
+
+// A revoked session keeps its cookie, so the cookie alone does not say the user is signed in.
+const checkSessionAfterUnauthorized = createUnauthorizedSessionCheck({
+  isSignedIn: () => !!whoami(),
+  fetchSession: () => userSyncService.whoami(),
+  getAuthRevision: getAuthStateRevision,
+  onSessionGone: signOutLocally,
+})
+
 followClient.addResponseInterceptor(async (ctx) => {
   const { options, response } = ctx
   if (response.status === 401) {
-    const currentCookie = getCookie()
+    const currentCookie = await getCookie()
     const requestCookie = getRequestCookie(options.headers)
     const requestAuthRevision = getRequestAuthRevision(options as Record<string, unknown>)
     const currentAuthRevision = getAuthStateRevision()
@@ -97,16 +120,16 @@ followClient.addResponseInterceptor(async (ctx) => {
       return ctx.response
     }
 
-    if (currentCookie) {
-      return ctx.response
-    }
-
     if (Date.now() - getLastAuthStateChangeAt() < 10_000) {
       return ctx.response
     }
 
-    userActions.removeCurrentUser()
-    destination.Login()
+    if (currentCookie) {
+      void checkSessionAfterUnauthorized()
+      return ctx.response
+    }
+
+    void signOutLocally()
   } else if (response.status >= 400) {
     // try {
     //   const isJSON = response.headers.get("content-type")?.includes("application/json")
@@ -119,4 +142,37 @@ followClient.addResponseInterceptor(async (ctx) => {
   }
 
   return ctx.response
+})
+
+/** Whether the API answers at all. Any HTTP status counts; the endpoint needs no session. */
+const probeApiReachability = async () => {
+  await trackedFetch(`${proxyEnv.API_URL}/status/configs`, {
+    signal: AbortSignal.timeout(10_000),
+  })
+  return true
+}
+
+const apiRecoveredListeners = new Set<() => void>()
+
+/** Called when the API answers again after it could not be reached. */
+export const onApiRecovered = (listener: () => void) => {
+  apiRecoveredListeners.add(listener)
+  return () => {
+    apiRecoveredListeners.delete(listener)
+  }
+}
+
+trackApiConnection(followClient, {
+  probe: probeApiReachability,
+  onUnreachable: () => setApiUnreachable(true),
+  onRecovered: () => {
+    setApiUnreachable(false)
+    for (const listener of apiRecoveredListeners) {
+      try {
+        listener()
+      } catch (error) {
+        console.error("[api-connection] recovery listener threw", error)
+      }
+    }
+  },
 })

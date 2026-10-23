@@ -1,6 +1,7 @@
 import { createSettingAtom } from "@follow/atoms/helper/setting.js"
 import { defaultUISettings } from "@follow/shared/settings/defaults"
 import type { UISettings } from "@follow/shared/settings/interface"
+import { atom } from "jotai"
 
 import { getDefaultLanguage } from "~/lib/language"
 import { DEFAULT_ACTION_ORDER } from "~/modules/customize-toolbar/constant"
@@ -28,7 +29,8 @@ const {
   settingAtom: __uiSettingAtom,
 } = createSettingAtom("ui", createDefaultUISettings)
 
-export const uiServerSyncWhiteListKeys: (keyof UISettings)[] = [
+/** Device-local appearance settings: every other appearance setting syncs to the account. */
+export const uiLocalOnlyKeys: (keyof UISettings)[] = [
   "uiFontFamily",
   "readerFontFamily",
   "opaqueSidebar",
@@ -70,3 +72,12 @@ export {
   useUISettingSelector,
   useUISettingValue,
 }
+
+/** Unsaved CSS previewed while the custom CSS editor is open; null applies the saved CSS. */
+export const customCSSPreviewAtom = atom<string | null>(null)
+
+/**
+ * Hides the modal overlay while the custom CSS editor previews the article behind it, without
+ * changing the saved modal overlay setting.
+ */
+export const suppressModalOverlayAtom = atom(false)

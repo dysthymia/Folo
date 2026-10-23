@@ -9,6 +9,7 @@ import Animated, {
   withSpring,
 } from "react-native-reanimated"
 
+import { useGeneralSettingKey } from "@/src/atoms/settings/general"
 import { FakeNativeHeaderTitle } from "@/src/components/layouts/header/FakeNativeHeaderTitle"
 import { DefaultHeaderBackButton } from "@/src/components/layouts/header/NavigationHeader"
 import { NavigationBlurEffectHeader } from "@/src/components/layouts/views/SafeNavigationScrollView"
@@ -17,6 +18,7 @@ import { TIMELINE_VIEW_SELECTOR_HEIGHT } from "@/src/constants/ui"
 import { useIsTabletLayout } from "@/src/lib/responsive"
 import {
   ActionGroup,
+  EntrySortOrderActionButton,
   FeedShareActionButton,
   HomeLeftAction,
   MarkAllAsReadActionButton,
@@ -24,16 +26,26 @@ import {
 } from "@/src/modules/screen/action"
 import { TimelineViewSelector } from "@/src/modules/screen/TimelineViewSelector"
 
-import { useEntries, useEntryListContext, useSelectedFeedTitle } from "./atoms"
+import {
+  EntryListContext,
+  useEntries,
+  useEntryListContext,
+  useIsTimelineEntrySource,
+  useSelectedFeedTitle,
+} from "./atoms"
 
 export function TimelineHeader({ feedId }: { feedId?: string }) {
   const viewTitle = useSelectedFeedTitle()
-  const screenType = useEntryListContext().type
+  const entryListContext = useEntryListContext()
+  const screenType = entryListContext.type
   const isLoggedIn = useIsLoggedIn()
+  const unreadOnly = useGeneralSettingKey("unreadOnly")
+  const isTimelineSource = useIsTimelineEntrySource()
 
   const isFeed = screenType === "feed"
   const isTimeline = screenType === "timeline"
   const isSubscriptions = screenType === "subscriptions"
+  const shouldShowEntrySort = isLoggedIn && unreadOnly && isTimelineSource && (isFeed || isTimeline)
   const isTablet = useIsTabletLayout()
 
   const { fetchedTime, isFetching } = useEntries()
@@ -51,16 +63,20 @@ export function TimelineHeader({ feedId }: { feedId?: string }) {
         [isTimeline, isSubscriptions],
       )}
       headerRight={useMemo(() => {
+        // 中文：导航头在列表上下文外渲染，显式恢复上下文以限定已读操作的订阅范围。
         return () => (
-          <View className="flex-row items-center justify-end">
-            <ActionGroup>
-              {isLoggedIn && <UnreadOnlyActionButton />}
-              {isLoggedIn && <MarkAllAsReadActionButton fetchedTime={fetchedTime} />}
-              <FeedShareActionButton feedId={feedId} />
-            </ActionGroup>
-          </View>
+          <EntryListContext value={entryListContext}>
+            <View className="flex-row items-center justify-end">
+              <ActionGroup>
+                {shouldShowEntrySort && <EntrySortOrderActionButton />}
+                {isLoggedIn && <UnreadOnlyActionButton />}
+                {isLoggedIn && <MarkAllAsReadActionButton fetchedTime={fetchedTime} />}
+                <FeedShareActionButton feedId={feedId} />
+              </ActionGroup>
+            </View>
+          </EntryListContext>
         )
-      }, [feedId, fetchedTime, isLoggedIn])}
+      }, [entryListContext, feedId, fetchedTime, isLoggedIn, shouldShowEntrySort])}
       headerHideableBottom={isTimeline || isSubscriptions ? TimelineViewSelector : undefined}
       headerHideableBottomHeight={TIMELINE_VIEW_SELECTOR_HEIGHT}
     />

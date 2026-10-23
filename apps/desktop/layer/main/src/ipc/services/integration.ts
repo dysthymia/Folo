@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import fsp from "node:fs/promises"
 
-import { dialog, shell } from "electron"
+import { dialog, net, shell } from "electron"
 import { IpcMethod, IpcService } from "electron-ipc-decorator"
 import path from "pathe"
 
@@ -15,15 +15,11 @@ import { createObsidianFrontmatter } from "./obsidian-frontmatter"
 // https://datatracker.ietf.org/doc/html/rfc2396
 // eslint-disable-next-line no-control-regex
 const INVALID_CHAR_REGEX = /[\u0000-\u001F"#$%&*+,:;<=>?[\]^`{|}\u007F/\\]/g
-const DRIVE_LETTER_REGEX = /^[a-z]:/i
 
+// The name is an entry title, not a path, so no `:` is kept, not even after a leading letter
+// that looks like a drive: on Windows it would write to an NTFS alternate data stream
 function sanitizeFileName(name: string): string {
-  const match = DRIVE_LETTER_REGEX.exec(name)
-  const driveLetter = match ? match[0] : ""
-
-  // A `:` is only allowed as part of a windows drive letter (ex: C:\foo)
-  // Otherwise, avoid them because they can refer to NTFS alternate data streams.
-  return driveLetter + name.slice(driveLetter.length).replaceAll(INVALID_CHAR_REGEX, "_")
+  return name.replaceAll(INVALID_CHAR_REGEX, "_")
 }
 
 // Input types
@@ -61,8 +57,9 @@ interface CustomFetchInput {
 
 export async function saveMediaToEagle(input: SaveToEagleInput): Promise<any> {
   try {
-    const res = await fetch("http://localhost:41595/api/item/addFromURLs", {
+    const res = await net.fetch("http://localhost:41595/api/item/addFromURLs", {
       method: "POST",
+      credentials: "omit",
       headers: {
         "Content-Type": "application/json",
       },
@@ -216,8 +213,10 @@ ${content}
       }
     }
 
-    const res = await fetch(`${host}/api/v2/auth/login`, {
+    const res = await net.fetch(`${host}/api/v2/auth/login`, {
       method: "POST",
+      // The session id is read from `set-cookie` and kept by the app; Chromium must not keep it too.
+      credentials: "omit",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
@@ -244,7 +243,7 @@ ${content}
     if (!sid) {
       return "Not logged in to qBittorrent"
     }
-    const res = await fetch(`${host}/api/v2/auth/check`, {
+    const res = await net.fetch(`${host}/api/v2/auth/check`, {
       method: "GET",
       headers: {
         Cookie: `SID=${sid}`,
@@ -264,7 +263,7 @@ ${content}
     if (!sid) {
       return "Not logged in to qBittorrent"
     }
-    const res = await fetch(`${host}/api/v2/torrents/add`, {
+    const res = await net.fetch(`${host}/api/v2/torrents/add`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -304,27 +303,11 @@ ${content}
       headerCount: Object.keys(headers || {}).length,
     })
 
-    // Log request headers (mask sensitive headers)
-    const safeHeaders = { ...headers }
-    Object.keys(safeHeaders).forEach((key) => {
-      if (
-        key.toLowerCase().includes("authorization") ||
-        key.toLowerCase().includes("token") ||
-        key.toLowerCase().includes("key")
-      ) {
-        safeHeaders[key] = "***"
-      }
+    // Only the header names are logged: the log file is written at every level and users attach
+    // it to issues, while integrations carry secrets in cookies, custom headers and bodies
+    logger.debug(`[CustomFetch:${requestId}] Request headers`, {
+      names: Object.keys(headers || {}),
     })
-    logger.debug(`[CustomFetch:${requestId}] Request headers`, { headers: safeHeaders })
-
-    // Log request body (truncated for large bodies)
-    if (body) {
-      const truncatedBody =
-        body.length > 500
-          ? `${body.slice(0, 500)}... [truncated, total: ${body.length} chars]`
-          : body
-      logger.debug(`[CustomFetch:${requestId}] Request body`, { body: truncatedBody })
-    }
 
     const startTime = Date.now()
 
@@ -337,9 +320,10 @@ ${content}
 
       logger.debug(`[CustomFetch:${requestId}] Sending request...`)
 
-      const response = await fetch(url, {
+      const response = await net.fetch(url, {
         method,
         headers,
+        credentials: "omit",
         body: body && ["POST", "PUT", "PATCH"].includes(method.toUpperCase()) ? body : undefined,
         signal: controller.signal,
       })
@@ -362,7 +346,6 @@ ${content}
       })
 
       logger.debug(`[CustomFetch:${requestId}] Response headers`, {
-        headers: responseHeaders,
         contentType: responseHeaders["content-type"],
         contentLength: responseHeaders["content-length"],
       })
@@ -373,7 +356,6 @@ ${content}
 
       logger.debug(`[CustomFetch:${requestId}] Response body received`, {
         size: `${responseSize} chars`,
-        preview: text.length > 200 ? `${text.slice(0, 200)}...` : text,
       })
 
       // Try to parse as JSON, fallback to text

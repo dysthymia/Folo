@@ -1,15 +1,16 @@
 import { FeedViewType } from "@follow/constants"
 import { useEntriesQuery, useEntryIdsByFeedId } from "@follow/store/entry/hooks"
 import { getFeedById } from "@follow/store/feed/getter"
+import { useFeedById } from "@follow/store/feed/hooks"
 import { getSubscriptionById } from "@follow/store/subscription/getter"
-import { getSubscriptionCategory } from "@follow/store/subscription/hooks"
+import { useCategories } from "@follow/store/subscription/hooks"
 import { subscriptionSyncService } from "@follow/store/subscription/store"
 import { unreadSyncService } from "@follow/store/unread/store"
 import dayjs from "dayjs"
 import { setStringAsync } from "expo-clipboard"
 import { t } from "i18next"
 import type { CSSProperties, FC, PropsWithChildren } from "react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import type { ListRenderItemInfo } from "react-native"
 import { Alert, FlatList, View } from "react-native"
@@ -19,6 +20,7 @@ import { ContextMenu } from "@/src/components/ui/context-menu"
 import { PlatformActivityIndicator } from "@/src/components/ui/loading/PlatformActivityIndicator"
 import { modalPrompt } from "@/src/components/ui/modal/imperative-modal"
 import { views } from "@/src/constants/views"
+import { toastFetchError } from "@/src/lib/error-parser"
 import { useNavigation } from "@/src/lib/navigation/hooks"
 import type { Navigation } from "@/src/lib/navigation/Navigation"
 import { isIOS } from "@/src/lib/platform"
@@ -28,7 +30,7 @@ import { FeedScreen } from "@/src/screens/(stack)/feeds/[feedId]/FeedScreen"
 
 import { ItemSeparator } from "../entry-list/ItemSeparator"
 import { EntryNormalItem } from "../entry-list/templates/EntryNormalItem"
-import { getSelectedView } from "../screen/atoms"
+import { getSelectedView, selectFeed, useSelectedView } from "../screen/atoms"
 
 export const SubscriptionFeedItemContextMenu: FC<
   PropsWithChildren & {
@@ -36,31 +38,34 @@ export const SubscriptionFeedItemContextMenu: FC<
   }
 > = ({ id, children }) => {
   const navigation = useNavigation()
-  const [open, setOpen] = useState(false)
-  const [Content, setContent] = useState<React.ReactNode>(() =>
-    generateSubscriptionContextMenu(navigation, id),
+  // Built from the current state on every change. Rebuilding it when the menu opens comes too
+  // late on Android, whose native menu is already showing the items it had.
+  const view = useSelectedView()
+  const allCategories = useCategories(view)
+  const feedErrorAt = useFeedById(id, (feed) => feed.errorAt)
+  const content = useMemo(
+    () => generateSubscriptionContextMenu(navigation, id, view, allCategories),
+    // The menu reads the feed's error when it is built.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [navigation, id, view, allCategories, feedErrorAt],
   )
 
-  useEffect(() => {
-    if (open) {
-      setContent(generateSubscriptionContextMenu(navigation, id))
-    }
-  }, [id, navigation, open])
-
   return (
-    <ContextMenu.Root onOpenChange={setOpen}>
+    <ContextMenu.Root>
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
 
-      {Content}
+      {content}
     </ContextMenu.Root>
   )
 }
 
-const generateSubscriptionContextMenu = (navigation: Navigation, id: string) => {
-  const view = getSelectedView()
-
+const generateSubscriptionContextMenu = (
+  navigation: Navigation,
+  id: string,
+  view: FeedViewType,
+  allCategories: string[],
+) => {
   const feed = getFeedById(id)
-  const allCategories = getSubscriptionCategory(view)
 
   return (
     <ContextMenu.Content>
@@ -68,6 +73,8 @@ const generateSubscriptionContextMenu = (navigation: Navigation, id: string) => 
         <ContextMenu.Preview
           size="STRETCH"
           onPress={() => {
+            // FeedScreen shows the selected feed, not the one it is pushed with
+            selectFeed({ type: "feed", feedId: id })
             navigation.pushControllerView(FeedScreen, {
               feedId: id,
             })
@@ -158,19 +165,26 @@ const generateSubscriptionContextMenu = (navigation: Navigation, id: string) => 
             key={`SubContent/CreateNewCategory`}
             onSelect={() => {
               // create new category
-              const subscription = getSubscriptionById(id)
-              if (!subscription) return
+              if (!getSubscriptionById(id)) return
               const prompt = isIOS ? Alert.prompt : modalPrompt
 
-              prompt("Create New Category", "Enter the name of the new category", (text) => {
-                subscriptionSyncService.edit({
-                  ...subscription,
-                  category: text,
-                })
-              })
+              prompt(
+                t("operation.create_new_category"),
+                t("operation.enter_name_for_new_category"),
+                (text) => {
+                  // Read once the name is in: another device may have edited the feed meanwhile,
+                  // and an older copy would write those fields back.
+                  const subscription = getSubscriptionById(id)
+                  if (!subscription) return
+                  subscriptionSyncService.edit({
+                    ...subscription,
+                    category: text,
+                  })
+                },
+              )
             }}
           >
-            <ContextMenu.ItemTitle>Create New Category</ContextMenu.ItemTitle>
+            <ContextMenu.ItemTitle>{t("operation.create_new_category")}</ContextMenu.ItemTitle>
             <ContextMenu.ItemIcon ios={{ name: "plus" }} />
           </ContextMenu.Item>
         </ContextMenu.SubContent>
@@ -239,8 +253,13 @@ const generateSubscriptionContextMenu = (navigation: Navigation, id: string) => 
             {
               text: t("operation.unfollow"),
               style: "destructive",
-              onPress: () => {
-                subscriptionSyncService.unsubscribe(id)
+              onPress: async () => {
+                try {
+                  await subscriptionSyncService.unsubscribe(id)
+                } catch (error) {
+                  // The store puts the feed back, which alone would not say why
+                  toastFetchError(error instanceof Error ? error : new Error(String(error)))
+                }
               },
             },
           ])
@@ -340,7 +359,7 @@ export const SubscriptionFeedCategoryContextMenu = ({
                 newCategory,
                 view: currentView,
               })
-              toast.success("Category renamed successfully")
+              toast.success(t("operation.rename_category_success"))
             }
             prompt(
               t("operation.rename_category"),
@@ -398,12 +417,21 @@ export const SubscriptionFeedCategoryContextMenu = ({
 const PreviewFeeds = (props: { id: string; view: FeedViewType }) => {
   const { id: feedId } = props
   const entryIds = useEntryIdsByFeedId(feedId)
-  const options = useFetchEntriesSettings()
+  const options = useFetchEntriesSettings({
+    isTimelineSource: false,
+    unreadOnlyEnabled: false,
+  })
   const { isLoading } = useEntriesQuery({ feedId, limit: 5, ...options })
+  const previewEntryIds = useMemo(() => entryIds?.slice(0, 5), [entryIds])
 
   const renderItem = useCallback(
     ({ item: id }: ListRenderItemInfo<string>) => (
-      <EntryNormalItem entryId={id} extraData={{ entryIds: null }} view={props.view} />
+      <EntryNormalItem
+        entryId={id}
+        extraData={{ entryIds: null }}
+        view={props.view}
+        isTimelineSource={false}
+      />
     ),
     [props.view],
   )
@@ -414,7 +442,7 @@ const PreviewFeeds = (props: { id: string; view: FeedViewType }) => {
       )}
       <FlatList
         scrollEnabled={false}
-        data={useMemo(() => entryIds?.slice(0, 5), [entryIds])}
+        data={previewEntryIds}
         renderItem={renderItem}
         ItemSeparatorComponent={ItemSeparator}
       />

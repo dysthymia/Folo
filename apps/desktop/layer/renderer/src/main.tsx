@@ -3,11 +3,23 @@
 // to be installed before any other module is evaluated.
 import "./lib/random-uuid-polyfill"
 import "./wdyr"
+// Reads the error a sign-in came back with before the router takes the query away
+import "./lib/auth-redirect-error"
+// Imported apart from main.css: the production Tailwind pass rewrites the whole sheet
+// and loses the font files' relative url()s, so the fonts were never bundled
+import "@follow/components/assets/font.css"
 import "./styles/main.css"
+// Registers the "messaging" sync model before the sync engine starts.
+import "./lib/web-push-registration"
 
 import { DEV, IN_ELECTRON, WEB_BUILD } from "@follow/shared/constants"
 import { env } from "@follow/shared/env.desktop"
-import { apiContext, authClientContext, queryClientContext } from "@follow/store/context"
+import {
+  apiContext,
+  authClientContext,
+  queryClientContext,
+  syncApiContext,
+} from "@follow/store/context"
 import {
   resolveDevPaidFeatureUnlock,
   setDevPaidFeatureUnlock,
@@ -31,6 +43,7 @@ import { router } from "./router"
 authClientContext.provide(authClient)
 queryClientContext.provide(queryClient)
 apiContext.provide(followApi)
+syncApiContext.provide(followApi.sync)
 
 setDevPaidFeatureUnlock(
   resolveDevPaidFeatureUnlock({

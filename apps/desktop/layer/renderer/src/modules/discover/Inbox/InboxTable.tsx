@@ -1,3 +1,4 @@
+import { LoadingCircle } from "@follow/components/ui/loading/index.jsx"
 import {
   Table,
   TableBody,
@@ -6,7 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@follow/components/ui/table/index.jsx"
-import { useInboxById, useInboxList } from "@follow/store/inbox/hooks"
+import { useInboxById, useInboxList, usePrefetchInboxList } from "@follow/store/inbox/hooks"
 import { memo } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -16,7 +17,14 @@ import { InboxSecret } from "./InboxSecret"
 
 export const InboxTable = () => {
   const { t } = useTranslation()
+  const { isLoading } = usePrefetchInboxList()
   const inboxes = useInboxList()
+  if (isLoading && inboxes.length === 0)
+    return (
+      <div className="center mb-8 min-h-24">
+        <LoadingCircle size="large" />
+      </div>
+    )
   if (inboxes.length === 0)
     return (
       <div className="center mb-4 flex flex-col gap-2 text-sm text-text-secondary">
@@ -57,7 +65,7 @@ const Row = memo(({ id }: { id: string }) => {
       </TableCell>
       <TableCell size="sm">{inbox.title}</TableCell>
       <TableCell size="sm">
-        <InboxSecret secret={inbox.secret} />
+        <InboxSecret id={inbox.id} />
       </TableCell>
       <TableCell size="sm" className="center">
         <InboxActions id={inbox.id} />

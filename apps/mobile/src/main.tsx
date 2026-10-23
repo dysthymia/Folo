@@ -1,7 +1,14 @@
 import "./global.css"
 import "./polyfill"
+// Before any module that opens the database
+import "./initialize/scheduled-local-data-reset"
 
-import { apiContext, authClientContext, queryClientContext } from "@follow/store/context"
+import {
+  apiContext,
+  authClientContext,
+  queryClientContext,
+  syncApiContext,
+} from "@follow/store/context"
 import {
   resolveDevPaidFeatureUnlock,
   setDevPaidFeatureUnlock,
@@ -11,6 +18,7 @@ import { Image } from "expo-image"
 import { LinearGradient } from "expo-linear-gradient"
 import { cssInterop } from "nativewind"
 import { useTranslation } from "react-i18next"
+import { RootSiblingParent } from "react-native-root-siblings"
 import { enableFreeze } from "react-native-screens"
 
 import { App } from "./App"
@@ -40,6 +48,8 @@ global.ELECTRON = false
 authClientContext.provide(authClient)
 queryClientContext.provide(queryClient)
 apiContext.provide(followApi)
+// 中文：同步服务使用统一 API 上下文，同时保留本地开发解锁配置。
+syncApiContext.provide(followApi.sync)
 
 setDevPaidFeatureUnlock(
   resolveDevPaidFeatureUnlock({
@@ -64,53 +74,57 @@ function RootComponent() {
     <OtaProvider>
       <RootProviders>
         <BottomTabProvider>
-          <RootStackNavigation
-            headerConfig={{
-              hidden: true,
-            }}
-          >
-            <App>
-              <TabRoot>
-                <TabScreen
-                  activeIcon={"home5CuteFi"}
-                  icon={"home5CuteRe"}
-                  title={t("tabs.home")}
-                  identifier="IndexTabScreen"
-                >
-                  <IndexTabScreen />
-                </TabScreen>
+          {/* Outside the screen stack, so toasts, dialogs and loaders draw above every screen,
+              not only the root one: pushed and modal screens cover anything inside it on Android */}
+          <RootSiblingParent>
+            <RootStackNavigation
+              headerConfig={{
+                hidden: true,
+              }}
+            >
+              <App>
+                <TabRoot>
+                  <TabScreen
+                    activeIcon={"home5CuteFi"}
+                    icon={"home5CuteRe"}
+                    title={t("tabs.home")}
+                    identifier="IndexTabScreen"
+                  >
+                    <IndexTabScreen />
+                  </TabScreen>
 
-                <TabScreen
-                  activeIcon={"blackBoard2CuteFi"}
-                  icon={"blackBoard2CuteRe"}
-                  title={t("tabs.subscriptions")}
-                  identifier="SubscriptionsTabScreen"
-                >
-                  <SubscriptionsTabScreen />
-                </TabScreen>
+                  <TabScreen
+                    activeIcon={"blackBoard2CuteFi"}
+                    icon={"blackBoard2CuteRe"}
+                    title={t("tabs.subscriptions")}
+                    identifier="SubscriptionsTabScreen"
+                  >
+                    <SubscriptionsTabScreen />
+                  </TabScreen>
 
-                <TabScreen
-                  activeIcon={"search3CuteFi"}
-                  icon={"search3CuteRe"}
-                  title={t("tabs.discover")}
-                  identifier="DiscoverTabScreen"
-                >
-                  <DiscoverTabScreen />
-                </TabScreen>
-                <TabScreen
-                  activeIcon={"settings1CuteFi"}
-                  icon={"settings1CuteRe"}
-                  title={t("tabs.settings")}
-                  identifier="SettingsTabScreen"
-                >
-                  <SettingsTabScreen />
-                </TabScreen>
+                  <TabScreen
+                    activeIcon={"search3CuteFi"}
+                    icon={"search3CuteRe"}
+                    title={t("tabs.discover")}
+                    identifier="DiscoverTabScreen"
+                  >
+                    <DiscoverTabScreen />
+                  </TabScreen>
+                  <TabScreen
+                    activeIcon={"settings1CuteFi"}
+                    icon={"settings1CuteRe"}
+                    title={t("tabs.settings")}
+                    identifier="SettingsTabScreen"
+                  >
+                    <SettingsTabScreen />
+                  </TabScreen>
 
-                <ReactNativeTab />
-              </TabRoot>
-            </App>
-          </RootStackNavigation>
-          <Lightbox />
+                  <ReactNativeTab />
+                </TabRoot>
+              </App>
+            </RootStackNavigation>
+            <Lightbox />
+          </RootSiblingParent>
         </BottomTabProvider>
       </RootProviders>
     </OtaProvider>

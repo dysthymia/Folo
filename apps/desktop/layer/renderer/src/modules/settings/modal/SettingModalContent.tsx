@@ -12,7 +12,7 @@ import {
   useMemo,
   useState,
 } from "react"
-import { Trans } from "react-i18next"
+import { Trans, useTranslation } from "react-i18next"
 import { useLoaderData } from "react-router"
 
 import { ModalClose } from "~/components/ui/modal/stacked/components"
@@ -43,6 +43,13 @@ export const SettingModalContent: FC<{
   const canUseInitialTab =
     typeof initialTab === "string" && initialTab in pages && availablePaths.has(initialTab)
   const resolvedInitialTab = canUseInitialTab ? initialTab : fallbackTab
+  // A tab can be hidden only until the server configs arrive, as the AI tab is on a first load.
+  // The modal starts on the fallback and goes to the requested tab once it shows up.
+  const [pendingTab] = useState(() =>
+    !canUseInitialTab && typeof initialTab === "string" && initialTab in pages
+      ? { tab: initialTab, fallback: resolvedInitialTab }
+      : null,
+  )
 
   if (!resolvedInitialTab) {
     return null
@@ -51,7 +58,7 @@ export const SettingModalContent: FC<{
   return (
     <SettingTabProvider initialTab={resolvedInitialTab}>
       <SettingModalLayout>
-        <Content initialSection={initialSection} />
+        <Content initialSection={initialSection} pendingTab={pendingTab} />
       </SettingModalLayout>
     </SettingTabProvider>
   )
@@ -59,7 +66,9 @@ export const SettingModalContent: FC<{
 
 const Content: FC<{
   initialSection?: string | null
-}> = ({ initialSection }) => {
+  pendingTab: { tab: string; fallback: string | undefined } | null
+}> = ({ initialSection, pendingTab }) => {
+  const { t } = useTranslation("settings")
   const availableSettings = useAvailableSettings()
   const tab = useSettingTab()
   const setTab = useSetSettingTab()
@@ -72,6 +81,17 @@ const Content: FC<{
       setTab(availableSettings[0]!.path)
     }
   }, [availableSettings, setTab, tab])
+
+  const [isPendingTabSettled, setIsPendingTabSettled] = useState(false)
+  useEffect(() => {
+    if (!pendingTab || isPendingTabSettled) return
+    if (!availableSettings.some((setting) => setting.path === pendingTab.tab)) return
+    setIsPendingTabSettled(true)
+    // Unless the user went to another tab meanwhile
+    if (tab === pendingTab.fallback) {
+      setTab(pendingTab.tab)
+    }
+  }, [availableSettings, isPendingTabSettled, pendingTab, setTab, tab])
 
   useEffect(() => {
     if (!isLoggedIn && tab && !isGuestAccessibleSettingTab(tab)) {
@@ -165,7 +185,7 @@ const Content: FC<{
           className="flex flex-1 items-center justify-center px-12 text-center text-text-secondary"
           onClick={ensureLogin}
         >
-          Please log in to access this setting.
+          {t("common.login_required")}
         </button>
       </>
     )

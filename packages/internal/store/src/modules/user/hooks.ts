@@ -4,18 +4,30 @@ import { useEffect } from "react"
 
 import { api, queryClient } from "../../context"
 import type { GeneralQueryOptions } from "../../types"
-import { isNewUserQueryKey } from "./constants"
+import { isNewUserQueryKey, whoamiQueryKey } from "./constants"
 import { getEffectiveUserRole, isDevPaidFeatureUnlockEnabled } from "./dev-paid-feature-unlock"
 import type { UserStore } from "./store"
 import { userSyncService, useUserStore } from "./store"
 
-export const whoamiQueryKey = ["user", "whoami"]
+export { whoamiQueryKey } from "./constants"
 
 export const invalidateUserSession = () => {
   queryClient().invalidateQueries({
     queryKey: whoamiQueryKey,
   })
 }
+
+/**
+ * Fetch the session once, through the query cache. App start-up needs the session before any
+ * component is mounted; going through the cache lets every `whoamiQueryKey` observer that
+ * mounts afterwards reuse this result instead of asking for the session again.
+ */
+export const fetchSessionUser = () =>
+  queryClient().fetchQuery({
+    queryKey: whoamiQueryKey,
+    queryFn: () => userSyncService.whoami(),
+    staleTime: 0,
+  })
 
 export const usePrefetchSessionUser = () => {
   const query = useQuery({

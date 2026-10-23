@@ -1,6 +1,7 @@
 import { defaultGeneralSettings } from "@follow/shared/settings/defaults"
 import type { GeneralSettings } from "@follow/shared/settings/interface"
 import type { FetchEntriesPropsSettings } from "@follow/store/entry/types"
+import { getEffectiveEntrySortOrder } from "@follow/store/entry/utils"
 import type { SupportedLanguages } from "@follow-app/client-sdk"
 import { useMemo } from "react"
 
@@ -8,7 +9,7 @@ import { getDeviceLanguage } from "@/src/lib/i18n"
 
 import { createSettingAtom } from "./internal/helper"
 
-const createDefaultSettings = (): GeneralSettings => {
+export const createDefaultGeneralSettings = (): GeneralSettings => {
   const deviceLanguage = getDeviceLanguage()
   return {
     ...defaultGeneralSettings,
@@ -20,6 +21,7 @@ export const {
   useSettingKey: useGeneralSettingKey,
   useSettingSelector: useGeneralSettingSelector,
   useSettingKeys: useGeneralSettingKeys,
+  usePaidSettingLocked: useGeneralPaidSettingLocked,
   setSetting: setGeneralSetting,
   clearSettings: clearGeneralSettings,
   initializeDefaultSettings: initializeDefaultGeneralSettings,
@@ -27,9 +29,10 @@ export const {
   useSettingValue: useGeneralSettingValue,
 
   settingAtom: __generalSettingAtom,
-} = createSettingAtom("general", createDefaultSettings)
+} = createSettingAtom("general", createDefaultGeneralSettings)
 
-export const generalServerSyncWhiteListKeys: (keyof GeneralSettings)[] = [
+/** Device-local general settings: every other general setting syncs to the account. */
+export const generalLocalOnlyKeys: (keyof GeneralSettings)[] = [
   "sendAnonymousData",
   "language",
   "appLaunchOnStartup",
@@ -53,21 +56,46 @@ export function useHideAllReadSubscriptions() {
   return hideAllReadSubscriptions && unreadOnly
 }
 
-export function getHideAllReadSubscriptions() {
-  const { hideAllReadSubscriptions, unreadOnly } = getGeneralSettings()
-  return hideAllReadSubscriptions && unreadOnly
+// Mark-all-read leaves the entries of private subscriptions alone when the timeline hides them
+export function getHidePrivateSubscriptionsInTimeline() {
+  return getGeneralSettings().hidePrivateSubscriptionsInTimeline
 }
 
-export function useFetchEntriesSettings(): FetchEntriesPropsSettings {
+export function useEffectiveEntrySortOrder({ isTimelineSource }: { isTimelineSource: boolean }) {
+  const unreadOnly = useGeneralSettingKey("unreadOnly")
+  const sortOrder = useGeneralSettingKey("timelineSortOrder")
+
+  return getEffectiveEntrySortOrder({
+    isTimelineSource,
+    sortOrder,
+    unreadOnly,
+  })
+}
+
+export function useFetchEntriesSettings({
+  isTimelineSource,
+  unreadOnlyEnabled = true,
+}: {
+  isTimelineSource: boolean
+  unreadOnlyEnabled?: boolean
+}): FetchEntriesPropsSettings {
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
   )
-  const unreadOnly = useGeneralSettingKey("unreadOnly")
+  const savedUnreadOnly = useGeneralSettingKey("unreadOnly")
+  const unreadOnly = unreadOnlyEnabled && savedUnreadOnly
+  const savedSortOrder = useGeneralSettingKey("timelineSortOrder")
+  const sortOrder = getEffectiveEntrySortOrder({
+    isTimelineSource,
+    sortOrder: savedSortOrder,
+    unreadOnly,
+  })
   return useMemo(
     () => ({
       hidePrivateSubscriptionsInTimeline,
       unreadOnly,
+      sortOrder,
     }),
-    [hidePrivateSubscriptionsInTimeline, unreadOnly],
+    [hidePrivateSubscriptionsInTimeline, sortOrder, unreadOnly],
   )
 }

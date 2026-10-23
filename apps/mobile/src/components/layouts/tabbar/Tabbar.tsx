@@ -1,4 +1,4 @@
-import { useAtom, useAtomValue } from "jotai"
+import { useAtom, useAtomValueRawSync } from "jotai"
 import type { FC } from "react"
 import { memo, use, useCallback, useEffect, useMemo } from "react"
 import type { StyleProp, TextStyle } from "react-native"
@@ -17,6 +17,7 @@ import { gentleSpringPreset, quickSpringPreset, softSpringPreset } from "@/src/c
 import { BottomTabContext } from "@/src/lib/navigation/bottom-tab/BottomTabContext"
 import type { ResolvedTabScreenProps, TabbarIconProps } from "@/src/lib/navigation/bottom-tab/types"
 import { isAndroid } from "@/src/lib/platform"
+import { FloatingPlayerBar } from "@/src/modules/player/FloatingPlayerBar"
 import { PlayerTabBar } from "@/src/modules/player/PlayerTabBar"
 import { accentColor } from "@/src/theme/colors"
 
@@ -26,13 +27,15 @@ import { BottomTabBarBackgroundContext } from "./contexts/BottomTabBarBackground
 import { BottomTabBarVisibleContext } from "./contexts/BottomTabBarVisibleContext"
 
 export const Tabbar: FC<{
-  onPress?: (index: number) => void
+  /** `wasSelected` tells a tap on the tab already shown */
+  onPress?: (index: number, wasSelected: boolean) => void
 }> = ({ onPress: onPressProp }) => {
   const setTabBarHeight = use(SetBottomTabBarHeightContext)
   const insets = useSafeAreaInsets()
   const tabBarVisible = use(BottomTabBarVisibleContext)
   const tabContext = use(BottomTabContext)
-  const tabScreens = useAtomValue(tabContext.tabScreensAtom)
+  // Every TabScreen registers itself from an effect in the commit that mounts this bar
+  const tabScreens = useAtomValueRawSync(tabContext.tabScreensAtom)
   const [selectedIndex, setSelectedIndex] = useAtom(tabContext.currentIndexAtom)
   const translateY = useSharedValue(0)
   useEffect(() => {
@@ -55,8 +58,9 @@ export const Tabbar: FC<{
   }, [])
   const renderTabScreens = tabScreens.length > 0 ? tabScreens : placeholderTabScreens
   const onPress = useEventCallback((index: number) => {
+    const wasSelected = index === selectedIndex
     setSelectedIndex(index)
-    onPressProp?.(index)
+    onPressProp?.(index, wasSelected)
   })
   return (
     <Animated.View
@@ -79,16 +83,18 @@ export const Tabbar: FC<{
       <TabBarBackground />
 
       <PlayerTabBar />
+      {/* Pushed screens cover the tab bar, so they get a floating player bar instead */}
+      <FloatingPlayerBar />
       <Grid columns={renderTabScreens.length} gap={10} className="mt-[7]">
-        {renderTabScreens.map((route, index) => {
-          const focused = index === selectedIndex
+        {renderTabScreens.map((route) => {
+          const focused = route.tabScreenIndex === selectedIndex
           const label = route.title ?? ""
           return (
             <MemoedTabItem
               key={route.tabScreenIndex}
               focused={focused}
               identifier={route.identifier ?? String(route.tabScreenIndex)}
-              index={index}
+              index={route.tabScreenIndex}
               label={label}
               renderIcon={route.icon}
               onPress={onPress}

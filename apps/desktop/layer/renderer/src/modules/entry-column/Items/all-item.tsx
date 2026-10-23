@@ -16,15 +16,15 @@ import { useInboxById } from "@follow/store/inbox/hooks"
 import { transformVideoUrl } from "@follow/utils/url-for-video"
 import { cn, isSafari } from "@follow/utils/utils"
 import { useMemo } from "react"
-import { titleCase } from "title-case"
 
 import { AudioPlayer, useAudioPlayerAtomSelector } from "~/atoms/player"
-import { useGeneralSettingKey } from "~/atoms/settings/general"
+import { useActionLanguage, useGeneralSettingKey } from "~/atoms/settings/general"
 import { useSpotlightSettingKey } from "~/atoms/settings/spotlight"
 import { RelativeTime } from "~/components/ui/datetime"
 import { FEED_COLLECTION_LIST } from "~/constants"
 import { useEntryIsRead } from "~/hooks/biz/useAsRead"
 import { useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
+import { useTitleCaseIfEnglish } from "~/hooks/common/useTitleCaseIfEnglish"
 import { EntryTranslation } from "~/modules/entry-column/translation"
 import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
@@ -44,7 +44,16 @@ const ViewTag = IN_ELECTRON ? "webview" : "iframe"
 
 const entrySelector = (state: EntryModel) => {
   /// keep-sorted
-  const { authorAvatar, authorUrl, description, feedId, inboxHandle, publishedAt, title } = state
+  const {
+    authorAvatar,
+    authorUrl,
+    description,
+    feedId,
+    inboxHandle,
+    language,
+    publishedAt,
+    title,
+  } = state
 
   const audios = state.attachments?.filter((a) => a.mime_type?.startsWith("audio") && a.url)
   const video = transformVideoUrl({
@@ -67,6 +76,7 @@ const entrySelector = (state: EntryModel) => {
     firstAudio,
     firstPhotoUrl,
     inboxId: inboxHandle,
+    language,
     publishedAt,
     title,
     video,
@@ -103,6 +113,8 @@ export function AllItem({
   const inbox = useInboxById(entry?.inboxId)
 
   const bilingual = useGeneralSettingKey("translationMode") === "bilingual"
+  const actionLanguage = useActionLanguage()
+  const titleCaseIfEnglish = useTitleCaseIfEnglish()
 
   const iconEntry: FeedIconEntry = useMemo(
     () => ({
@@ -145,7 +157,9 @@ export function AllItem({
   // NOTE: prevent 0 height element, react virtuoso will not stop render any more
   if (!entry || !(feed || inbox)) return null
 
-  const displayTime = inInCollection ? collectionCreatedAt : entry?.publishedAt
+  // An entry unstarred from the Starred list stays there until the list reloads, with no
+  // collection time left, so it falls back to the published time
+  const displayTime = (inInCollection && collectionCreatedAt) || entry?.publishedAt
 
   const related = feed || inbox
 
@@ -170,13 +184,22 @@ export function AllItem({
                 isRead && dimRead && "text-text-secondary",
               )}
             >
-              <EntryTranslation
-                className="hyphens-auto"
-                source={entry?.title ? titleCase(entry.title) : entry?.description}
-                target={
-                  entry?.title ? titleCase(translation?.title ?? "") : translation?.description
-                }
-              />
+              {entry.title ? (
+                <EntryTranslation
+                  className={cn(
+                    "inline-flex min-w-0 items-center hyphens-auto font-medium",
+                    lineClamp.title,
+                  )}
+                  source={titleCaseIfEnglish(entry?.title ?? "", entry?.language)}
+                  target={titleCaseIfEnglish(translation?.title ?? "", actionLanguage)}
+                />
+              ) : (
+                <EntryTranslation
+                  className={cn("inline-flex items-center hyphens-auto", lineClamp.description)}
+                  source={entry?.description}
+                  target={translation?.description}
+                />
+              )}
             </div>
             <EntrySemanticTags entryId={entryId} className="max-w-full" showAll />
           </div>
@@ -245,8 +268,9 @@ export const AllItemSkeleton = (
 )
 
 function AudioIcon({ entryId, src }: { entryId: string; src: string }) {
-  const playStatus = useAudioPlayerAtomSelector((playerValue) =>
-    playerValue.src === src && playerValue.show ? playerValue.status : false,
+  const playStatus = useAudioPlayerAtomSelector(
+    (playerValue) => (playerValue.src === src && playerValue.show ? playerValue.status : false),
+    [src],
   )
 
   const handleClickPlay = (e: React.MouseEvent<HTMLDivElement>) => {

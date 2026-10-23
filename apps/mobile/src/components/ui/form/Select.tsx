@@ -1,5 +1,6 @@
 import { cn } from "@follow/utils"
 import { useEffect, useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
 import type { StyleProp, ViewStyle } from "react-native"
 import { View } from "react-native"
 import * as DropdownMenu from "zeego/dropdown-menu"
@@ -36,6 +37,7 @@ export function Select<T>({
   disabled,
   triggerTestID,
 }: SelectProps<T>) {
+  const { t } = useTranslation()
   const [currentValue, setCurrentValue] = useState(() => value)
   useEffect(() => {
     setCurrentValue(value)
@@ -52,8 +54,10 @@ export function Select<T>({
       <DropdownMenu.Trigger asChild disabled={disabled}>
         <View
           testID={triggerTestID}
+          // grow rather than flex-1: the menu wraps it in a view without a set height, where Yoga
+          // kept the zero flex basis of flex-1 once the window resized and the value disappeared
           className={cn(
-            "min-w-24 flex-1 shrink flex-row items-center rounded-lg pl-3",
+            "min-w-24 shrink grow flex-row items-center rounded-lg pl-3",
             disabled && "opacity-50",
             wrapperClassName,
           )}
@@ -64,7 +68,7 @@ export function Select<T>({
             ellipsizeMode="tail"
             numberOfLines={1}
           >
-            {displayValue || valueToLabelMap.get(currentValue) || "Select"}
+            {displayValue || valueToLabelMap.get(currentValue) || t("select.placeholder")}
           </Text>
           <View className="ml-auto shrink-0 pl-1">
             <MingcuteDownLineIcon

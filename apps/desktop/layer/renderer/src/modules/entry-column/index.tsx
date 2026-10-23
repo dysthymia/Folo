@@ -38,6 +38,7 @@ import { useEntryMarkReadHandler } from "./hooks/useEntryMarkReadHandler"
 import { useNavigateFirstEntry } from "./hooks/useNavigateFirstEntry"
 import { EntryListHeader } from "./layouts/EntryListHeader"
 import { EntryEmptyList, EntryList } from "./list"
+import { canFetchNextPage } from "./next-page"
 import { shouldScrollTimelineToTopOnRefreshStateChange } from "./refresh-reset"
 import {
   shouldResetScrollOnTimelineIdentityChange,
@@ -283,15 +284,17 @@ function EntryColumnContent() {
     [flushScrollMarkRead, handleRenderMarkRead, isScrollResetPending, renderAsRead, view],
   )
 
+  // Changes when a fetch ends, so the list asks again for a page it asked for meanwhile
   const fetchNextPage = useCallback(() => {
+    // 生成流沿用本地分页，普通时间线避免在首屏刷新期间并发请求下一页。
     if (generated) {
       void reader.loadMore()
       return
     }
-    if (state.hasNextPage && !state.isFetchingNextPage) {
+    if (canFetchNextPage({ hasNextPage: state.hasNextPage, isFetching: state.isFetching })) {
       actions.fetchNextPage()
     }
-  }, [generated, reader, actions, state.hasNextPage, state.isFetchingNextPage])
+  }, [generated, reader, actions, state.hasNextPage, state.isFetching])
 
   const ListComponent = getView(view)?.gridMode ? EntryColumnGrid : EntryList
 
@@ -307,6 +310,7 @@ function EntryColumnContent() {
       {!generated &&
         entriesIds.length === 0 &&
         !state.isLoading &&
+        !state.isOffline &&
         !state.error &&
         (!feed || feed?.type === "feed") && <AddFeedHelper />}
 
@@ -327,10 +331,16 @@ function EntryColumnContent() {
         key={timelineIdentity}
       >
         {entriesIds.length === 0 ? (
-          isLoading ? (
+          // 访客无法加载时间线，登录弹窗后仍保留占位视图。
+          isLoading || (!isLoggedIn && state.error) ? (
             <EntryItemSkeleton view={view} />
           ) : (
-            <EntryEmptyList />
+            <EntryEmptyList
+              error={state.error}
+              offline={state.isOffline}
+              isRetrying={state.isFetching}
+              onRetry={actions.refetch}
+            />
           )
         ) : (
           <ListComponent

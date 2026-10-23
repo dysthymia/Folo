@@ -1,48 +1,106 @@
 import type { FeedViewType } from "@follow/constants"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { useCallback, useEffect } from "react"
+import { useCallback, useEffect, useMemo } from "react"
 
+import {
+  ensureSyncedThroughEngine,
+  isSyncEngineActive,
+  requestUnreadCalibration,
+} from "../../sync/sync-status"
 import { getEntry } from "../entry/getter"
 import { useListFeedIds } from "../list/hooks"
 import { useSubscriptionIdsByView } from "../subscription/hooks"
 import { useIsLoggedIn } from "../user/hooks"
+import { getUnreadCountForScope } from "./getters"
 import { unreadCountAllSelector, unreadCountIdSelector, unreadCountIdsSelector } from "./selectors"
 import { unreadSyncService, useUnreadStore } from "./store"
+import type { UnreadListScope } from "./types"
 
 export const usePrefetchUnread = () => {
   const isLoggedIn = useIsLoggedIn()
   return useQuery({
     queryKey: ["unread"],
-    queryFn: () => unreadSyncService.resetFromRemote(),
+    queryFn: async () => {
+      // With a sync cursor the counters are the local snapshot plus the delta feed; the
+      // recount is only needed when the engine cannot provide that.
+      if (await ensureSyncedThroughEngine()) return null
+      return unreadSyncService.resetFromRemote()
+    },
     staleTime: 5 * 1000 * 60, // 5 minutes
     enabled: isLoggedIn,
   })
 }
 
-export const useSyncUnreadWhenUnMatch = (entryIds: string[]) => {
-  useEffect(() => {
-    const entries = entryIds.map((id) => getEntry(id))
-    const unreadCountMap = entries.reduce(
-      (acc, entry) => {
-        if (entry && entry.feedId && !entry?.read) {
-          acc[entry.feedId] = (acc[entry.feedId] || 0) + 1
-        }
-        return acc
-      },
-      {} as Record<string, number>,
-    )
-
-    const unread = useUnreadStore.getState().data
-
-    const hasUnreadMismatch = Object.keys(unreadCountMap).some(
-      (feedId) =>
-        !unread[feedId] || (unreadCountMap[feedId] && unreadCountMap[feedId] > unread[feedId]),
-    )
-
-    if (hasUnreadMismatch) {
-      unreadSyncService.resetFromRemote()
+const hasUnreadMismatch = (entryIds: string[]) => {
+  const unreadCountMap: Record<string, number> = {}
+  for (const entryId of entryIds) {
+    const entry = getEntry(entryId)
+    if (entry && entry.feedId && !entry.read) {
+      unreadCountMap[entry.feedId] = (unreadCountMap[entry.feedId] || 0) + 1
     }
-  }, [entryIds.toString()])
+  }
+
+  const unread = useUnreadStore.getState().data
+  return Object.keys(unreadCountMap).some(
+    (feedId) =>
+      !unread[feedId] || (unreadCountMap[feedId] && unreadCountMap[feedId] > unread[feedId]),
+  )
+}
+
+/**
+ * A fully loaded unread-only list that shows fewer unread entries than its counter. The
+ * counter is wrong then: every unread entry the server knows of is on screen.
+ */
+export const hasUnreadCounterAboveList = (entryIds: string[], scope: UnreadListScope) => {
+  const expected = getUnreadCountForScope(scope)
+  if (!expected) return false
+
+  let shown = 0
+  for (const entryId of entryIds) {
+    const entry = getEntry(entryId)
+    if (entry && !entry.read) shown += 1
+  }
+  return expected > shown
+}
+
+export interface SyncUnreadWhenUnMatchOptions {
+  /** The list only holds unread entries and has no more pages to load. */
+  complete?: boolean
+  scope?: UnreadListScope
+}
+
+/**
+ * Notice counters that disagree with the list on screen: lower than the unread entries it
+ * shows, or higher than a fully loaded unread-only list. Without the sync engine the
+ * counters are fetched again. With it, the list is usually just ahead of the next pull, so
+ * the delta feed is applied first and a recount is only asked for if that did not help.
+ */
+export const useSyncUnreadWhenUnMatch = (
+  entryIds: string[],
+  options?: SyncUnreadWhenUnMatchOptions,
+) => {
+  const complete = options?.complete === true
+  const scope = options?.scope
+  const scopeKey = scope ? JSON.stringify(scope) : ""
+
+  useEffect(() => {
+    const mismatch = () =>
+      hasUnreadMismatch(entryIds) ||
+      (complete && scope !== undefined && hasUnreadCounterAboveList(entryIds, scope))
+    if (!mismatch()) return
+
+    if (!isSyncEngineActive()) {
+      unreadSyncService.resetFromRemote()
+      return
+    }
+
+    void (async () => {
+      await ensureSyncedThroughEngine()
+      if (mismatch()) {
+        await requestUnreadCalibration()
+      }
+    })()
+  }, [entryIds.toString(), complete, scopeKey])
 }
 
 export const useAutoMarkAsRead = (entryId: string, enabled: boolean) => {
@@ -95,8 +153,9 @@ export const useUnreadByView = (view: FeedViewType) => {
 export const useSortedIdsByUnread = (ids: string[], isDesc?: boolean) => {
   return useUnreadStore(
     useCallback(
+      // Sorts a copy: the ids often belong to the caller's props and are shared between lists
       (state) =>
-        ids.sort((a, b) => {
+        [...ids].sort((a, b) => {
           const unreadCompare = (state.data[b] || 0) - (state.data[a] || 0)
           if (unreadCompare !== 0) {
             return isDesc ? unreadCompare : -unreadCompare
@@ -116,33 +175,32 @@ export const useSortedCategoriesByUnread = (
   categories: Record<string, string[]>,
   isDesc?: boolean,
 ) => {
+  // The tuples are created once per categories object, so an unchanged order passes the store's
+  // shallow equality check and unread changes don't re-render every folder
+  const entries = useMemo(() => Object.entries(categories) as [string, string[]][], [categories])
   return useUnreadStore(
     useCallback(
       (state) => {
-        const sortedList = [] as [string, string[]][]
-
-        const folderUnread = {} as Record<string, number>
+        const folderUnread = new Map<string, number>()
         // Calc total unread count for each folder
-        for (const category in categories) {
-          folderUnread[category] = categories[category]!.reduce(
-            (acc, cur) => (state.data[cur] || 0) + acc,
-            0,
+        for (const [category, ids] of entries) {
+          folderUnread.set(
+            category,
+            ids.reduce((acc, cur) => (state.data[cur] || 0) + acc, 0),
           )
         }
 
         // Sort by unread count
-        Object.keys(folderUnread)
-          .sort((a, b) => folderUnread[b]! - folderUnread[a]!)
-          .forEach((key) => {
-            sortedList.push([key, categories[key]!.concat()])
-          })
+        const sortedList = [...entries].sort(
+          ([a], [b]) => folderUnread.get(b)! - folderUnread.get(a)!,
+        )
 
         if (!isDesc) {
           sortedList.reverse()
         }
         return sortedList
       },
-      [categories, isDesc],
+      [entries, isDesc],
     ),
   )
 }

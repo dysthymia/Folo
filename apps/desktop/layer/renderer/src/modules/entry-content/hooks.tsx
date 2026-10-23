@@ -21,7 +21,7 @@ export const useGalleryModal = () => {
     (entryId?: string) => {
       if (!entryId) {
         // this should not happen unless there is a bug in the code
-        toast.error("Invalid feed id")
+        toast.error(t("entry_content.invalid_entry_id"))
         return
       }
       tracker.entryContentHeaderImageGalleryClick({
@@ -93,17 +93,22 @@ export const useEntryContent = (entryId: string) => {
 }
 
 export const useEntryMediaInfo = (entryId: string) => {
-  return useEntry(entryId, (entry) =>
-    Object.fromEntries(
-      entry?.media
-        ?.filter((m) => m.type === "photo")
-        .map((cur) => [
-          cur.url,
-          {
-            width: cur.width,
-            height: cur.height,
-          },
-        ]) ?? [],
-    ),
+  // Select the media array itself so unrelated entry writes keep the same
+  // reference, then derive the map from it.
+  const media = useEntry(entryId, (entry) => entry.media)
+  return useMemo(
+    () =>
+      Object.fromEntries(
+        media
+          ?.filter((m) => m.type === "photo")
+          .map((cur) => [
+            cur.url,
+            {
+              width: cur.width,
+              height: cur.height,
+            },
+          ]) ?? [],
+      ),
+    [media],
   )
 }

@@ -1,4 +1,5 @@
 import { FeedViewType } from "@follow/constants"
+import { queryClientContext } from "@follow/store/context"
 import { entrySyncServices } from "@follow/store/entry/store"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
@@ -33,6 +34,8 @@ vi.mock("~/modules/information/processing-role-client", () => ({
 const host = document.createElement("div")
 const root = createRoot(host)
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+// 真实查询刷新会修剪共享客户端的分页缓存，测试与界面共用同一实例。
+queryClientContext.provide(client)
 let entries: ReturnType<typeof useEntriesByView>
 function Probe() {
   entries = useEntriesByView({})
@@ -68,7 +71,8 @@ it("首屏网络失败后结束加载保护，刷新重试远程查询并恢复�
     .mockRejectedValueOnce(failure)
     .mockResolvedValueOnce(response("first", 2))
     .mockResolvedValueOnce(response("second", 1))
-  vi.spyOn(unreadSyncService, "resetFromRemote").mockResolvedValue({})
+  // 校准沿用同步服务新入口，避免测试发起真实未读请求。
+  vi.spyOn(unreadSyncService, "refresh").mockResolvedValue(undefined)
   vi.spyOn(entrySyncServices, "fetchEntryContentByStream").mockResolvedValue(undefined)
 
   await act(async () => {

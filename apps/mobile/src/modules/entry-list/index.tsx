@@ -7,8 +7,9 @@ import { TimelineHeader } from "@/src/modules/screen/TimelineSelectorProvider"
 
 import { EntryListSelector } from "./EntryListSelector"
 
+// Keep each column's list mounted so its native scroll position survives view switches.
 const renderViewItem = (view: FeedViewType, active: boolean) => (
-  <ViewEntryList key={`${view}-${active ? "active" : "inactive"}`} viewId={view} active={active} />
+  <ViewEntryList key={view} viewId={view} active={active} />
 )
 export function EntryList() {
   const selectedFeed = useSelectedFeed()

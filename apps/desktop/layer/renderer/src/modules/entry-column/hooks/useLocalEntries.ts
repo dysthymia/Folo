@@ -9,6 +9,7 @@ import {
 } from "@follow/store/entry/hooks"
 import { useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
+import { useInboxStore } from "@follow/store/inbox/store"
 import { useFolderFeedsByFeedId } from "@follow/store/subscription/hooks"
 import { debounce } from "es-toolkit/compat"
 import { useCallback, useEffect, useMemo, useState } from "react"
@@ -16,12 +17,15 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useGeneralSettingKey } from "~/atoms/settings/general"
 import { ROUTE_FEED_PENDING } from "~/constants/app"
 
+import { getEffectiveRouteEntrySortOrder } from "./entry-sort-order"
+
 interface UseLocalEntriesOptions {
   feedId?: string
   view?: FeedViewType
   inboxId?: string
   listId?: string
   isCollection?: boolean
+  isPreview?: boolean
   pageSize?: number
 }
 
@@ -35,12 +39,27 @@ export const useLocalEntries = ({
   inboxId,
   listId,
   isCollection,
+  isPreview,
   pageSize = 30,
 }: UseLocalEntriesOptions = {}): UseEntriesReturn => {
   const unreadOnly = useGeneralSettingKey("unreadOnly")
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
   )
+  const hasInboxSubscriptions = useInboxStore((state) => Object.keys(state.inboxes).length > 0)
+  const savedSortOrder = useGeneralSettingKey("timelineSortOrder")
+  const effectiveUnreadOnly = unreadOnly && !isPreview
+  const effectiveSortOrder = getEffectiveRouteEntrySortOrder({
+    sortOrder: savedSortOrder,
+    unreadOnly: effectiveUnreadOnly,
+    feedId,
+    inboxId,
+    isCollection,
+    isPreview,
+    view,
+    listId,
+    hasInboxSubscriptions,
+  })
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
@@ -74,11 +93,13 @@ export const useLocalEntries = ({
                 entryIdsByInboxId,
               ) ?? [])
 
-        return ids
+        const orderedIds = effectiveSortOrder === "asc" ? [...ids].reverse() : ids
+
+        return orderedIds
           .map((id) => {
             const entry = state.data[id]
             if (!entry) return null
-            if (unreadOnly && entry.read) {
+            if (effectiveUnreadOnly && entry.read) {
               return null
             }
             return entry.id
@@ -94,7 +115,8 @@ export const useLocalEntries = ({
         entryIdsByView,
         isCollection,
         showEntriesByView,
-        unreadOnly,
+        effectiveSortOrder,
+        effectiveUnreadOnly,
       ],
     ),
   )
@@ -126,7 +148,7 @@ export const useLocalEntries = ({
 
   useEffect(() => {
     setPage(0)
-  }, [view, feedId])
+  }, [view, feedId, effectiveSortOrder, effectiveUnreadOnly])
 
   return {
     entriesIds: entries,

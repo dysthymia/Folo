@@ -8,7 +8,7 @@ import { ELECTRON_BUILD } from "@follow/shared/constants"
 import { useFeedsByIds } from "@follow/store/feed/hooks"
 import { useAllFeedSubscription, usePrefetchSubscription } from "@follow/store/subscription/hooks"
 import { usePrefetchUnread } from "@follow/store/unread/hooks"
-import { useUserSubscriptionLimit } from "@follow/store/user/hooks"
+import { useIsLoggedIn, useUserSubscriptionLimit } from "@follow/store/user/hooks"
 import { EventBus } from "@follow/utils/event-bus"
 import { clamp, cn } from "@follow/utils/utils"
 import { useWheel } from "@use-gesture/react"
@@ -16,7 +16,7 @@ import { Lethargy } from "lethargy"
 import { AnimatePresence, m } from "motion/react"
 import type { FC, PropsWithChildren } from "react"
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { Trans } from "react-i18next"
+import { Trans, useTranslation } from "react-i18next"
 
 import { useRootContainerElement } from "~/atoms/dom"
 import { useIsInMASReview } from "~/atoms/server-configs"
@@ -46,7 +46,22 @@ export function SubscriptionColumn({
   children,
   className,
 }: PropsWithChildren<{ className?: string }>) {
-  const { isLoading: isSubscriptionLoading } = usePrefetchSubscription()
+  const { t } = useTranslation()
+  const {
+    isLoading: isSubscriptionLoading,
+    isError: isSubscriptionError,
+    isFetching: isSubscriptionFetching,
+    refetch: refetchSubscription,
+  } = usePrefetchSubscription()
+  const isLoggedIn = useIsLoggedIn()
+  // Guests can't load subscriptions at all, which is not an error to show them
+  const subscriptionLoadError = useMemo(
+    () =>
+      isSubscriptionError && isLoggedIn
+        ? { isRetrying: isSubscriptionFetching, onRetry: () => void refetchSubscription() }
+        : undefined,
+    [isSubscriptionError, isLoggedIn, isSubscriptionFetching, refetchSubscription],
+  )
   usePrefetchUnread()
 
   const carouselRef = useRef<HTMLDivElement>(null)
@@ -113,6 +128,9 @@ export function SubscriptionColumn({
 
   useEffect(() => {
     if (!focusableContainerRef.current) return
+    // Keep the focus a page took while loading, such as the autofocused Discover search box
+    const { activeElement } = document
+    if (activeElement && activeElement !== document.body) return
     focusableContainerRef.current.focus()
   }, [])
 
@@ -138,7 +156,7 @@ export function SubscriptionColumn({
       {!feedColumnShow && (
         <RootPortal to={rootContainerElement}>
           <ActionButton
-            tooltip={"Toggle Feed Column"}
+            tooltip={t("app.toggle_sidebar")}
             className="center absolute left-0 top-2.5 z-0 hidden -translate-x-2 text-zinc-500 macos:flex macos:left-macos-traffic-light-2"
             onClick={() => setTimelineColumnShow(true)}
           >
@@ -173,6 +191,7 @@ export function SubscriptionColumn({
                 key={timelineId}
                 view={parseView(timelineId) ?? FeedViewType.Articles}
                 isSubscriptionLoading={isSubscriptionLoading}
+                subscriptionLoadError={subscriptionLoadError}
               />
             </section>
           ))}

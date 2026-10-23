@@ -1,4 +1,5 @@
 import { cn } from "@follow/utils"
+import { useTranslation } from "react-i18next"
 import { Pressable, StyleSheet, View } from "react-native"
 import { Slider } from "react-native-awesome-slider"
 import { FadeOut, useDerivedValue, useSharedValue, ZoomIn } from "react-native-reanimated"
@@ -28,6 +29,7 @@ import { useVolume } from "@/src/lib/volume"
 import { useColor } from "@/src/theme/colors"
 
 import { usePlayerScreenContext } from "./context"
+import { stopEntryTts } from "./entry-tts"
 import { ttsStreamController } from "./tts-stream-controller"
 
 type ControlButtonProps = {
@@ -36,10 +38,12 @@ type ControlButtonProps = {
   color?: string
 }
 export function PlayPauseButton({ size = 24, className, color }: ControlButtonProps) {
+  const { t } = useTranslation()
   const ttsStream = useTtsStreamPlayback()
-  const { playing } = useIsPlaying()
+  const playing = useIsPlaying()
   const isStreamPlaying = ttsStream.status === "playing"
   const isStream = !!ttsStream.entryId
+  const showsPause = isStream ? isStreamPlaying : playing
   const label = useColor("label")
   return (
     <View className={className}>
@@ -47,6 +51,8 @@ export function PlayPauseButton({ size = 24, className, color }: ControlButtonPr
         entering={ZoomIn.springify()}
         exiting={FadeOut}
         key={isStream ? `tts-${ttsStream.status}` : playing ? "pause" : "play"}
+        accessibilityRole="button"
+        accessibilityLabel={showsPause ? t("player.pause") : t("player.play")}
         onPress={() => {
           if (isStream && ttsStream.entryId) {
             void ttsStreamController.toggle(ttsStream.entryId)
@@ -56,13 +62,7 @@ export function PlayPauseButton({ size = 24, className, color }: ControlButtonPr
           playing ? player.pause() : player.play()
         }}
       >
-        {isStream ? (
-          isStreamPlaying ? (
-            <PauseCuteFiIcon color={color ?? label} width={size} height={size} />
-          ) : (
-            <PlayCuteFiIcon color={color ?? label} width={size} height={size} />
-          )
-        ) : playing ? (
+        {showsPause ? (
           <PauseCuteFiIcon color={color ?? label} width={size} height={size} />
         ) : (
           <PlayCuteFiIcon color={color ?? label} width={size} height={size} />
@@ -79,6 +79,7 @@ export function SeekButton({
 }: ControlButtonProps & {
   offset?: number
 }) {
+  const { t } = useTranslation()
   const label = useColor("label")
   const ttsStream = useTtsStreamPlayback()
   if (ttsStream.entryId) {
@@ -87,6 +88,12 @@ export function SeekButton({
   return (
     <View className={className}>
       <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          offset > 0
+            ? t("player.seek_forward", { seconds: offset })
+            : t("player.seek_backward", { seconds: -offset })
+        }
         onPress={() => {
           player.seekBy(offset)
         }}
@@ -139,20 +146,29 @@ export function RateSelector() {
     </View>
   )
 }
-export function StopButton({ size = 24, className, color }: ControlButtonProps) {
+export function StopButton({
+  size = 24,
+  className,
+  color,
+  onStopped,
+}: ControlButtonProps & { onStopped?: () => void }) {
+  const { t } = useTranslation()
   const ttsStream = useTtsStreamPlayback()
   const label = useColor("label")
-  const navigation = useNavigation()
   return (
     <Pressable
+      testID="player-stop"
+      accessibilityRole="button"
+      accessibilityLabel={t("player.stop")}
+      hitSlop={10}
       className={className}
       onPress={() => {
-        if (ttsStream.entryId) {
-          void ttsStreamController.stop()
-        } else {
-          player.reset()
+        // Also cancels a TTS request that is still loading, so it can't start playing afterwards
+        void stopEntryTts()
+        if (!ttsStream.entryId) {
+          void player.reset()
         }
-        navigation.back()
+        onStopped?.()
       }}
     >
       <StopCircleCuteFiIcon color={color ?? label} width={size} height={size} />
@@ -160,6 +176,7 @@ export function StopButton({ size = 24, className, color }: ControlButtonProps) 
   )
 }
 export function ControlGroup() {
+  const navigation = useNavigation()
   const ttsStream = useTtsStreamPlayback()
   const { isBackgroundLight } = usePlayerScreenContext()
   const buttonColor = isBackgroundLight ? "black" : "white"
@@ -168,7 +185,7 @@ export function ControlGroup() {
     return (
       <View className="flex-row items-center justify-center gap-6">
         <PlayPauseButton size={50} color={buttonColor} />
-        <StopButton color={buttonColor} />
+        <StopButton color={buttonColor} onStopped={() => navigation.dismiss()} />
       </View>
     )
   }
@@ -180,7 +197,7 @@ export function ControlGroup() {
       <PlayPauseButton size={50} color={buttonColor} />
       <SeekButton size={35} offset={30} color={buttonColor} />
       <View className="w-[43] flex-row justify-end">
-        <StopButton color={buttonColor} />
+        <StopButton color={buttonColor} onStopped={() => navigation.dismiss()} />
       </View>
     </View>
   )
@@ -194,7 +211,7 @@ const formatSecondsToMinutes = (seconds: number) => {
 }
 export function ProgressBar() {
   const { isBackgroundLight } = usePlayerScreenContext()
-  const { duration, position } = useProgress(250)
+  const { duration, position } = useProgress(0.25)
   const isSliding = useSharedValue(false)
   const progress = useDerivedValue(() => {
     return duration > 0 ? position / duration : 0
@@ -214,6 +231,7 @@ export function ProgressBar() {
         minimumValue={min}
         maximumValue={max}
         thumbWidth={0}
+        renderThumb={() => null}
         containerStyle={styles.sliderTrack}
         renderBubble={() => null}
         theme={{
@@ -286,6 +304,7 @@ export function VolumeBar() {
               minimumTrackTintColor: "rgba(255,255,255,0.6)",
             }}
             thumbWidth={0}
+            renderThumb={() => null}
             maximumValue={max}
           />
         </View>

@@ -15,6 +15,8 @@ type EntriesStateContextValue = {
   isFetchingNextPage: boolean
   isFetching: boolean
   isLoading: boolean
+  /** Nothing is cached and the first page waits for the browser to come back online. */
+  isOffline: boolean
   error: unknown | null
   view: FeedViewType
   fetchedTime?: number
@@ -122,6 +124,7 @@ export const EntriesProvider: React.FC<React.PropsWithChildren> = ({ children })
       isFetchingNextPage: entries.isFetchingNextPage,
       isFetching: entries.isFetching,
       isLoading: entries.isLoading,
+      isOffline: entries.isOffline,
       error: entries.error ?? null,
       view: view!,
       fetchedTime: entries.fetchedTime,

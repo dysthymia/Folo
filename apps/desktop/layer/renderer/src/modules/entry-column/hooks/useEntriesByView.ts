@@ -19,6 +19,7 @@ import { useSemanticDedupeProcessor } from "@follow/store/entry/semantic-dedupe"
 import { entryActions, entrySyncServices, useEntryStore } from "@follow/store/entry/store"
 import type { UseEntriesReturn } from "@follow/store/entry/types"
 import { dedupeEntryIdsByTitle } from "@follow/store/entry/utils"
+import { useInboxStore } from "@follow/store/inbox/store"
 import { useFolderFeedsByFeedId } from "@follow/store/subscription/hooks"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { useWhoami } from "@follow/store/user/hooks"
@@ -26,14 +27,16 @@ import { nextFrame } from "@follow/utils"
 import { isBizId } from "@follow/utils/utils"
 import { useMutation } from "@tanstack/react-query"
 import { debounce } from "es-toolkit/compat"
-import { useAtomValue } from "jotai"
+import { useAtomValue, useSetAtom } from "jotai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import { useAISettingKey } from "~/atoms/settings/ai"
 import { useGeneralSettingKey } from "~/atoms/settings/general"
 import { ROUTE_FEED_PENDING } from "~/constants/app"
 import { useFeature } from "~/hooks/biz/useFeature"
 import { useRouteParams } from "~/hooks/biz/useRouteParams"
+import { toastFetchError } from "~/lib/error-parser"
 import { useNativeReader } from "~/modules/information/native-reader-context"
 import { useServiceProcessingRoles } from "~/modules/information/processing-role-client"
 import type { LoadedEntryRef } from "~/modules/information/use-list-load-processing"
@@ -41,7 +44,10 @@ import { useListLoadProcessing } from "~/modules/information/use-list-load-proce
 
 import { aiTimelineEnabledAtom } from "../atoms/ai-timeline"
 import { timelineContentModeAtom } from "../atoms/processing-timeline"
+import { getEffectiveRouteEntrySortOrder } from "./entry-sort-order"
 import { getVisibleLocalEntryIds } from "./filter-local-entry-ids"
+import type { RemoteEntriesReturn } from "./remote-entries-fallback"
+import { getRemoteEntriesFallback } from "./remote-entries-fallback"
 import { useIsPreviewFeed } from "./useIsPreviewFeed"
 
 const emptyLoadedEntryRefs: LoadedEntryRef[] = []
@@ -49,23 +55,38 @@ const emptyLoadedEntryRefs: LoadedEntryRef[] = []
 const useRemoteEntries = (
   enabled = true,
   chronological = false,
-): UseEntriesReturn & {
+): RemoteEntriesReturn & {
   paginationBoundary?: string
   loadedEntryRefs?: LoadedEntryRef[]
 } => {
-  const { feedId, view, inboxId, listId } = useRouteParams()
+  const { feedId, view, inboxId, listId, isCollection } = useRouteParams()
   const isPreview = useIsPreviewFeed()
 
   const unreadOnly = useGeneralSettingKey("unreadOnly")
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
   )
+  const hasInboxSubscriptions = useInboxStore((state) => Object.keys(state.inboxes).length > 0)
+  const savedSortOrder = useGeneralSettingKey("timelineSortOrder")
   const aiTimelineEnabled = useAtomValue(aiTimelineEnabledAtom)
   const aiEnabled = useFeature("ai")
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
     view,
+  })
+  const effectiveUnreadOnly = unreadOnly === true && !isPreview
+  const effectiveSortOrder = getEffectiveRouteEntrySortOrder({
+    sortOrder: savedSortOrder,
+    unreadOnly: effectiveUnreadOnly,
+    feedId,
+    inboxId,
+    isCollection,
+    isPreview,
+    view,
+    listId,
+    hasInboxSubscriptions,
+    nativeTimeline: chronological,
   })
 
   const entriesOptions = useMemo(() => {
@@ -74,13 +95,17 @@ const useRemoteEntries = (
       inboxId,
       listId,
       view,
-      ...(unreadOnly === true && !isPreview && { unreadOnly: true }),
+      ...(effectiveUnreadOnly && { unreadOnly: true }),
       ...(hidePrivateSubscriptionsInTimeline === true && {
         hidePrivateSubscriptionsInTimeline: true,
       }),
       ...(view === FeedViewType.All && { limit: 40 }),
-      // 双流时间合并依赖官方时间游标；AI 排序没有后续页，不能用于普通全部列表。
-      ...(!chronological && aiTimelineEnabled && aiEnabled && { aiSort: true }),
+      // 双流按时间游标分页，只有普通倒序列表启用 AI 排序。
+      ...(!chronological &&
+        aiTimelineEnabled &&
+        aiEnabled &&
+        effectiveSortOrder === "desc" && { aiSort: true }),
+      sortOrder: chronological ? "desc" : effectiveSortOrder,
     }
 
     if (feedId && listId && isBizId(feedId)) {
@@ -93,13 +118,13 @@ const useRemoteEntries = (
     folderIds,
     inboxId,
     listId,
-    unreadOnly,
-    isPreview,
+    effectiveUnreadOnly,
     view,
     hidePrivateSubscriptionsInTimeline,
     aiTimelineEnabled,
     aiEnabled,
     chronological,
+    effectiveSortOrder,
   ])
   const query = useEntriesQuery(enabled ? entriesOptions : undefined)
   // 触发范围取本次实际加载的原始页，不能用隐藏/去重后的显示列表遗漏待处理条目。
@@ -116,11 +141,24 @@ const useRemoteEntries = (
       ) ?? [],
     [query.data, entriesOptions.listId],
   )
+  // Plans without AI sort get a 402. Go back to the usual order and say why, instead of
+  // keeping the toggle on over the local list, which is not sorted by importance.
+  const { t } = useTranslation()
+  const setAiTimelineEnabled = useSetAtom(aiTimelineEnabledAtom)
+  const aiSortError = entriesOptions.aiSort && query.isError ? query.error : null
+  useEffect(() => {
+    if (!aiSortError) return
+    setAiTimelineEnabled(false)
+    toastFetchError(aiSortError, { title: t("entry_list_header.ai_timeline_failed") })
+  }, [aiSortError, setAiTimelineEnabled, t])
 
+  // 首屏刷新成功的时间来自真实响应；翻页不能推进「标记上方已读」的插入边界。
   const refetch = useCallback(async () => void query.refetch(), [query])
   const fetchNextPage = useCallback(async () => void query.fetchNextPage(), [query])
 
-  // 无数据或请求失败也保留真实状态与重试入口，避免永久加载暂停滚动已读。
+  if (!query.data || query.isLoading) {
+    return getRemoteEntriesFallback(query, refetch)
+  }
   return {
     entriesIds: query.entriesIds,
     hasNext: query.hasNextPage,
@@ -148,6 +186,7 @@ function getEntryIdsFromMultiplePlace(...entryIds: Array<string[] | undefined | 
 
 const useLocalEntries = (): UseEntriesReturn => {
   const { feedId, view, inboxId, listId, isCollection } = useRouteParams()
+  const isPreview = useIsPreviewFeed()
   const unreadOnly = useGeneralSettingKey("unreadOnly")
   const hidePrivateSubscriptionsInTimeline = useGeneralSettingKey(
     "hidePrivateSubscriptionsInTimeline",
@@ -157,6 +196,21 @@ const useLocalEntries = (): UseEntriesReturn => {
   const contentMode = useAtomValue(timelineContentModeAtom)
   // 后台模式的严格重复由规则决定，原始模式也不能先按标题丢掉正文不同的条目。
   const titleDedupe = !reader?.active && contentMode !== "original" && !isCollection
+  const hasInboxSubscriptions = useInboxStore((state) => Object.keys(state.inboxes).length > 0)
+  const savedSortOrder = useGeneralSettingKey("timelineSortOrder")
+  const effectiveUnreadOnly = unreadOnly && !isPreview
+  const effectiveSortOrder = getEffectiveRouteEntrySortOrder({
+    sortOrder: savedSortOrder,
+    unreadOnly: effectiveUnreadOnly,
+    feedId,
+    inboxId,
+    isCollection,
+    isPreview,
+    view,
+    listId,
+    hasInboxSubscriptions,
+    nativeTimeline: reader?.nativeTimeline,
+  })
 
   const folderIds = useFolderFeedsByFeedId({
     feedId,
@@ -177,8 +231,16 @@ const useLocalEntries = (): UseEntriesReturn => {
     !listId
 
   const localQueryKey = useMemo(
-    () => [feedId || "", view, inboxId || "", listId || "", isCollection ? "1" : "0"].join(":"),
-    [feedId, inboxId, isCollection, listId, view],
+    () =>
+      [
+        feedId || "",
+        view,
+        inboxId || "",
+        listId || "",
+        isCollection ? "1" : "0",
+        effectiveSortOrder,
+      ].join(":"),
+    [effectiveSortOrder, feedId, inboxId, isCollection, listId, view],
   )
   const stickyVisibleStateRef = useRef<{
     queryKey: string
@@ -204,15 +266,15 @@ const useLocalEntries = (): UseEntriesReturn => {
               ) ?? [])
 
         const stickyVisibleIds =
-          unreadOnly && stickyVisibleStateRef.current.queryKey === localQueryKey
+          effectiveUnreadOnly && stickyVisibleStateRef.current.queryKey === localQueryKey
             ? stickyVisibleStateRef.current.ids
             : undefined
 
         const visibleEntryIds = getVisibleLocalEntryIds({
-          sourceIds: ids,
+          sourceIds: effectiveSortOrder === "asc" ? [...ids].reverse() : ids,
           entries: state.data,
           stickyVisibleIds,
-          unreadOnly,
+          unreadOnly: effectiveUnreadOnly,
         })
 
         const actionFilteredEntryIds = filterLocalActionEntryIds(visibleEntryIds)
@@ -233,8 +295,9 @@ const useLocalEntries = (): UseEntriesReturn => {
         localQueryKey,
         localActionRevision,
         showEntriesByView,
-        unreadOnly,
         titleDedupe,
+        effectiveSortOrder,
+        effectiveUnreadOnly,
       ],
     ),
   )
@@ -242,17 +305,12 @@ const useLocalEntries = (): UseEntriesReturn => {
   useEffect(() => {
     stickyVisibleStateRef.current = {
       queryKey: localQueryKey,
-      ids: unreadOnly ? new Set(allEntries) : new Set<string>(),
+      ids: effectiveUnreadOnly ? new Set(allEntries) : new Set<string>(),
     }
-  }, [allEntries, localQueryKey, unreadOnly])
+  }, [allEntries, effectiveUnreadOnly, localQueryKey])
 
   const [page, setPage] = useState(0)
   const pageSize = 30
-  const totalPage = useMemo(
-    () => (allEntries ? Math.ceil(allEntries.length / pageSize) : 0),
-    [allEntries],
-  )
-
   const entries = useMemo(() => {
     return allEntries?.slice(0, (page + 1) * pageSize) || []
   }, [allEntries, page, pageSize])
@@ -274,7 +332,7 @@ const useLocalEntries = (): UseEntriesReturn => {
 
   useEffect(() => {
     setPage(0)
-  }, [view, feedId])
+  }, [view, feedId, effectiveSortOrder, effectiveUnreadOnly])
 
   return {
     entriesIds: entries,
@@ -286,7 +344,7 @@ const useLocalEntries = (): UseEntriesReturn => {
     isReady: true,
     isFetchingNextPage: false,
     isFetching: false,
-    hasNextPage: page < totalPage,
+    hasNextPage: hasNext,
     error: null,
   }
 }
@@ -402,17 +460,21 @@ export const useEntriesByView = ({ onReset }: { onReset?: () => void }) => {
 
     type: remoteQuery.isReady ? ("remote" as const) : ("local" as const),
     refetch: useCallback(() => {
-      // 本地缓存只负责首屏展示；刷新始终重试远程查询，恢复完整分页。
-      const promise = remoteQuery.refetch()
-      unreadSyncService.resetFromRemote()
+      // Until the remote query has succeeded the local query is shown, but a
+      // refresh still has to retry the remote request.
+      const promise = remoteQuery.isReady
+        ? remoteQuery.refetch()
+        : Promise.all([remoteQuery.refetch(), localQuery.refetch()]).then(() => {})
+      void unreadSyncService.refresh({ calibrate: true })
       return promise
-    }, [remoteQuery]),
+    }, [localQuery, remoteQuery]),
     entriesIds: entryIds,
     paginationBoundary: remoteQuery.isReady ? remoteQuery.paginationBoundary : undefined,
     groupedCounts,
     isFetching: remoteQuery.isFetching,
     isFetchingNextPage: remoteQuery.isFetchingNextPage,
     isLoading: remoteQuery.isLoading,
+    isOffline: remoteQuery.isOffline === true,
     error: remoteQuery.error,
   }
 }

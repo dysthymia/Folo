@@ -1,4 +1,6 @@
-import { useInboxStore } from "./store"
+import { useQuery } from "@tanstack/react-query"
+
+import { inboxSyncService, useInboxStore } from "./store"
 import type { InboxModel } from "./types"
 
 export const useIsInbox = (inboxId: string | null | undefined) => {
@@ -21,5 +23,12 @@ export function useInboxList<T>(selector?: (inboxes: InboxModel[]) => T) {
   return useInboxStore((state) => {
     const inboxes = Object.values(state.inboxes)
     return selector ? selector(inboxes) : inboxes
+  })
+}
+
+export const usePrefetchInboxList = () => {
+  return useQuery({
+    queryKey: ["owned", "inboxes"],
+    queryFn: () => inboxSyncService.fetchOwnedInboxes(),
   })
 }

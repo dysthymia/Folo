@@ -14,6 +14,23 @@ import type { PagerRef } from "@/src/components/native/PagerView/specs"
 import { selectTimeline, useSelectedFeed, useTimelineSelectorDragProgress } from "./atoms"
 import { PagerListVisibleContext, PagerListWillVisibleContext } from "./PagerListContext"
 
+// Let children commit their inactive state and unsubscribe before suspending the page.
+const FreezeAfterChildrenUpdate = ({
+  freeze,
+  children,
+}: {
+  freeze: boolean
+  children: React.ReactNode
+}) => {
+  const [committedFreeze, setCommittedFreeze] = useState(freeze)
+
+  useLayoutEffect(() => {
+    setCommittedFreeze(freeze)
+  }, [freeze])
+
+  return <Freeze freeze={committedFreeze}>{children}</Freeze>
+}
+
 export function PagerList({
   renderItem,
   style,
@@ -101,7 +118,9 @@ export function PagerList({
           return (
             <PagerListVisibleContext value={isActive} key={activeViews[index]!}>
               <PagerListWillVisibleContext value={willVisible}>
-                <Freeze freeze={freeze}>{renderItem(activeViews[index]!, isActive)}</Freeze>
+                <FreezeAfterChildrenUpdate freeze={freeze}>
+                  {renderItem(activeViews[index]!, isActive)}
+                </FreezeAfterChildrenUpdate>
               </PagerListWillVisibleContext>
             </PagerListVisibleContext>
           )

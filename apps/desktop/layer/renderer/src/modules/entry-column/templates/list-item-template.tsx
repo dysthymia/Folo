@@ -9,16 +9,17 @@ import { useInboxById } from "@follow/store/inbox/hooks"
 import { clsx, cn, formatEstimatedMins, formatTimeToSeconds, isSafari } from "@follow/utils/utils"
 import type { PropsWithChildren } from "react"
 import { useMemo } from "react"
-import { titleCase } from "title-case"
+import { useTranslation } from "react-i18next"
 
 import { AudioPlayer, useAudioPlayerAtomSelector } from "~/atoms/player"
-import { useGeneralSettingKey } from "~/atoms/settings/general"
+import { useActionLanguage, useGeneralSettingKey } from "~/atoms/settings/general"
 import { useUISettingKey } from "~/atoms/settings/ui"
 import { RelativeTime } from "~/components/ui/datetime"
 import { Media } from "~/components/ui/media/Media"
 import { FEED_COLLECTION_LIST } from "~/constants"
 import { useEntryIsRead } from "~/hooks/biz/useAsRead"
 import { useRouteParamsSelector } from "~/hooks/biz/useRouteParams"
+import { useTitleCaseIfEnglish } from "~/hooks/common/useTitleCaseIfEnglish"
 import { isLocalFoloHost } from "~/modules/ai-chat/local-provider"
 import { EntryTranslation } from "~/modules/entry-column/translation"
 import type { FeedIconEntry } from "~/modules/feed/feed-icon"
@@ -34,7 +35,16 @@ import type { UniversalItemProps } from "../types"
 
 const entrySelector = (state: EntryModel) => {
   /// keep-sorted
-  const { authorAvatar, authorUrl, description, feedId, inboxHandle, publishedAt, title } = state
+  const {
+    authorAvatar,
+    authorUrl,
+    description,
+    feedId,
+    inboxHandle,
+    language,
+    publishedAt,
+    title,
+  } = state
 
   const audios = state.attachments?.filter((a) => a.mime_type?.startsWith("audio") && a.url)
   const firstAudio = audios?.[0]
@@ -53,6 +63,7 @@ const entrySelector = (state: EntryModel) => {
     firstMedia,
     firstPhotoUrl,
     inboxId: inboxHandle,
+    language,
     publishedAt,
     title,
   }
@@ -93,6 +104,8 @@ export function ListItem({
   const rid = `list-item-${entryId}`
 
   const bilingual = useGeneralSettingKey("translationMode") === "bilingual"
+  const actionLanguage = useActionLanguage()
+  const titleCaseIfEnglish = useTitleCaseIfEnglish()
 
   const iconEntry: FeedIconEntry = useMemo(
     () => ({
@@ -147,7 +160,9 @@ export function ListItem({
   // NOTE: prevent 0 height element, react virtuoso will not stop render any more
   if (!entry || !(feed || inbox)) return null
 
-  const displayTime = inInCollection ? collectionCreatedAt : entry?.publishedAt
+  // An entry unstarred from the Starred list stays there until the list reloads, with no
+  // collection time left, so it falls back to the published time
+  const displayTime = (inInCollection && collectionCreatedAt) || entry?.publishedAt
 
   const related = feed || inbox
 
@@ -217,8 +232,8 @@ export function ListItem({
           {entry?.title ? (
             <EntryTranslation
               className={cn("autospace-normal hyphens-auto font-medium", lineClamp.title)}
-              source={titleCase(entry?.title ?? "")}
-              target={titleCase(translation?.title ?? "")}
+              source={titleCaseIfEnglish(entry?.title ?? "", entry?.language)}
+              target={titleCaseIfEnglish(translation?.title ?? "", actionLanguage)}
             />
           ) : (
             <EntryTranslation
@@ -305,14 +320,12 @@ function AudioCover({
   feedIcon: React.ReactNode
 }) {
   const isMobile = useMobile()
-  const playStatus = useAudioPlayerAtomSelector((playerValue) =>
-    playerValue.src === src && playerValue.show ? playerValue.status : false,
+  const playStatus = useAudioPlayerAtomSelector(
+    (playerValue) => (playerValue.src === src && playerValue.show ? playerValue.status : false),
+    [src],
   )
 
-  const language = useGeneralSettingKey("language")
-  const isChinese = useMemo(() => {
-    return language === "zh-CN"
-  }, [language])
+  const { t } = useTranslation("common")
 
   const seconds = formatTimeToSeconds(durationInSeconds)
   const estimatedMins = seconds && Math.floor(seconds / 60)
@@ -373,7 +386,9 @@ function AudioCover({
               isMobile && "opacity-100 backdrop-blur-background",
             )}
           >
-            {isChinese ? `${estimatedMins} 分钟` : formatEstimatedMins(estimatedMins)}
+            {formatEstimatedMins(estimatedMins, (unit, values) =>
+              t(`time.duration.${unit}`, values),
+            )}
           </div>
         </div>
       )}

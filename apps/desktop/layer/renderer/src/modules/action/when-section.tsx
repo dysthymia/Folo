@@ -10,6 +10,7 @@ import {
 } from "@follow/components/ui/select/index.jsx"
 import { ResponsiveSelect } from "@follow/components/ui/select/responsive.js"
 import { filterFieldOptions, filterOperatorOptions } from "@follow/store/action/constant"
+import { cn } from "@follow/utils/utils"
 import type { ActionFeedField, ActionOperation } from "@follow-app/client-sdk"
 import { Fragment } from "react"
 import { useTranslation } from "react-i18next"
@@ -17,6 +18,7 @@ import { useTranslation } from "react-i18next"
 import { ViewSelectContent } from "~/modules/feed/view-select-content"
 
 import { useScopedActionActions, useScopedActionRule } from "./action-scope"
+import { getRegexError } from "./utils"
 
 type WhenSectionProps = {
   index: number
@@ -88,10 +90,15 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
                       <div key={conditionIdx} className="flex flex-col gap-2">
                         <div className="flex flex-col gap-2 rounded-lg border border-fill-secondary bg-transparent p-3 @[800px]:flex-row @[800px]:items-center">
                           <ResponsiveSelect
-                            placeholder="Select Field"
+                            placeholder={t("actions.action_card.select_field")}
                             disabled={disabled}
                             value={item.field}
-                            onValueChange={(value) => change("field", value as ActionFeedField)}
+                            onValueChange={(value) =>
+                              scopedActionActions.changeConditionField(
+                                actionConditionIndex,
+                                value as ActionFeedField,
+                              )
+                            }
                             items={filterFieldOptions.map((option) => ({
                               ...option,
                               label: t(option.label),
@@ -106,6 +113,7 @@ export const WhenSection = ({ index }: WhenSectionProps) => {
                           />
                           <ValueInput
                             type={type}
+                            operator={item.operator}
                             value={item.value}
                             onChange={(value) => change("value", value)}
                             disabled={disabled}
@@ -200,7 +208,7 @@ const OperationSelect = ({
   }
   return (
     <ResponsiveSelect
-      placeholder="Select Operation"
+      placeholder={t("actions.action_card.select_operation")}
       disabled={disabled}
       value={value}
       onValueChange={(nextValue) => onValueChange?.(nextValue as ActionOperation)}
@@ -212,15 +220,19 @@ const OperationSelect = ({
 
 const ValueInput = ({
   type,
+  operator,
   value,
   onChange,
   disabled,
 }: {
   type: string
+  operator?: ActionOperation
   value?: string | number
   onChange: (value: string | number) => void
   disabled?: boolean
 }) => {
+  const { t } = useTranslation("settings")
+
   switch (type) {
     case "view": {
       return (
@@ -246,8 +258,10 @@ const ValueInput = ({
         >
           <CommonSelectTrigger />
           <SelectContent>
-            <SelectItem value="collected">Collected</SelectItem>
-            <SelectItem value="read">Read</SelectItem>
+            <SelectItem value="collected">
+              {t("actions.action_card.status_options.collected")}
+            </SelectItem>
+            <SelectItem value="read">{t("actions.action_card.status_options.read")}</SelectItem>
           </SelectContent>
         </Select>
       )
@@ -264,13 +278,29 @@ const ValueInput = ({
       )
     }
     default: {
+      const regexError = operator === "regex" ? getRegexError(value) : null
+      // Sized like the bare inputs of the other types: with a zero flex basis the operator
+      // select took the whole row and squeezed the input to a few pixels
       return (
-        <Input
-          disabled={disabled}
-          value={value as string | undefined}
-          className="h-9"
-          onChange={(event) => onChange(event.target.value)}
-        />
+        <div className="flex w-full flex-auto flex-col gap-1.5">
+          <Input
+            disabled={disabled}
+            value={value as string | undefined}
+            aria-invalid={regexError ? true : undefined}
+            className={cn("h-9", regexError && "border-red focus:border-red")}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          {regexError && (
+            <p className="text-xs leading-relaxed text-red">
+              {t("actions.action_card.invalid_regex", { error: regexError })}
+            </p>
+          )}
+          {operator === "regex" && (
+            <p className="text-xs leading-relaxed text-text-tertiary">
+              {t("actions.action_card.regex_help")}
+            </p>
+          )}
+        </div>
       )
     }
   }

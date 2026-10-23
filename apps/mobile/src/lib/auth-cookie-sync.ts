@@ -6,6 +6,15 @@ type AuthCookieStorage = {
   setItem: (key: string, value: string) => unknown
 }
 
+type RemovableAuthCookieStorage = AuthCookieStorage & {
+  removeItem: (key: string) => unknown
+}
+
+type AsyncAuthCookieStorage = RemovableAuthCookieStorage & {
+  getItemAsync: (key: string) => Promise<string | null>
+  setItemAsync: (key: string, value: string) => Promise<void>
+}
+
 type StoredCookie = Record<
   string,
   {
@@ -13,6 +22,36 @@ type StoredCookie = Record<
     value: string
   }
 >
+
+const parseStoredCookieSafely = (cookie: string | null | undefined): StoredCookie | null => {
+  if (!cookie) {
+    return {}
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(cookie)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null
+    }
+
+    for (const value of Object.values(parsed)) {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        !("value" in value) ||
+        typeof value.value !== "string" ||
+        !("expires" in value) ||
+        (value.expires !== null && typeof value.expires !== "string")
+      ) {
+        return null
+      }
+    }
+
+    return parsed as StoredCookie
+  } catch {
+    return null
+  }
+}
 
 const parseStoredCookie = (cookie: string | null | undefined): StoredCookie => {
   if (!cookie) {
@@ -25,6 +64,26 @@ const parseStoredCookie = (cookie: string | null | undefined): StoredCookie => {
   } catch {
     return {}
   }
+}
+
+const isSessionCookieName = (name: string) =>
+  name.includes("session_token") || name.includes("session_data")
+
+// Session responses routinely extend cookie expiry without changing the signed-in user.
+export const hasAuthSessionChanged = (
+  previousCookie: string | null | undefined,
+  nextCookie: string | null | undefined,
+) => {
+  const previous = parseStoredCookieSafely(previousCookie)
+  const next = parseStoredCookieSafely(nextCookie)
+  if (!previous || !next) {
+    return true
+  }
+
+  const sessionCookieNames = new Set(
+    [...Object.keys(previous), ...Object.keys(next)].filter(isSessionCookieName),
+  )
+  return Array.from(sessionCookieNames).some((name) => previous[name]?.value !== next[name]?.value)
 }
 
 const getCookieHeaderFromStoredCookie = (cookie: string) =>
@@ -80,20 +139,35 @@ const createCookieStorage = (storage: AuthCookieStorage) => ({
       return stored
     }
 
-    const count = Number(stored.slice(chunkMarker.length))
-    if (!Number.isInteger(count) || count < 1) {
+    const [countValue, slot, fallbackValue, ...extra] = stored.slice(chunkMarker.length).split(":")
+    const count = Number(countValue)
+    const fallbackCount = fallbackValue === undefined ? null : Number(fallbackValue)
+    const validCount = (value: number) => Number.isInteger(value) && value >= 1 && value <= 100
+    if (
+      extra.length > 0 ||
+      !validCount(count) ||
+      (slot !== undefined && slot !== "0" && slot !== "1") ||
+      (fallbackCount !== null && !validCount(fallbackCount))
+    ) {
       return null
     }
 
-    let value = ""
-    for (let index = 0; index < count; index++) {
-      const chunk = storage.getItem(`${key}.${index}`)
-      if (chunk == null) {
-        return null
+    const readChunks = (prefix: string, length: number) => {
+      let value = ""
+      for (let index = 0; index < length; index++) {
+        const chunk = storage.getItem(`${prefix}.${index}`)
+        if (!chunk) {
+          return null
+        }
+        value += chunk
       }
-      value += chunk
+      return value
     }
 
+    const value = readChunks(slot === undefined ? key : `${key}.${slot}`, count)
+    if (value === null && slot !== undefined && fallbackCount !== null) {
+      return readChunks(`${key}.${slot === "0" ? "1" : "0"}`, fallbackCount)
+    }
     return value
   },
   async setItem(name: string, value: string) {
@@ -112,6 +186,66 @@ const createCookieStorage = (storage: AuthCookieStorage) => ({
     await storage.setItem(key, `${chunkMarker}${count}`)
   },
 })
+
+export const createSessionAwareAuthCookieStorage = ({
+  cookieKey,
+  storage,
+  onSessionChange,
+}: {
+  cookieKey: string
+  storage: RemovableAuthCookieStorage
+  onSessionChange: () => void
+}): AsyncAuthCookieStorage => {
+  const normalizedCookieKey = normalizeCookieName(cookieKey)
+  const cookieStorage = createCookieStorage(storage)
+  let lastObservedCookie = cookieStorage.getItem(cookieKey)
+
+  const sessionStorage: AsyncAuthCookieStorage = {
+    getItem(key) {
+      return storage.getItem(key)
+    },
+    async getItemAsync(key) {
+      return storage.getItem(key)
+    },
+    async setItemAsync(key, value) {
+      await sessionStorage.setItem(key, value)
+    },
+    async setItem(key, value) {
+      if (key !== normalizedCookieKey) {
+        await storage.setItem(key, value)
+        return
+      }
+
+      await storage.setItem(key, value)
+      if (value === "") {
+        return
+      }
+
+      const nextCookie = cookieStorage.getItem(cookieKey)
+      if (nextCookie === null || parseStoredCookieSafely(nextCookie) === null) {
+        return
+      }
+
+      const previousCookie = lastObservedCookie
+      lastObservedCookie = nextCookie
+      if (hasAuthSessionChanged(previousCookie, nextCookie)) {
+        onSessionChange()
+      }
+    },
+    async removeItem(key) {
+      await storage.removeItem(key)
+
+      if (key === normalizedCookieKey) {
+        const previousCookie = lastObservedCookie
+        lastObservedCookie = null
+        if (hasAuthSessionChanged(previousCookie, null)) {
+          onSessionChange()
+        }
+      }
+    },
+  }
+  return sessionStorage
+}
 
 const managedAuthCookieNames = new Set([
   "two_factor",
@@ -230,11 +364,12 @@ export const mergeStoredAuthCookies = (
 export const createMobileAuthCookieSyncPlugin = ({
   cookieKey,
   storage,
+  cookieStorage = createCookieStorage(storage),
 }: {
   cookieKey: string
   storage: AuthCookieStorage
+  cookieStorage?: AuthCookieStorage
 }): BetterAuthClientPlugin => {
-  const cookieStorage = createCookieStorage(storage)
   const getStoredCookieHeader = () =>
     getCookieHeaderFromStoredCookie(cookieStorage.getItem(cookieKey) || "{}")
 

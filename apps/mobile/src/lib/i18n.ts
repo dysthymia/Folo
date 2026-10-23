@@ -13,6 +13,7 @@ import { defaultResources } from "@/src/@types/default-resource"
 
 import { getGeneralSettings } from "../atoms/settings/general"
 import { getE2ELanguage } from "./e2e-config"
+import { applyZodLocale } from "./zod-locale"
 
 const fallbackLanguage = "en"
 
@@ -33,10 +34,20 @@ export const updateDayjsLocale = async (lang: string) => {
   dayjs.locale(locale)
 }
 
+/**
+ * Switches the app language. Dates on screen re-render for the new language and format with the
+ * dayjs locale, so that locale has to switch first.
+ */
+export const changeAppLanguage = async (language: string) => {
+  await updateDayjsLocale(language)
+  await i18n.changeLanguage(language)
+}
+
 export async function initializeI18n() {
   const { language: storedLanguage } = getGeneralSettings()
   const language = getForcedLanguage() ?? storedLanguage
 
+  i18n.on("languageChanged", applyZodLocale)
   return Promise.all([
     updateDayjsLocale(language),
     i18n.use(initReactI18next).init({

@@ -3,6 +3,8 @@ import { Checkbox } from "@follow/components/ui/checkbox/index.jsx"
 import { Input } from "@follow/components/ui/input/index.js"
 import { ScrollArea } from "@follow/components/ui/scroll-area/index.js"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@follow/components/ui/tooltip/index.jsx"
+import { getFeedById } from "@follow/store/feed/getter"
+import { getAllFeedSubscription } from "@follow/store/subscription/getter"
 import { subscriptionSyncService } from "@follow/store/subscription/store"
 import { cn } from "@follow/utils/utils"
 import type { ExtractResponseData, SubscriptionParseOpmlResponse } from "@follow-app/client-sdk"
@@ -16,11 +18,22 @@ import { useCurrentModal } from "~/components/ui/modal/stacked/hooks"
 import { followClient } from "~/lib/api-client"
 import { toastFetchError } from "~/lib/error-parser"
 
+import type { OpmlImportResult } from "./opml-import"
+import { addFollowedToImportResult, splitFollowedOpmlItems } from "./opml-import"
 import {
   addSelectedItemIdsWithinQuota,
   getInitialSelectedItemIds,
 } from "./OpmlSelectionModal.utils"
 import type { ParsedFeedItem } from "./types"
+
+const getFollowedFeedIdByUrl = () => {
+  const feedIdByUrl = new Map<string, string>()
+  for (const { feedId } of getAllFeedSubscription()) {
+    const url = getFeedById(feedId)?.url
+    if (feedId && url) feedIdByUrl.set(url, feedId)
+  }
+  return feedIdByUrl
+}
 
 export const OpmlSelectionModal = ({
   parsedData,
@@ -34,18 +47,25 @@ export const OpmlSelectionModal = ({
   const { dismiss } = useCurrentModal()
 
   const importMutation = useMutation({
-    mutationFn: async (selectedItems: ParsedFeedItem[]) => {
+    mutationFn: async (selectedItems: ParsedFeedItem[]): Promise<OpmlImportResult> => {
+      const { followed, rest } = splitFollowedOpmlItems(selectedItems, getFollowedFeedIdByUrl())
+      // Nothing new to import, and the server fails on an import without a new feed
+      if (rest.length === 0) {
+        return { successfulItems: [], conflictItems: followed, parsedErrorItems: [] }
+      }
+
       const formData = new FormData()
 
       formData.append("file", file)
-      formData.append("items", JSON.stringify(selectedItems.map((i) => i.url)))
+      formData.append("items", JSON.stringify(rest.map((i) => i.url)))
 
       const { data } = await followClient.api.subscriptions.import(formData)
 
-      return data
+      return addFollowedToImportResult(data, followed)
     },
     onSuccess: (data) => {
-      subscriptionSyncService.fetch()
+      // The import is logged per feed, so the delta feed delivers exactly what was added.
+      void subscriptionSyncService.refresh(undefined, { afterServerChange: true })
 
       const { successfulItems, conflictItems, parsedErrorItems } = data
 
@@ -249,7 +269,7 @@ export const OpmlSelectionModal = ({
       {/* Search Input */}
       <div className="mb-4">
         <Input
-          placeholder={t("discover.import.search_feeds_placeholder", "Search feeds...")}
+          placeholder={t("discover.import.search_feeds_placeholder")}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="w-full"
@@ -269,11 +289,11 @@ export const OpmlSelectionModal = ({
         <span className="font-medium">
           {searchQuery.trim() ? (
             <>
-              {t("discover.import.select_all_filtered", "Select all filtered")} (
-              {filteredSelectedCount}/{filteredSubscriptions.length})
+              {t("discover.import.select_all_filtered")} ({filteredSelectedCount}/
+              {filteredSubscriptions.length})
               {filteredSubscriptions.length < parsedData.subscriptions.length && (
                 <span className="ml-1 text-text-secondary">
-                  of {parsedData.subscriptions.length} total
+                  {t("discover.import.total_count", { total: parsedData.subscriptions.length })}
                 </span>
               )}
             </>
@@ -290,7 +310,7 @@ export const OpmlSelectionModal = ({
         <div className="space-y-2">
           {filteredSubscriptions.length === 0 && searchQuery.trim() ? (
             <div className="py-8 text-center text-text-secondary">
-              {t("discover.import.no_feeds_found", "No feeds found matching your search.")}
+              {t("discover.import.no_feeds_found")}
             </div>
           ) : (
             filteredSubscriptions.map(({ item, refIndex }) => {
@@ -310,7 +330,9 @@ export const OpmlSelectionModal = ({
                 >
                   <Checkbox checked={isSelected} disabled={wouldExceedQuota} />
                   <div className="min-w-0 flex-1 shrink">
-                    <div className="truncate font-medium">{item.title || "Untitled Feed"}</div>
+                    <div className="truncate font-medium">
+                      {item.title || t("discover.import.untitled_feed")}
+                    </div>
                     <div className="truncate text-sm text-text-secondary">{item.url}</div>
                     {item.category && (
                       <div className="mt-1 text-xs text-text-secondary opacity-80">
@@ -327,7 +349,7 @@ export const OpmlSelectionModal = ({
 
       <div className="mt-4 flex justify-end gap-3">
         <Button variant="outline" onClick={dismiss} disabled={importMutation.isPending}>
-          Cancel
+          {t("words.cancel", { ns: "common" })}
         </Button>
         <Button
           onClick={handleImport}

@@ -8,6 +8,7 @@ import { nextFrame } from "@follow/utils/dom"
 import { EventBus } from "@follow/utils/event-bus"
 import type { FC } from "react"
 import { memo, useEffect } from "react"
+import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { FocusablePresets } from "~/components/common/Focusable"
@@ -28,6 +29,7 @@ export const EntryColumnShortcutHandler: FC<{
 }> = memo(({ data, refetch, handleScrollTo }) => {
   const reader = useNativeReader()
   const readerRef = useRefValue(reader)
+  const { t } = useTranslation()
   const dataRef = useRefValue(data!)
 
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isTimeline)
@@ -79,7 +81,7 @@ export const EntryColumnShortcutHandler: FC<{
       const nextIndex = Math.min(currentActiveEntryIndex + 1, data.length - 1)
 
       if (currentActiveEntryIndex === nextIndex) {
-        toast.info("You are already at the last entry")
+        toast.info(t("entry_list.already_at_last_entry"))
         return
       }
 
@@ -92,7 +94,7 @@ export const EntryColumnShortcutHandler: FC<{
         if (item) activeReader.selectItem(item)
       } else navigate({ entryId: nextId, view })
     })
-  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef, when])
+  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef, t, when])
 
   useEffect(() => {
     return EventBus.subscribe(COMMAND_ID.timeline.switchToPrevious, () => {
@@ -112,7 +114,7 @@ export const EntryColumnShortcutHandler: FC<{
         currentActiveEntryIndex === -1 ? data.length - 1 : Math.max(0, currentActiveEntryIndex - 1)
 
       if (currentActiveEntryIndex === nextIndex) {
-        toast.info("You are already at the first entry")
+        toast.info(t("entry_list.already_at_first_entry"))
         return
       }
 
@@ -126,7 +128,7 @@ export const EntryColumnShortcutHandler: FC<{
         if (item) activeReader.selectItem(item)
       } else navigate({ entryId: nextId, view })
     })
-  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef])
+  }, [currentEntryIdRef, dataRef, handleScrollTo, navigate, readerRef, t])
 
   useEffect(() => {
     return EventBus.subscribe(COMMAND_ID.timeline.refetch, () => {

@@ -16,10 +16,11 @@ import { Media } from "~/components/ui/media/Media"
 import { useEntryIsRead } from "~/hooks/biz/useAsRead"
 import { useRenderStyle } from "~/hooks/biz/useRenderStyle"
 import { jotaiStore } from "~/lib/jotai"
-import { parseSocialMedia } from "~/lib/parsers"
+import { parseEntrySocialMedia } from "~/lib/parsers"
 import type { FeedIconEntry } from "~/modules/feed/feed-icon"
 import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
+import { useSocialAuthorTitle } from "~/modules/feed/social-author-title"
 
 import { socialMediaContentWidthAtom } from "../atoms/social-media-content-width"
 import { EntrySemanticTags } from "../entry-semantic-tags"
@@ -69,6 +70,11 @@ export const SocialMediaItem: EntryListItemFC = ({
 
   const asRead = useEntryIsRead(entryId)
   const feed = useFeedById(entry?.feedId)
+  const authorTitle = useSocialAuthorTitle({
+    feedId: entry?.feedId,
+    author: entry?.author,
+    feedTitle: feed?.title,
+  })
 
   const iconEntry: FeedIconEntry = useMemo(
     () => ({
@@ -93,7 +99,7 @@ export const SocialMediaItem: EntryListItemFC = ({
 
   const content = entry.content || entry.description
 
-  const parsed = parseSocialMedia(entry.authorUrl || entry.url || entry.guid)
+  const parsed = parseEntrySocialMedia(entry, feed)
   const EntryContentWrapper = autoExpandLongSocialMedia
     ? PassviseFragment
     : CollapsedSocialMediaItem
@@ -114,7 +120,7 @@ export const SocialMediaItem: EntryListItemFC = ({
         <div className="-mt-0.5 flex-1 text-sm">
           <div className="flex select-none flex-wrap space-x-1 leading-6" ref={titleRef}>
             <span className="inline-flex min-w-0 items-center gap-1 text-base font-semibold">
-              <FeedTitle feed={feed} title={entry.author || feed.title} />
+              <FeedTitle feed={feed} title={authorTitle} />
               {parsed?.type === "x" && (
                 <i className="i-mgc-twitter-cute-fi size-3 text-[#4A99E9]" />
               )}

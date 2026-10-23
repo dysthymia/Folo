@@ -15,9 +15,13 @@ import type {
   UseEntriesProps,
   UseEntriesReturn,
 } from "@follow/store/entry/types"
-import { dedupeEntryIdsByTitle, fallbackReturn } from "@follow/store/entry/utils"
+import {
+  dedupeEntryIdsByTitle,
+  fallbackReturn,
+  isTimelineEntriesSource,
+} from "@follow/store/entry/utils"
 import { useFeedById } from "@follow/store/feed/hooks"
-import { useInboxById } from "@follow/store/inbox/hooks"
+import { useInboxById, useInboxList } from "@follow/store/inbox/hooks"
 import { useListById } from "@follow/store/list/hooks"
 import { getSubscriptionByCategory } from "@follow/store/subscription/getter"
 import { useSubscriptionByFeedId, useViewWithSubscription } from "@follow/store/subscription/hooks"
@@ -27,13 +31,26 @@ import { debounce } from "es-toolkit"
 import { atom, useAtomValue } from "jotai"
 import { selectAtom } from "jotai/utils"
 import type { ReactNode } from "react"
-import { createContext, createElement, use, useCallback, useEffect, useMemo, useState } from "react"
+import {
+  createContext,
+  createElement,
+  use,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { useTranslation } from "react-i18next"
 import type { SharedValue } from "react-native-reanimated"
 import { makeMutable, useSharedValue } from "react-native-reanimated"
 
 import { useFetchEntriesSettings } from "@/src/atoms/settings/general"
 import { views } from "@/src/constants/views"
+import { toastFetchError } from "@/src/lib/error-parser"
+
+import type { RemoteTimelineEntries } from "./timeline-entries"
+import { joinRefreshAttempt, pickTimelineEntries } from "./timeline-entries"
 
 export type SelectedTimeline = {
   type: "view"
@@ -66,15 +83,22 @@ const selectedTimelineAtom = atom<SelectedTimeline>({
 
 const selectedFeedAtom = atom<SelectedFeed>(null)
 
-export const EntryListContext = createContext<{ type: "timeline" | "feed" | "subscriptions" }>({
-  type: "timeline",
-})
+export const EntryListContext = createContext<{
+  type: "timeline" | "feed" | "subscriptions"
+  isPreview?: boolean
+  // The view of the subscription a feed screen shows, which wins over the view selected on Home
+  view?: FeedViewType
+}>({ type: "timeline" })
 export const useEntryListContext = () => {
   return use(EntryListContext)
 }
 
 export function useSelectedView() {
-  return useAtomValue(useMemo(() => selectAtom(selectedTimelineAtom, (state) => state.viewId), []))
+  const { view } = useEntryListContext()
+  const selectedView = useAtomValue(
+    useMemo(() => selectAtom(selectedTimelineAtom, (state) => state.viewId), []),
+  )
+  return view ?? selectedView
 }
 
 export const getSelectedView = () => {
@@ -152,9 +176,26 @@ export const getFetchEntryPayload = (
   return payload
 }
 
-function useRemoteEntries(props?: UseEntriesProps): UseEntriesReturn {
+export function useIsTimelineEntrySource() {
+  const entryListContext = useEntryListContext()
   const selectedFeed = useSelectedFeed()
   const selectedView = useSelectedView()
+  const hasInboxSubscriptions = useInboxList((inboxes) => inboxes.length > 0)
+  const payload = getFetchEntryPayload(selectedFeed, selectedView)
+
+  // 中文：完整时间线含邮件时，排序按钮与实际请求共同固定为最新优先。
+  return (
+    !entryListContext.isPreview &&
+    payload !== null &&
+    isTimelineEntriesSource({ ...payload, hasInboxSubscriptions })
+  )
+}
+
+function useRemoteEntries(props?: UseEntriesProps): RemoteTimelineEntries {
+  const entryListContext = useEntryListContext()
+  const selectedFeed = useSelectedFeed()
+  const selectedView = useSelectedView()
+  const hasInboxSubscriptions = useInboxList((inboxes) => inboxes.length > 0)
   const view = props?.viewId ?? selectedView
   const payload = getFetchEntryPayload(
     selectedFeed?.type === "view"
@@ -165,21 +206,50 @@ function useRemoteEntries(props?: UseEntriesProps): UseEntriesReturn {
       : selectedFeed,
     view,
   )
-  const options = useFetchEntriesSettings()
+  const options = useFetchEntriesSettings({
+    isTimelineSource:
+      !entryListContext.isPreview &&
+      payload !== null &&
+      isTimelineEntriesSource({ ...payload, hasInboxSubscriptions }),
+    unreadOnlyEnabled: !entryListContext.isPreview,
+  })
 
-  const query = useEntriesQuery(props?.active ? { ...payload, ...options } : undefined)
+  const query = useEntriesQuery(payload ? { ...payload, ...options } : undefined, {
+    subscribed: props?.active !== false,
+  })
 
   const refetch = useCallback(async () => void query.refetch(), [query])
+  const refreshAttemptRef = useRef<Promise<void> | null>(null)
+  const refetchReportingFailure = useCallback(
+    () =>
+      joinRefreshAttempt(refreshAttemptRef, async () => {
+        const result = await query.refetch()
+        if (result.isError) toastFetchError(result.error)
+      }),
+    [query],
+  )
   const fetchNextPage = useCallback(async () => void query.fetchNextPage(), [query])
 
   if (!query.data || query.isLoading) {
-    return fallbackReturn
+    // Without data yet, still report a failed first page and keep the remote refetch, so the
+    // timeline can fall back to the stored entries and pull to refresh tries the server again
+    return {
+      ...fallbackReturn,
+      refetch,
+      refetchReportingFailure,
+      fetchNextPage,
+      isLoading: !query.isError,
+      isRefetching: query.isRefetching,
+      isFetching: query.isFetching,
+      error: query.isError ? query.error : null,
+    }
   }
 
   return {
     entriesIds: query.entriesIds,
     hasNext: query.hasNextPage,
     refetch,
+    refetchReportingFailure,
     fetchNextPage,
     isLoading: query.isFetching,
     isRefetching: query.isRefetching,
@@ -188,13 +258,16 @@ function useRemoteEntries(props?: UseEntriesProps): UseEntriesReturn {
     isFetching: query.isFetching,
     hasNextPage: query.hasNextPage,
     error: query.isError ? query.error : null,
+    // 中文：沿用共享查询的首屏完成时间，分页不会推进已读截止时间。
     fetchedTime: query.fetchedTime,
   }
 }
 
 function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
+  const entryListContext = useEntryListContext()
   const selectedFeed = useSelectedFeed()
   const selectedView = useSelectedView()
+  const hasInboxSubscriptions = useInboxList((inboxes) => inboxes.length > 0)
   const view = props?.viewId ?? selectedView
   const payload = getFetchEntryPayload(
     selectedFeed?.type === "view"
@@ -205,10 +278,16 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
       : selectedFeed,
     view,
   )
-  const options = useFetchEntriesSettings()
+  const options = useFetchEntriesSettings({
+    isTimelineSource:
+      !entryListContext.isPreview &&
+      payload !== null &&
+      isTimelineEntriesSource({ ...payload, hasInboxSubscriptions }),
+    unreadOnlyEnabled: !entryListContext.isPreview,
+  })
 
   const { feedId, feedIdList, listId, inboxId, isCollection } = payload || {}
-  const { hidePrivateSubscriptionsInTimeline, unreadOnly } = options
+  const { hidePrivateSubscriptionsInTimeline, sortOrder, unreadOnly } = options
 
   const entryIdsByView = useEntryIdsByView(view, hidePrivateSubscriptionsInTimeline)
   const entryIdsByCollections = useCollectionEntryList(view)
@@ -234,7 +313,9 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
                 entryIdsByInboxId,
               ) ?? [])
 
-        const visibleEntryIds = ids
+        // 中文：先按用户顺序排列，再在可见文章内执行本地标题去重。
+        const orderedIds = sortOrder === "asc" ? [...ids].reverse() : ids
+        const visibleEntryIds = orderedIds
           .map((id) => {
             const entry = state.data[id]
             if (!entry) return null
@@ -261,6 +342,7 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
         entryIdsByView,
         isCollection,
         showEntriesByView,
+        sortOrder,
         unreadOnly,
       ],
     ),
@@ -294,7 +376,7 @@ function useLocalEntries(props?: UseEntriesProps): UseEntriesReturn {
 
   useEffect(() => {
     setPage(0)
-  }, [view, feedId])
+  }, [view, feedId, sortOrder, unreadOnly])
 
   return {
     entriesIds: entries,
@@ -325,26 +407,7 @@ export function useEntries(props?: UseEntriesProps): UseEntriesReturn {
   const isTimelineViewQuery = entryListContext.type === "timeline" && selectedFeed?.type === "view"
 
   if (isTimelineViewQuery) {
-    if (remoteQuery.isReady) {
-      return remoteQuery
-    }
-
-    if (remoteQuery.error) {
-      return {
-        ...localQuery,
-        error: remoteQuery.error,
-        isReady: true,
-      }
-    }
-
-    return {
-      ...fallbackReturn,
-      refetch: remoteQuery.refetch,
-      fetchNextPage: remoteQuery.fetchNextPage,
-      isLoading: remoteQuery.isLoading,
-      isFetching: remoteQuery.isFetching,
-      isRefetching: remoteQuery.isRefetching,
-    }
+    return pickTimelineEntries(remoteQuery, localQuery)
   }
 
   const query = remoteQuery.isReady ? remoteQuery : localQuery

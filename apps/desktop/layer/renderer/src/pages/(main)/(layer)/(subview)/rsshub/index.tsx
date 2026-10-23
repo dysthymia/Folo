@@ -93,9 +93,11 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
   const isOfficial = "isOfficial" in item && item.isOfficial
   const instance = isOfficial ? ({} as Partial<RSSHubListItem>) : (item as RSSHubListItem)
 
+  const chosenInstanceId = status?.data?.usage?.rsshubId
+  // The built-in instance always fetches first; the instance the user chose is a fallback for
+  // feeds it cannot fetch, so it does not replace the built-in one
   const isInUse = isOfficial
-    ? !status?.data?.usage?.rsshubId
-    : status?.data?.usage?.rsshubId === instance.id
+  const isFallback = !isOfficial && chosenInstanceId === instance.id
   const isOwner = !isOfficial && instance.ownerUserId === me?.id
   const hasError = !isOfficial && !!instance.errorMessage
 
@@ -109,8 +111,8 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
     />
   )
 
-  const title = isOfficial ? "Folo Official" : ""
-  const description = isOfficial ? "Folo Built-in RSSHub" : instance.description
+  const title = isOfficial ? t("rsshub.official.title") : ""
+  const description = isOfficial ? t("rsshub.official.description") : instance.description
 
   const usersStat = isOfficial ? "*" : instance.userCount || 0
   const limitStat = isOfficial
@@ -133,19 +135,28 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
           {t("rsshub.table.inuse")}
         </span>
       )}
+      {isFallback && (
+        <span className="rounded bg-blue/10 px-1.5 py-0.5 text-xs text-blue">
+          {t("rsshub.table.fallback")}
+        </span>
+      )}
       {isOwner && (
         <span className="rounded bg-purple/10 px-1.5 py-0.5 text-xs text-purple">
           {t("rsshub.table.yours")}
         </span>
       )}
-      {hasError && <span className="rounded bg-red/10 px-1.5 py-0.5 text-xs text-red">Error</span>}
+      {hasError && (
+        <span className="rounded bg-red/10 px-1.5 py-0.5 text-xs text-red">
+          {t("rsshub.table.error")}
+        </span>
+      )}
     </>
   )
 
   const containerClassName = cn(
     "border-fill-secondary relative rounded-lg border p-4",
     isOfficial ? "bg-fill-vibrant-quaternary" : "bg-fill-vibrant-quinary",
-    isInUse && "ring-accent/20 ring-2",
+    (isInUse || isFallback) && "ring-accent/20 ring-2",
     hasError && "border-red/30 bg-red/5",
   )
 
@@ -172,11 +183,11 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
       <div className="flex items-center justify-between text-xs">
         <div className="flex gap-4">
           <div>
-            <span className="text-text-secondary">Users:</span>{" "}
+            <span className="text-text-secondary">{t("rsshub.table.users_label")}</span>{" "}
             <span className="text-text">{String(usersStat)}</span>
           </div>
           <div>
-            <span className="text-text-secondary">Limit:</span>{" "}
+            <span className="text-text-secondary">{t("rsshub.table.limit_label")}</span>{" "}
             <span className="text-text">{String(limitStat)}</span>
           </div>
         </div>
@@ -197,7 +208,7 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
                   })
                 }
               >
-                Edit
+                {t("rsshub.table.edit")}
               </Button>
               <Button
                 variant="outline"
@@ -212,7 +223,7 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
                   })
                 }
               >
-                Del
+                {t("rsshub.table.delete.label")}
               </Button>
             </>
           )}
@@ -220,13 +231,14 @@ const InstanceCard = memo(({ item }: { item: InstanceItem }) => {
         <div className="flex items-center">
           {isOfficial ? (
             <div>
-              {isInUse ? (
-                <Button disabled size="sm">
-                  {t("rsshub.table.inuse")}
+              {chosenInstanceId ? (
+                // Stops using the chosen instance as a fallback
+                <Button size="sm" onClick={() => presetTOTPModal({ id: null })}>
+                  {t("rsshub.table.use_only")}
                 </Button>
               ) : (
-                <Button size="sm" onClick={() => presetTOTPModal({ id: null })}>
-                  {t("rsshub.table.use")}
+                <Button disabled size="sm">
+                  {t("rsshub.table.inuse")}
                 </Button>
               )}
             </div>
@@ -316,12 +328,12 @@ function SelectInstanceButton({ instance }: { instance: RSSHubListItem }) {
       >
         {t(
           status?.data?.usage?.rsshubId === instance.id
-            ? "rsshub.table.inuse"
+            ? "rsshub.table.fallback"
             : isNotAvailable
               ? "rsshub.table.unavailable"
               : limitReached
                 ? "rsshub.table.limit_reached"
-                : "rsshub.table.use",
+                : "rsshub.table.use_as_fallback",
         )}
       </Button>
     </ErrorTooltip>

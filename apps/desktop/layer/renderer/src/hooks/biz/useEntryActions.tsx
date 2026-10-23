@@ -24,7 +24,7 @@ import { useIntegrationSettingValue } from "~/atoms/settings/integration"
 import { useShowSourceContent } from "~/atoms/source-content"
 import { ipcServices } from "~/lib/client"
 import { COMMAND_ID } from "~/modules/command/commands/id"
-import { getCommand, useRunCommandFn } from "~/modules/command/hooks/use-command"
+import { getCommand, useCommands, useRunCommandFn } from "~/modules/command/hooks/use-command"
 import { useCommandShortcuts } from "~/modules/command/hooks/use-command-binding"
 import { isMutationCommandId } from "~/modules/command/mutation-command-ids"
 import type { FollowCommandId, UnknownCommand } from "~/modules/command/types"
@@ -45,6 +45,8 @@ export const toggleEntryReadability = async ({ id, url }: { id: string; url: str
   const isTurnOn = status !== ReadabilityStatus.INITIAL && !!status
 
   if (!isTurnOn && url) {
+    // The onboarding entries link to an internal folo:// address with no page to extract
+    if (isOnboardingEntryUrl(url)) return
     setReadabilityStatus({
       [id]: ReadabilityStatus.WAITING,
     })
@@ -264,6 +266,8 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
   const integrationSettings = useIntegrationSettingValue()
 
   const shortcuts = useCommandShortcuts()
+  // Integrations register their commands only once they are enabled
+  const commands = useCommands()
 
   const isCurrentVisitEntry = routeEntryId === entryId
   const isOnboardingEntry = isOnboardingEntryUrl(entry?.url)
@@ -425,6 +429,7 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
         onClick: runCmdFn(COMMAND_ID.entry.share, [{ entryId }]),
         hide: !entry.url,
         shortcut: shortcuts[COMMAND_ID.entry.share],
+        disabled: isOnboardingEntry,
         entryId,
       }),
       MENU_ITEM_SEPARATOR,
@@ -487,6 +492,7 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
     })
 
     return configs
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the items read `commands` through getCommand
   }, [
     hasEntry,
     runCmdFn,
@@ -514,6 +520,7 @@ export const useEntryActions = ({ entryId, view }: { entryId: string; view: Feed
     integrationSettings.customIntegration,
     integrationSettings.enableCustomIntegration,
     isOnboardingEntry,
+    commands,
   ])
 
   return actionConfigs

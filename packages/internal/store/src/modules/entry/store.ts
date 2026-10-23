@@ -14,6 +14,8 @@ import { readNdjsonStream } from "../../lib/stream"
 import { apiMorph } from "../../morph/api"
 import { dbStoreMorph } from "../../morph/db-store"
 import { storeDbMorph } from "../../morph/store-db"
+import { entryReadOverlayKey } from "../../sync/overlay-keys"
+import { transactionQueue } from "../../sync/transaction-queue"
 import { collectionActions } from "../collection/store"
 import { clearAllFeedUnreadDirty, clearFeedUnreadDirty } from "../feed/hooks"
 import { feedActions } from "../feed/store"
@@ -27,8 +29,13 @@ import type {
 } from "../unread/types"
 import { userActions } from "../user/store"
 import { getEntry } from "./getter"
-import type { EntryModel, FetchEntriesProps, FetchEntriesPropsSettings } from "./types"
-import { getEntriesParams } from "./utils"
+import type {
+  EntryModel,
+  EntrySortOrder,
+  FetchEntriesProps,
+  FetchEntriesPropsSettings,
+} from "./types"
+import { getEffectiveEntrySortOrder, getEntriesParams, isTimelineEntriesSource } from "./utils"
 
 type EntryId = string
 type FeedId = string
@@ -68,56 +75,12 @@ const defaultState: EntryState = {
   entryIdSet: new Set(),
 }
 
-const LOCAL_READ_PROTECTION_WINDOW = 30 * 1000
-
 export const useEntryStore = createZustandStore<EntryState>("entry")(() => defaultState)
 
 const get = useEntryStore.getState
 const immerSet = createImmerSetter(useEntryStore)
 
 class EntryActions implements Hydratable, Resetable {
-  private localReadProtectionExpiresAt = new Map<EntryId, number>()
-  private nextLocalReadProtectionCleanupAt = 0
-
-  private protectLocalRead(entryId: EntryId) {
-    const now = Date.now()
-    this.pruneLocalReadProtection(now)
-    this.localReadProtectionExpiresAt.set(entryId, now + LOCAL_READ_PROTECTION_WINDOW)
-  }
-
-  private clearLocalReadProtection(entryId: EntryId) {
-    this.localReadProtectionExpiresAt.delete(entryId)
-  }
-
-  private isLocalReadProtected(entryId: EntryId) {
-    const expiresAt = this.localReadProtectionExpiresAt.get(entryId)
-    if (!expiresAt) return false
-
-    if (expiresAt <= Date.now()) {
-      this.localReadProtectionExpiresAt.delete(entryId)
-      return false
-    }
-
-    return true
-  }
-
-  private pruneLocalReadProtection(now: number) {
-    if (this.nextLocalReadProtectionCleanupAt > now) return
-
-    for (const [entryId, expiresAt] of this.localReadProtectionExpiresAt.entries()) {
-      if (expiresAt <= now) {
-        this.localReadProtectionExpiresAt.delete(entryId)
-      }
-    }
-
-    this.nextLocalReadProtectionCleanupAt = now + LOCAL_READ_PROTECTION_WINDOW
-  }
-
-  clearLocalReadProtectionInSession() {
-    this.localReadProtectionExpiresAt.clear()
-    this.nextLocalReadProtectionCleanupAt = 0
-  }
-
   async hydrate() {
     const entries = await EntryService.getEntriesToHydrate()
     entryActions.upsertManyInSession(entries.map((e) => dbStoreMorph.toEntryModel(e)))
@@ -150,7 +113,7 @@ class EntryActions implements Hydratable, Resetable {
 
     if (!ignore) {
       if (typeof subscription?.view === "number") {
-        draft.entryIdByView[subscription.view]!.add(entryId)
+        draft.entryIdByView[subscription.view]?.add(entryId)
       }
       draft.entryIdByView[FeedViewType.All]!.add(entryId)
     }
@@ -164,7 +127,7 @@ class EntryActions implements Hydratable, Resetable {
 
       if (!ignore) {
         if (typeof subscription?.view === "number") {
-          draft.entryIdByView[subscription.view]!.add(entryId)
+          draft.entryIdByView[subscription.view]?.add(entryId)
         }
         draft.entryIdByView[FeedViewType.All]!.add(entryId)
       }
@@ -275,10 +238,16 @@ class EntryActions implements Hydratable, Resetable {
     if (entries.length === 0) return
     const { unreadOnly, hidePrivateSubscriptionsInTimeline } = options || {}
 
+    // Pending or just-acknowledged read marks win over the snapshot we received.
+    const overlays = transactionQueue.getOverlays()
+
     immerSet((draft) => {
       for (const entry of entries) {
+        const readOverride = overlays.get(entryReadOverlayKey(entry.id))
         const nextEntry =
-          !entry.read && this.isLocalReadProtected(entry.id) ? { ...entry, read: true } : entry
+          typeof readOverride === "boolean" && entry.read !== readOverride
+            ? { ...entry, read: readOverride }
+            : entry
 
         draft.entryIdSet.add(nextEntry.id)
         draft.data[nextEntry.id] = nextEntry
@@ -404,6 +373,81 @@ class EntryActions implements Hydratable, Resetable {
     await tx.run()
   }
 
+  /** Store the contents of several entries in one store update. */
+  async updateEntryContents(contents: { entryId: EntryId; content: string }[]) {
+    const tx = createTransaction()
+    tx.store(() => {
+      immerSet((draft) => {
+        for (const { entryId, content } of contents) {
+          const entry = draft.data[entryId]
+          if (entry && content) {
+            entry.content = content
+          }
+        }
+      })
+    })
+
+    tx.persist(() => {
+      for (const { entryId, content } of contents) {
+        if (content) {
+          EntryService.patch({ id: entryId, content })
+        }
+      }
+    })
+
+    await tx.run()
+  }
+
+  /**
+   * Entries whose read flag would change for the given selection, without mutating anything.
+   */
+  collectEntryIdsToMarkInSession({
+    entryIds,
+    ids,
+    read,
+    time,
+  }: {
+    entryIds?: EntryId[]
+    ids?: FeedIdOrInboxHandle[]
+    read: boolean
+    time?: PublishAtTimeRangeFilter | InsertedBeforeTimeRangeFilter
+  }): EntryId[] {
+    const state = get()
+    const matchesTime = (entry: EntryModel) => {
+      if (time && "startTime" in time) {
+        const publishedAt = +new Date(entry.publishedAt)
+        if (publishedAt < time.startTime || publishedAt > time.endTime) return false
+      }
+      if (time && "insertedBefore" in time && +new Date(entry.insertedAt) >= time.insertedBefore) {
+        return false
+      }
+      return true
+    }
+
+    const affected = new Set<EntryId>()
+
+    if (entryIds) {
+      for (const entryId of entryIds) {
+        const entry = state.data[entryId]
+        if (!entry || !matchesTime(entry)) continue
+        if (entry.read !== read) affected.add(entryId)
+      }
+    }
+
+    if (ids) {
+      const idSet = new Set(ids)
+      for (const entryId of state.entryIdSet) {
+        const entry = state.data[entryId]
+        if (!entry) continue
+        const id = entry.inboxHandle || entry.feedId || ""
+        if (!id || !idSet.has(id) || !matchesTime(entry)) continue
+        if (entry.read !== read) affected.add(entryId)
+      }
+    }
+
+    return Array.from(affected)
+  }
+
   markEntryReadStatusInSession({
     entryIds,
     ids,
@@ -415,87 +459,19 @@ class EntryActions implements Hydratable, Resetable {
     read: boolean
     time?: PublishAtTimeRangeFilter | InsertedBeforeTimeRangeFilter
   }) {
-    const affectedEntryIds = new Set<EntryId>()
+    const affectedEntryIds = this.collectEntryIdsToMarkInSession({ entryIds, ids, read, time })
+    if (affectedEntryIds.length === 0) return affectedEntryIds
 
     immerSet((draft) => {
-      if (entryIds) {
-        for (const entryId of entryIds) {
-          const entry = draft.data[entryId]
-          if (!entry) {
-            continue
-          }
-
-          if (
-            time &&
-            "startTime" in time &&
-            (+new Date(entry.publishedAt) < time.startTime ||
-              +new Date(entry.publishedAt) > time.endTime)
-          ) {
-            continue
-          }
-          if (
-            time &&
-            "insertedBefore" in time &&
-            +new Date(entry.insertedAt) >= time.insertedBefore
-          ) {
-            continue
-          }
-
-          if (read) {
-            this.protectLocalRead(entryId)
-          } else {
-            this.clearLocalReadProtection(entryId)
-          }
-
-          if (entry.read !== read) {
-            entry.read = read
-            affectedEntryIds.add(entryId)
-          }
-        }
-      }
-
-      if (ids) {
-        const entries = Array.from(draft.entryIdSet)
-          .map((id) => draft.data[id])
-          .filter((entry): entry is EntryModel => {
-            if (!entry) return false
-            const id = entry.inboxHandle || entry.feedId || ""
-            if (!id) return false
-            return ids.includes(id)
-          })
-
-        for (const entry of entries) {
-          if (
-            time &&
-            "startTime" in time &&
-            (+new Date(entry.publishedAt) < time.startTime ||
-              +new Date(entry.publishedAt) > time.endTime)
-          ) {
-            continue
-          }
-          if (
-            time &&
-            "insertedBefore" in time &&
-            +new Date(entry.insertedAt) >= time.insertedBefore
-          ) {
-            continue
-          }
-
-          if (read) {
-            this.protectLocalRead(entry.id)
-          } else {
-            this.clearLocalReadProtection(entry.id)
-          }
-
-          if (entry.read !== read) {
-            entry.read = read
-            affectedEntryIds.add(entry.id)
-          }
+      for (const entryId of affectedEntryIds) {
+        const entry = draft.data[entryId]
+        if (entry) {
+          entry.read = read
         }
       }
     })
 
-    return Array.from(affectedEntryIds)
+    return affectedEntryIds
   }
 
   resetByView({ view, entries }: { view?: FeedViewType; entries: EntryModel[] }) {
@@ -554,7 +530,6 @@ class EntryActions implements Hydratable, Resetable {
   async reset() {
     const tx = createTransaction()
     tx.store(() => {
-      this.clearLocalReadProtectionInSession()
       immerSet(() => defaultState)
     })
 
@@ -603,6 +578,7 @@ class EntrySyncServices {
       feedIdList,
       excludePrivate,
       aiSort,
+      sortOrder,
     } = props
     const params = getEntriesParams({
       feedId,
@@ -611,7 +587,21 @@ class EntrySyncServices {
       view,
       feedIdList,
     })
+    const effectiveSortOrder = getEffectiveEntrySortOrder({
+      sortOrder: aiSort ? "desc" : sortOrder,
+      unreadOnly: read === false,
+      isTimelineSource: isTimelineEntriesSource({
+        feedId: params.feedId,
+        feedIdList: params.feedIdList,
+        listId: params.listId,
+        view: params.view,
+        hasInboxSubscriptions: getInboxList().length > 0,
+        inboxId: params.inboxId,
+        isCollection: isCollection === true || params.isCollection === true,
+      }),
+    })
 
+    // 保留本地邮件时间线聚合，并把上游排序参数传到统一请求入口。
     const res = await this.fetchEntriesResponse({
       aiSort,
       excludePrivate,
@@ -620,6 +610,7 @@ class EntrySyncServices {
       pageParam,
       params,
       read,
+      sortOrder: effectiveSortOrder,
     })
 
     // Mark feed unread dirty, so re-fetch the unread data when view feed unread entires in the next time
@@ -655,11 +646,12 @@ class EntrySyncServices {
       const effectiveLimit = limit !== undefined ? Math.min(limit, 100) : 20
       const shouldResetCollection =
         params.isCollection && !pageParam && entries.length < effectiveLimit
-      await collectionActions.upsertMany(collections, {
+      await collectionActions.reconcileFromRemote({
+        collections,
+        entryIdsNotInCollections,
         // A full reset is only safe once the first page proves there are no more collection rows.
         reset: shouldResetCollection,
       })
-      await collectionActions.delete(entryIdsNotInCollections)
     }
 
     const dataFeeds = res.data?.map((e) => e.feeds).filter((f) => f.type === "feed")
@@ -677,6 +669,7 @@ class EntrySyncServices {
     pageParam,
     params,
     read,
+    sortOrder,
   }: {
     aiSort?: boolean
     excludePrivate?: boolean
@@ -685,6 +678,7 @@ class EntrySyncServices {
     pageParam?: string
     params: ReturnType<typeof getEntriesParams>
     read?: boolean
+    sortOrder?: EntrySortOrder
   }): Promise<EntryListLikeResponse> {
     if (params.inboxId) {
       return api().entries.inbox.list({
@@ -697,7 +691,8 @@ class EntrySyncServices {
 
     const entriesRequest = api().entries.list(
       {
-        publishedAfter: pageParam,
+        ...(sortOrder === "asc" ? { publishedBefore: pageParam } : { publishedAfter: pageParam }),
+        ...(sortOrder && { sortOrder }),
         read,
         limit,
         isCollection,
@@ -856,12 +851,30 @@ class EntrySyncServices {
         return
       }
 
-      await readNdjsonStream<{ id: string; content: string }>(response, async (json) => {
-        await entryActions.updateEntryContent({ entryId: json.id, content: json.content })
+      // The lines of one network chunk are stored together, so a batch of entries updates the
+      // store, and every timeline selector over it, once per chunk instead of once per entry
+      let pending: { entryId: string; content: string }[] = []
+      let flushTimer: ReturnType<typeof setTimeout> | undefined
+      const flush = () => {
+        flushTimer = undefined
+        const contents = pending
+        pending = []
+        if (contents.length > 0) {
+          void entryActions.updateEntryContents(contents)
+        }
+      }
+
+      await readNdjsonStream<{ id: string; content: string }>(response, (json) => {
+        pending.push({ entryId: json.id, content: json.content })
+        flushTimer ??= setTimeout(flush, 0)
       })
+      clearTimeout(flushTimer)
+      flush()
     }
 
-    readStream()
+    readStream().catch((error) => {
+      console.error("Failed to fetch entry contents:", error)
+    })
   }
 
   async fetchEntryReadHistory(entryId: EntryId, size: number) {

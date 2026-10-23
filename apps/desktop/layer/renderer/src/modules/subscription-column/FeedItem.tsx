@@ -14,6 +14,7 @@ import { isOnboardingFeedUrl } from "@follow/store/constants/onboarding"
 import { useFeedById } from "@follow/store/feed/hooks"
 import { useInboxById } from "@follow/store/inbox/hooks"
 import { useListById } from "@follow/store/list/hooks"
+import { getSubscriptionByFeedId } from "@follow/store/subscription/getter"
 import { useSubscriptionByFeedId } from "@follow/store/subscription/hooks"
 import { cn, isKeyForMultiSelectPressed } from "@follow/utils/utils"
 import { createElement, memo, use, useCallback, useState } from "react"
@@ -38,7 +39,7 @@ import { FeedIcon } from "~/modules/feed/feed-icon"
 import { FeedTitle } from "~/modules/feed/feed-title"
 import { getPreferredTitle } from "~/store/feed/hooks"
 
-import { useSelectedFeedIdsState } from "./atom"
+import { setSelectedFeedIds, useSelectedFeedIdsSelector } from "./atom"
 import { DraggableContext } from "./context"
 import { useSidebarUnreadById, useSidebarUnreadByListId } from "./hooks/use-sidebar-unread"
 import { SourceRow } from "./SourceRow"
@@ -70,10 +71,13 @@ const DraggableItemWrapper: Component<
   } & React.HTMLAttributes<HTMLDivElement>
 > = ({ children, isInMultipleSelection, ...props }) => {
   const draggableContext = use(DraggableContext)
+  // Only rows in the selection are dragged; on the others dnd-kit's attributes announce a
+  // disabled button, although a click opens the feed
+  const draggableAttributes = isInMultipleSelection ? draggableContext?.attributes : undefined
 
   return (
     <div
-      {...draggableContext?.attributes}
+      {...draggableAttributes}
       {...draggableContext?.listeners}
       style={isInMultipleSelection ? draggableContext?.style : undefined}
       {...props}
@@ -104,12 +108,18 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
     }
   })
 
-  const [selectedFeedIds, setSelectedFeedIds] = useSelectedFeedIdsState()
+  // Each row reads only what it needs from the selection, so a click re-renders the rows whose
+  // state changes instead of the whole sidebar
+  const isSelected = useSelectedFeedIdsSelector((ids) => ids.includes(feedId), [feedId])
+  const hasSelection = useSelectedFeedIdsSelector((ids) => ids.length > 0)
+  const multipleSelectedFeedIds = useSelectedFeedIdsSelector(
+    (ids) => (ids.length > 1 && ids.includes(feedId) ? ids : undefined),
+    [feedId],
+  )
 
   const isMobile = useMobile()
-  const isInMultipleSelection = !isMobile && selectedFeedIds.includes(feedId)
-  const isMultiSelectingButNotSelected =
-    !isMobile && selectedFeedIds.length > 0 && !isInMultipleSelection
+  const isInMultipleSelection = !isMobile && isSelected
+  const isMultiSelectingButNotSelected = !isMobile && hasSelection && !isInMultipleSelection
 
   const handleClick: React.MouseEventHandler<HTMLDivElement> = useCallback(
     (e) => {
@@ -127,7 +137,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
         view: navigationView,
       })
     },
-    [feedId, navigate, setSelectedFeedIds, navigationView],
+    [feedId, navigate, navigationView],
   )
 
   // 单个来源与分类角标复用同一套过滤后的未读口径。
@@ -136,9 +146,11 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
   const isActive = useRouteParamsSelector((routerParams) => routerParams.feedId === feedId)
 
   const items = useFeedActions({
-    feedIds: selectedFeedIds,
+    feedIds: multipleSelectedFeedIds,
     feedId,
-    view,
+    // A folder in the All view can hold feeds from other views than the one it is listed with,
+    // and moving a feed to a category must not move it to that view
+    view: subscription?.view ?? view,
   })
 
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isSubscriptionList)
@@ -161,17 +173,14 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
         nextItems.push(
           MenuItemSeparator.default,
           new MenuItemText({
-            label: "Feedback",
+            label: t("words.feedback", { ns: "common" }),
             click: () => {
               window.open(
                 getNewIssueUrl({
                   body:
                     `### Error\n\nError Message: ${feed.errorMessage}\n\n### Info\n\n` +
                     `\`\`\`json\n${JSON.stringify(feed, null, 2)}\n\`\`\``,
-                  label: "bug",
                   title: `Feed Error: ${feed.title}, ${feed.errorMessage}`,
-                  target: "discussion",
-                  category: "feed-expired",
                 }),
               )
             },
@@ -181,12 +190,18 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
 
       // Add "Switch to Another View" menu item
       if (subscription && typeof subscription.view === "number") {
+        // Like the other items of a multi-selection menu, it moves every selected feed
+        const targetFeedIds = multipleSelectedFeedIds ?? [feedId]
+        const currentViews = new Set(
+          targetFeedIds.map((id) => getSubscriptionByFeedId(id)?.view ?? subscription.view),
+        )
         nextItems.push(
           MenuItemSeparator.default,
           new MenuItemText({
             label: t("sidebar.feed_column.context_menu.change_to_other_view"),
             submenu: getViewList()
-              .filter((v) => v.view !== subscription.view && v.switchable)
+              // Hide only the view every target feed is already in
+              .filter((v) => v.switchable && !(currentViews.size === 1 && currentViews.has(v.view)))
               .map(
                 (v) =>
                   new MenuItemText({
@@ -195,7 +210,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
                     icon: v.icon,
                     click() {
                       return changeFeedView({
-                        feedIdList: [feedId],
+                        feedIdList: targetFeedIds,
                         view: v.view,
                       })
                     },
@@ -242,6 +257,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
       )}
       data-feed-id={feedId}
       data-sub={`feed-${feedId}`}
+      aria-current={isActive ? "page" : undefined}
       data-active={
         isMultiSelectingButNotSelected
           ? false
@@ -260,7 +276,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
         <>
           {isOnboardingFeed && (
             <Tooltip delayDuration={300}>
-              <TooltipTrigger>
+              <TooltipTrigger aria-label={t("feed_item.onboarding_feed")}>
                 <i className="i-mingcute-sparkles-line shrink-0 text-base text-text-tertiary" />
               </TooltipTrigger>
               <TooltipPortal>
@@ -274,6 +290,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
                 size="sm"
                 variant="ghost"
                 buttonClassName="!p-1 mr-0.5"
+                aria-label={t("words.follow", { ns: "common" })}
                 onClick={() => follow({ isList: false, id: feedId, url: feed.url })}
               >
                 <i className="i-mgc-add-cute-re text-base text-accent" />
@@ -284,6 +301,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
         </>
       }
     >
+      {/* 中文：源行保留统一尾部布局，私密标识和错误状态仍应用上游无障碍修复。 */}
       <FeedIcon fallback target={feed} size={16} />
       <FeedTitle feed={feed} />
       {showFeedErrorIndicator && (
@@ -293,7 +311,7 @@ const FeedItemImpl = ({ view, feedId, className, isPreview }: FeedItemProps) => 
       )}
       {subscription?.isPrivate && !isOnboardingFeed && (
         <Tooltip delayDuration={300}>
-          <TooltipTrigger>
+          <TooltipTrigger aria-label={t("feed_item.not_publicly_visible")}>
             <OouiUserAnonymous className="ml-1 shrink-0 text-base" />
           </TooltipTrigger>
           <TooltipPortal>
@@ -350,7 +368,7 @@ const ListItemImpl: Component<ListItemProps> = ({
 
   // Use current route view for navigation to stay in current view (e.g., All view)
   const currentRouteView = useRouteParamsSelector((s) => s.view)
-  const navigationView = currentRouteView ?? view
+  const navigationView = currentRouteView === FeedViewType.All ? currentRouteView : view
 
   const handleNavigate = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -384,6 +402,7 @@ const ListItemImpl: Component<ListItemProps> = ({
     <div
       data-list-id={listId}
       data-sub={`list-${listId}`}
+      aria-current={isActive ? "page" : undefined}
       data-active={isActive || isContextMenuOpen}
       className={cn(feedColumnStyles.item, "py-1 pl-2.5", className)}
       onClick={handleNavigate}
@@ -398,7 +417,7 @@ const ListItemImpl: Component<ListItemProps> = ({
 
         {subscription?.isPrivate && (
           <Tooltip delayDuration={300}>
-            <TooltipTrigger>
+            <TooltipTrigger aria-label={t("feed_item.not_publicly_visible")}>
               <OouiUserAnonymous className="ml-1 shrink-0 text-base" />
             </TooltipTrigger>
             <TooltipPortal>
@@ -412,6 +431,7 @@ const ListItemImpl: Component<ListItemProps> = ({
           size="sm"
           variant="ghost"
           buttonClassName="!p-1 mr-0.5"
+          aria-label={t("words.follow", { ns: "common" })}
           onClick={() => {
             follow({
               isList: true,
@@ -465,7 +485,7 @@ const InboxItemImpl: Component<InboxItemProps> = ({ view, inboxId, className, ic
 
   // Use current route view for navigation to stay in current view (e.g., All view)
   const currentRouteView = useRouteParamsSelector((s) => s.view)
-  const navigationView = currentRouteView ?? view
+  const navigationView = currentRouteView === FeedViewType.All ? currentRouteView : view
 
   const handleNavigate = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -491,6 +511,7 @@ const InboxItemImpl: Component<InboxItemProps> = ({ view, inboxId, className, ic
   if (!inbox) return null
   return (
     <div
+      aria-current={isActive ? "page" : undefined}
       data-active={isActive || isContextMenuOpen}
       data-sub={`inbox-${inboxId}`}
       data-inbox-id={inboxId}

@@ -5,7 +5,7 @@ import { useDialog } from "~/components/ui/modal/stacked/hooks"
 import { getI18n } from "~/i18n"
 
 // 规则编辑统一保护未保存草稿，刷新和离开路由前提示。
-export const useUnSavedBlocker = (isDirty: boolean) => {
+export const useUnSavedBlocker = (isDirty: boolean, onDiscard?: () => void) => {
   const navigationBlocker = useBlocker(({ currentLocation, nextLocation }) => {
     return isDirty && currentLocation.pathname !== nextLocation.pathname
   })
@@ -26,9 +26,14 @@ export const useUnSavedBlocker = (isDirty: boolean) => {
       title: t("common:words.unsaved_changes"),
       message: t("settings:actions.navigate.prompt"),
       variant: "ask",
-      onConfirm: () => navigationBlocker.proceed(),
+      onConfirm: () => {
+        // 布局切换也会卸载编辑器，因此只在用户明确离开时放弃草稿。
+        onDiscard?.()
+        navigationBlocker.proceed()
+      },
+      onCancel: () => navigationBlocker.reset(),
     })
-  }, [ask, navigationBlocker])
+  }, [ask, navigationBlocker, onDiscard])
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {

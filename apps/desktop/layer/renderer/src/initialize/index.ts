@@ -2,8 +2,10 @@ import { initializeDayjs } from "@follow/components/dayjs"
 import { registerGlobalContext } from "@follow/shared/bridge"
 import { DEV, ELECTRON_BUILD, IN_ELECTRON } from "@follow/shared/constants"
 import { hydrateDatabaseToStore } from "@follow/store/hydrate"
+import { onLocalDataOfAnotherAccount } from "@follow/store/sync/account"
+import { ensureSyncedThroughEngine } from "@follow/store/sync/sync-status"
 import { whoami } from "@follow/store/user/getters"
-import { userSyncService } from "@follow/store/user/store"
+import { fetchSessionUser } from "@follow/store/user/hooks"
 import { tracker } from "@follow/tracker"
 import { repository } from "@pkg"
 import { enableMapSet } from "immer"
@@ -12,12 +14,14 @@ import { initI18n } from "~/i18n"
 import { hydrateSessionsFromLocalDb } from "~/modules/ai-chat-session"
 import { settingSyncQueue } from "~/modules/settings/helper/sync-queue"
 import { ElectronCloseEvent, ElectronShowEvent } from "~/providers/invalidate-query-provider"
+import { clearLocalDataOfAnotherAccount } from "~/store/utils/clear"
 
 import { appLog } from "../lib/log"
 import { initAnalytics } from "./analytics"
 import { registerHistoryStack } from "./history"
 import { doMigration } from "./migrates"
 import { initializeSettings } from "./settings"
+import { initSyncTriggers } from "./sync"
 
 declare global {
   interface Window {
@@ -25,14 +29,25 @@ declare global {
   }
 }
 
+let clearingForAnotherAccount = false
+
 export const initializeApp = async () => {
   appLog(`${APP_NAME}: Follow everything in one place`, repository.url)
+
+  // Before any session answer can arrive: the data on this device must not be shown to, or
+  // sent with the session of, another account.
+  onLocalDataOfAnotherAccount(() => {
+    if (clearingForAnotherAccount) return
+    clearingForAnotherAccount = true
+    void clearLocalDataOfAnotherAccount()
+  })
 
   const dataHydratedTime = await apm("hydrateDatabaseToStore", () => {
     return hydrateDatabaseToStore({
       migrateDatabase: true,
     })
   })
+  initSyncTriggers()
 
   if (DEV) {
     const url = "/favicon-dev.ico"
@@ -86,9 +101,15 @@ export const initializeApp = async () => {
   void apm("setting sync", async () => {
     await settingSyncQueue.init()
 
-    await userSyncService.whoami().catch(() => null)
+    await fetchSessionUser().catch(() => null)
 
     if (!whoami()) {
+      return
+    }
+    // With a sync cursor the settings were loaded in full once and are kept current by the
+    // change log (see the "setting" model in the sync queue). Only servers without it still
+    // need the full request on every launch.
+    if (await ensureSyncedThroughEngine()) {
       return
     }
     await settingSyncQueue.syncLocal()

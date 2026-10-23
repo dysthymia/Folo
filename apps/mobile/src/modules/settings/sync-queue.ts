@@ -5,17 +5,21 @@ import {
   pickSpotlightPayloadFromRemoteAppearance,
   toAppearanceSpotlightPayload,
 } from "@follow/shared/spotlight"
+import { registerSyncModel } from "@follow/store/sync/model-registry"
+import type { SyncAction } from "@follow/store/sync/types"
 import { whoami } from "@follow/store/user/getters"
 import { tracker } from "@follow/tracker"
 import { isEmptyObject, jotaiStore, sleep } from "@follow/utils"
 import { EventBus } from "@follow/utils/event-bus"
 import type { SettingsTab } from "@follow-app/client-sdk"
 import { FollowAPIError } from "@follow-app/client-sdk"
+import { isEqual } from "es-toolkit"
 import type { PrimitiveAtom } from "jotai"
 
 import {
   __generalSettingAtom,
-  generalServerSyncWhiteListKeys,
+  createDefaultGeneralSettings,
+  generalLocalOnlyKeys,
   getGeneralSettings,
 } from "@/src/atoms/settings/general"
 import {
@@ -23,7 +27,12 @@ import {
   getSpotlightSettings,
   spotlightServerSyncWhiteListKeys,
 } from "@/src/atoms/settings/spotlight"
-import { __uiSettingAtom, getUISettings, uiServerSyncWhiteListKeys } from "@/src/atoms/settings/ui"
+import {
+  __uiSettingAtom,
+  createDefaultSettings as createDefaultUISettings,
+  getUISettings,
+  uiLocalOnlyKeys,
+} from "@/src/atoms/settings/ui"
 import { followClient } from "@/src/lib/api-client"
 import { kv } from "@/src/lib/kv"
 
@@ -66,10 +75,30 @@ const localSettingSetterMap = {
   general: createInternalSetter(__generalSettingAtom),
   spotlight: createInternalSetter(__spotlightSettingAtom),
 }
-const settingWhiteListMap = {
-  appearance: uiServerSyncWhiteListKeys,
-  general: generalServerSyncWhiteListKeys,
-  spotlight: spotlightServerSyncWhiteListKeys,
+
+type LocalOnlyDomain = Exclude<SettingDomain, "spotlight">
+
+/**
+ * Appearance and general settings sync every key except their device-local ones. Spotlight
+ * rules travel in the appearance tab and sync only their own keys, so the appearance domain
+ * leaves those keys to them.
+ */
+const localOnlyKeysMap: Record<LocalOnlyDomain, readonly string[]> = {
+  appearance: [...uiLocalOnlyKeys, "spotlights", "spotlightsUpdated"],
+  general: generalLocalOnlyKeys,
+}
+
+const defaultSettingsGetterMap: Record<LocalOnlyDomain, () => object> = {
+  appearance: createDefaultUISettings,
+  general: createDefaultGeneralSettings,
+}
+
+const omitLocalOnlyKeys = <T extends object>(domain: LocalOnlyDomain, payload: T) => {
+  const localOnlyKeys = new Set(localOnlyKeysMap[domain])
+  return Object.fromEntries(
+    // The server records when each tab changed, so `updated` stays on the device as well.
+    Object.entries(payload).filter(([key]) => key !== "updated" && !localOnlyKeys.has(key)),
+  ) as Partial<T>
 }
 
 const remoteTabMap: Record<SettingDomain, RemoteSettingsTab> = {
@@ -93,7 +122,7 @@ const getSettingUpdated = (payload: Record<string, unknown>) =>
   typeof payload.updated === "number" ? payload.updated : undefined
 
 const getLocalAppearancePayload = () =>
-  pickSyncPayload(localSettingGetterMap.appearance(), settingWhiteListMap.appearance)
+  omitLocalOnlyKeys("appearance", localSettingGetterMap.appearance())
 
 const getLocalSpotlightSnapshot = () =>
   localSettingGetterMap.spotlight() as SpotlightSettings & { updated?: number }
@@ -107,7 +136,7 @@ const payloadForRemote = (
         payload as unknown as SpotlightSettings,
         getSettingUpdated(payload),
       )
-    : pickSyncPayload(payload, settingWhiteListMap[domain])
+    : omitLocalOnlyKeys(domain, payload)
 
 const buildFullLocalAppearancePayload = () => {
   const spotlightSettings = getLocalSpotlightSnapshot()
@@ -160,7 +189,7 @@ const payloadFromRemote = (
     return pickSpotlightPayloadFromRemoteAppearance(payload, updated)
   }
 
-  const nextPayload = pickSyncPayload(payload, settingWhiteListMap[domain])
+  const nextPayload = omitLocalOnlyKeys(domain, payload)
   if (isEmptyObject(nextPayload)) {
     return null
   }
@@ -194,6 +223,11 @@ interface PersistedSettingSyncQueue {
   ownerUserId: string | null
   queue: SettingSyncQueueItem[]
 }
+
+const BASE_RETRY_DELAY_MS = 1000
+const MAX_RETRY_DELAY_MS = 60_000
+/** Past this many failures in a row the retry delay stays at its maximum. */
+const MAX_BACKOFF_EXPONENT = 16
 
 declare module "@follow/utils/event-bus" {
   interface CustomEvent {
@@ -252,7 +286,10 @@ class SettingSyncQueue {
       const domain = bizSettingKeyToDomainMapping[data.key] as SettingSyncTab
       if (!domain) return
 
-      const nextPayload = pickSyncPayload(data.payload, settingWhiteListMap[domain])
+      const nextPayload =
+        domain === "spotlight"
+          ? pickSyncPayload(data.payload, spotlightServerSyncWhiteListKeys)
+          : omitLocalOnlyKeys(domain, data.payload)
       if (isEmptyObject(nextPayload)) return
       this.enqueue(domain, nextPayload)
 
@@ -262,14 +299,35 @@ class SettingSyncQueue {
     this.disposers.push(d1)
 
     await loadPromise
+    // Changes left from the last session are only sent by a flush
+    if (this.queue.length > 0 && this.getCurrentUserId()) {
+      this.scheduleFlush()
+    }
+    // After the load, which keeps the queue as it is once anything was added to it.
+    this.uploadLocalSettingsOnce()
   }
 
   teardown() {
     for (const disposer of this.disposers) {
       disposer()
     }
+    this.disposers = []
+    this.clearRetryTimer()
+    this.retryAttempts = 0
     this.queue = []
     this.ownerUserId = null
+  }
+
+  /**
+   * The network, the API or the app came back: send what is waiting now instead of at the
+   * end of the back-off, which starts over.
+   */
+  resume() {
+    this.retryAttempts = 0
+    this.clearRetryTimer()
+    if (this.queue.length > 0 && this.getCurrentUserId()) {
+      this.scheduleFlush()
+    }
   }
 
   private readonly storageKey = "setting_sync_queue"
@@ -338,6 +396,9 @@ class SettingSyncQueue {
 
   private threshold = 1000
   private flushScheduled = false
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
+  /** Failed flushes in a row; they set the delay before the next try. */
+  private retryAttempts = 0
 
   private async fetchRemoteAppearancePayload() {
     const remoteSettings = await this.fetchSettingRemote()
@@ -366,7 +427,12 @@ class SettingSyncQueue {
       date: now,
     })
 
-    if (this.flushScheduled) {
+    this.scheduleFlush()
+  }
+
+  private scheduleFlush() {
+    // A pending retry sends every change made until then; it is brought forward by `resume`.
+    if (this.flushScheduled || this.retryTimer) {
       return
     }
 
@@ -374,24 +440,59 @@ class SettingSyncQueue {
     this.chain = this.chain
       .finally(() => sleep(this.threshold))
       .finally(async () => {
+        const flushedItems = new Set(this.queue)
+        let sent = false
         try {
-          await this.flush()
+          sent = await this.flush()
         } finally {
           this.flushScheduled = false
+          // The queue is persisted on every change; drop the sent items from storage too, or the
+          // next launch restores them and treats their tabs as still waiting to be sent
+          void this.persist()
+          // A change made while the flush awaited the server was not part of it, and its
+          // enqueue skipped scheduling because this flush was still pending
+          if (this.queue.some((item) => !flushedItems.has(item))) {
+            this.scheduleFlush()
+          } else if (!sent && this.queue.length > 0) {
+            this.scheduleRetry()
+          }
         }
       })
   }
 
-  private async flush() {
+  /** Try a failed flush again later, waiting longer after each failure in a row. */
+  private scheduleRetry() {
+    this.clearRetryTimer()
+    this.retryAttempts += 1
+    const exponent = Math.min(MAX_BACKOFF_EXPONENT, this.retryAttempts - 1)
+    const delay = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** exponent)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      this.scheduleFlush()
+    }, delay)
+  }
+
+  private clearRetryTimer() {
+    if (!this.retryTimer) return
+    clearTimeout(this.retryTimer)
+    this.retryTimer = null
+  }
+
+  /**
+   * Send the queued changes. Resolves to `false` when a request failed and the changes are
+   * still waiting, so the caller tries again later; anything else needs no retry.
+   */
+  private async flush(): Promise<boolean> {
     const currentUserId = this.getCurrentUserId()
     if (!currentUserId) {
-      return
+      return true
     }
 
     this.bindQueueOwner(currentUserId)
 
+    // React Native has no `onLine`; failed requests are retried instead.
     if (navigator.onLine === false) {
-      return
+      return true
     }
 
     const changedDomainsByRemoteTab = {} as Partial<Record<RemoteSettingsTab, Set<SettingDomain>>>
@@ -418,11 +519,11 @@ class SettingSyncQueue {
       } catch (error) {
         if (isUnauthorizedError(error)) {
           await this.clearQueueAndPersist(currentUserId)
-          return
+          return true
         }
 
         this.reportSyncError("flush", error)
-        return
+        return false
       }
     }
 
@@ -461,19 +562,22 @@ class SettingSyncQueue {
             }
           }
         })
-      // TODO rollback or retry
+      // A tab that failed stays queued and is sent again by the retry
       promises.push(promise)
     }
 
     try {
       await Promise.all(promises)
+      this.retryAttempts = 0
+      return true
     } catch (error) {
       if (isUnauthorizedError(error)) {
         await this.clearQueueAndPersist(currentUserId)
-        return
+        return true
       }
 
       this.reportSyncError("flush", error)
+      return false
     }
   }
 
@@ -536,7 +640,11 @@ class SettingSyncQueue {
     })
     return promise
   }
-  async syncLocal() {
+  /**
+   * @param rethrow let a failed request reach the caller. The sync engine needs it: a load
+   * that did not happen must not count as done.
+   */
+  async syncLocal(options?: { rethrow?: boolean }) {
     const currentUserId = this.getCurrentUserId()
     if (!currentUserId) return
 
@@ -552,19 +660,73 @@ class SettingSyncQueue {
       }
 
       this.reportSyncError("syncLocal", error)
+      if (options?.rethrow) throw error
       return
     }
 
     if (!remoteSettings) return
     if (__DEV__) {
-      // eslint-disable-next-line no-console
       console.log("remote settings:", remoteSettings)
     }
 
+    this.applyRemoteSettings(remoteSettings)
+  }
+
+  /**
+   * A local change to this tab is still waiting to be sent. It wins for now, and the server's
+   * answer to it is logged with both changes merged.
+   */
+  private hasPendingChange(tab: RemoteSettingsTab) {
+    return this.queue.some((item) => remoteTabMap[item.tab] === tab)
+  }
+
+  /**
+   * From 1.6.0 until this version only the device-local keys synced, so what the server holds
+   * for every other setting may be months old. Once per account, before this device takes any
+   * of it, the settings changed here from their defaults are queued for upload. While they
+   * wait, their tabs keep the server's values out; afterwards the settings still at their
+   * defaults take the account's values.
+   */
+  private uploadLocalSettingsOnce() {
+    const currentUserId = this.getCurrentUserId()
+    if (!currentUserId) return
+
+    const doneKey = `setting_sync_local_first_${currentUserId}`
+    if (kv.getSync(doneKey)) return
+    kv.setSync(doneKey, "1")
+
+    let enqueued = false
+    for (const domain of Object.keys(defaultSettingsGetterMap) as LocalOnlyDomain[]) {
+      const localSettings = localSettingGetterMap[domain]() as unknown as Record<string, unknown>
+      const defaultSettings = defaultSettingsGetterMap[domain]() as Record<string, unknown>
+      const changedSettings = Object.fromEntries(
+        Object.keys(defaultSettings)
+          .filter((key) => !isEqual(localSettings[key], defaultSettings[key]))
+          .map((key) => [key, localSettings[key]]),
+      )
+      const payload = omitLocalOnlyKeys(domain, changedSettings)
+      if (!isEmptyObject(payload)) {
+        void this.enqueue(domain, payload)
+        enqueued = true
+      }
+    }
+    if (enqueued) {
+      void this.persist()
+    }
+  }
+
+  /** Merge settings from the server into the local ones; the newer side wins per domain. */
+  applyRemoteSettings(remoteSettings: {
+    settings: Record<string, any>
+    updated: Record<string, string>
+  }) {
+    this.uploadLocalSettingsOnce()
     if (isEmptyObject(remoteSettings.settings)) return
 
     for (const tab in remoteSettings.settings) {
       const remoteTab = tab as RemoteSettingsTab
+      if (this.hasPendingChange(remoteTab)) continue
+
       const remoteSettingPayload = remoteSettings.settings[remoteTab as SettingsTab]
       const updated = remoteSettings.updated[remoteTab as SettingsTab]
 
@@ -601,6 +763,40 @@ class SettingSyncQueue {
       }
     }
   }
+
+  /**
+   * One settings tab changed on the server, reported by the sync engine's change log. The
+   * action carries what `GET /settings` would return for that tab, so it goes through the
+   * same last-writer-wins merge as a full sync.
+   */
+  async applyRemoteChange(action: SyncAction) {
+    if (action.action !== "U" || !action.modelId) return
+    const tab = action.modelId as RemoteSettingsTab
+    // Tabs this app does not sync, such as the desktop AI settings.
+    if (!(tab in remoteTabToDomainMap)) return
+    const data = action.data as { payload?: Record<string, unknown>; updatedAt?: string } | null
+    if (!data?.updatedAt) return
+
+    this.uploadLocalSettingsOnce()
+    if (this.hasPendingChange(tab)) return
+
+    if (!data.payload) {
+      await this.syncLocal()
+      return
+    }
+
+    this.applyRemoteSettings({
+      settings: { [tab]: data.payload },
+      updated: { [tab]: data.updatedAt },
+    })
+  }
 }
 
 export const settingSyncQueue = new SettingSyncQueue()
+
+// Registered at module load, before the sync engine starts: once the settings were loaded in
+// full, launches no longer request them and other devices' changes arrive through the log.
+registerSyncModel("setting", {
+  bootstrap: () => settingSyncQueue.syncLocal({ rethrow: true }),
+  apply: (action) => settingSyncQueue.applyRemoteChange(action),
+})

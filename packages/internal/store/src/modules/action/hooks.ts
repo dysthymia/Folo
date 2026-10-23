@@ -3,20 +3,26 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 import { useCallback } from "react"
 
 import type { GeneralMutationOptions } from "../../types"
-import type { ActionItem } from "./store"
+import type { ActionItem, SaveActionRulesOptions } from "./store"
 import { actionActions, actionSyncService, useActionStore } from "./store"
 
 export const usePrefetchActions = () => {
   return useQuery({
     queryKey: ["action", "rules"],
-    queryFn: () => actionSyncService.fetchRules(),
+    queryFn: async () => {
+      // With the sync engine running the rules come from the local database and the change
+      // log; they are only requested when the engine cannot provide them.
+      await actionSyncService.ensureRules()
+      return null
+    },
   })
 }
 
 export const useUpdateActionsMutation = (options?: GeneralMutationOptions) => {
   return useMutation({
     ...options,
-    mutationFn: () => actionSyncService.saveRules(),
+    mutationFn: (saveOptions: SaveActionRulesOptions | void) =>
+      actionSyncService.saveRules(saveOptions ?? undefined),
   })
 }
 

@@ -14,7 +14,8 @@ import { CheckCircleCuteReIcon } from "@/src/icons/check_circle_cute_re"
 import { RoundCuteFiIcon } from "@/src/icons/round_cute_fi"
 import { RoundCuteReIcon } from "@/src/icons/round_cute_re"
 import { ShareForwardCuteReIcon } from "@/src/icons/share_forward_cute_re"
-import { Dialog } from "@/src/lib/dialog"
+import { SortAscendingCuteReIcon } from "@/src/icons/sort_ascending_cute_re"
+import { SortDescendingCuteReIcon } from "@/src/icons/sort_descending_cute_re"
 import { useNavigation } from "@/src/lib/navigation/hooks"
 import { proxyEnv } from "@/src/lib/proxy-env"
 import { createLinkShareContent } from "@/src/lib/share"
@@ -23,13 +24,15 @@ import { LoginScreen } from "@/src/screens/(modal)/LoginScreen"
 import { ProfileScreen } from "@/src/screens/(modal)/ProfileScreen"
 import { accentColor, useColor } from "@/src/theme/colors"
 
-import { MarkAllAsReadDialog } from "../dialogs/MarkAllAsReadDialog"
+import { showMarkAllAsReadDialog } from "../dialogs/MarkAllAsReadDialog"
+import { useSelectedFeed, useSelectedView } from "./atoms"
 
 export const ActionGroup = ({ children, className }: PropsWithChildren<{ className?: string }>) => {
   return <View className={cn("flex flex-row items-center gap-1", className)}>{children}</View>
 }
 
 export function HomeLeftAction() {
+  const { t } = useTranslation()
   const user = useWhoami()
 
   const navigation = useNavigation()
@@ -43,7 +46,12 @@ export function HomeLeftAction() {
 
   return (
     <ActionGroup className="ml-2">
-      <Pressable testID="home-avatar-trigger" onPress={handlePress}>
+      <Pressable
+        testID="home-avatar-trigger"
+        accessibilityRole="button"
+        accessibilityLabel={user ? t("profile.my_profile") : t("settings.sign_in_cta")}
+        onPress={handlePress}
+      >
         <UserAvatar
           image={user?.image}
           name={user?.name}
@@ -66,15 +74,16 @@ export const MarkAllAsReadActionButton = ({
 }: HeaderActionButtonProps & { fetchedTime?: number }) => {
   const { t } = useTranslation()
   const { size, color } = useButtonVariant({ variant })
+  const selectedFeed = useSelectedFeed()
+  const selectedView = useSelectedView()
 
   return (
     <UIBarButton
       label={t("operation.mark_all_as_read")}
       normalIcon={<CheckCircleCuteReIcon height={size} width={size} color={color} />}
       onPress={() => {
-        Dialog.show(MarkAllAsReadDialog, {
-          context: { fetchedTime },
-        })
+        // 中文：将当前订阅和首屏时间一起传入根级对话框，限定批量已读范围。
+        showMarkAllAsReadDialog(selectedFeed, selectedView, fetchedTime)
       }}
     />
   )
@@ -114,6 +123,40 @@ export const UnreadOnlyActionButton = ({ variant = "secondary" }: HeaderActionBu
   )
 }
 
+export const EntrySortOrderActionButton = ({ variant = "secondary" }: HeaderActionButtonProps) => {
+  const { t } = useTranslation()
+  const sortOrder = useGeneralSettingKey("timelineSortOrder")
+  const { size, color } = useButtonVariant({ variant })
+  const nextSortOrder = sortOrder === "desc" ? "asc" : "desc"
+
+  return (
+    <UIBarButton
+      label={
+        nextSortOrder === "asc"
+          ? t("operation.sort_entries.oldest_unread_first.label")
+          : t("operation.sort_entries.newest_first.label")
+      }
+      normalIcon={
+        sortOrder === "asc" ? (
+          <SortAscendingCuteReIcon height={size} width={size} color={color} />
+        ) : (
+          <SortDescendingCuteReIcon height={size} width={size} color={color} />
+        )
+      }
+      onPress={() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+        setGeneralSetting("timelineSortOrder", nextSortOrder)
+        toast.success(
+          nextSortOrder === "asc"
+            ? t("operation.sort_entries.oldest_unread_first.success")
+            : t("operation.sort_entries.newest_first.success"),
+        )
+      }}
+      overlay={false}
+    />
+  )
+}
+
 export const FeedShareActionButton = ({
   feedId,
   variant = "secondary",
@@ -135,7 +178,7 @@ export const FeedShareActionButton = ({
             platform: Platform.OS,
             title: feed.title!,
             url,
-            message: `Check out ${feed.title} on Folo: ${url}`,
+            message: t("operation.share_feed_message", { title: feed.title, url }),
           }),
         )
       }}

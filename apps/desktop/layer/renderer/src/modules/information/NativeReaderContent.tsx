@@ -101,7 +101,9 @@ function NativeStoryContent({ className }: { className?: string }) {
       scope={HotkeyScope.EntryRender}
       className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden @container", className)}
     >
+      {/* Story 切换时重置触底状态，避免下一篇沿用上一条的滚动导航状态。 */}
       <EntryScrollingAndNavigationHandler
+        entryId={`story:${reader.storyId}`}
         scrollerRef={scrollRef}
         scrollAnimationRef={animationRef}
       />

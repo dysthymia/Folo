@@ -47,7 +47,7 @@ const devPrint = (): PluginOption => ({
 })
 
 const isWebBuild = process.env.WEB_BUILD === "1"
-// eslint-disable-next-line no-console
+
 console.log(green("Build type:"), isWebBuild ? "Web" : "Unknown")
 
 const toSSRDevAssetUrl = (url: string) =>
@@ -331,7 +331,8 @@ export default ({ mode }) => {
       ...((viteRenderBaseConfig.plugins ?? []) as any),
 
       routeBuilderPlugin({
-        pagePattern: "src/pages/**/*.tsx",
+        // Tests next to a page are not routes; bundled as one, they crash when opened
+        pagePattern: "src/pages/**/!(*.test).tsx",
         outputPath: "src/generated-routes.ts",
         enableInDev: true,
       }),

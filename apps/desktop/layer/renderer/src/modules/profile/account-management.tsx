@@ -10,14 +10,14 @@ import { linkSocial, unlinkAccount } from "~/lib/auth"
 import { auth, useSocialAccounts } from "~/queries/auth"
 import { useAuthProviders } from "~/queries/users"
 
-function AuthProviderButton({ provider }: { provider: string }) {
+function AuthProviderButton({ provider, name }: { provider: string; name: string }) {
   const { t } = useTranslation("settings")
   const { data: accounts } = useSocialAccounts()
   const unlinkAccountMutation = useMutation({
     mutationFn: async () => {
       const account = accounts?.find((account) => account.provider === provider)
       if (!account) throw new Error("Account not found")
-      const res = await unlinkAccount({ providerId: provider, accountId: account.accountId })
+      const res = await unlinkAccount({ accountId: account.id })
       if (res.error) throw new Error(res.error.message)
     },
     onSuccess: () => {
@@ -48,6 +48,12 @@ function AuthProviderButton({ provider }: { provider: string }) {
         unlinkAccountMutation.mutate()
       }}
       disabled={unlinkAccountMutation.isPending}
+      // The icon alone tells the providers apart, so name the provider and the action
+      aria-label={
+        account
+          ? t("profile.link_social.unlink_provider", { provider: name })
+          : t("profile.link_social.link_provider", { provider: name })
+      }
     >
       <div className="flex items-center gap-2">
         <i className={cn("text-xl", authProvidersConfig[provider]?.iconClassName)} />
@@ -74,7 +80,11 @@ export function AccountManagement() {
         {Object.keys(providers || {})
           .filter((provider) => provider !== "credential")
           .map((provider) => (
-            <AuthProviderButton key={provider} provider={provider} />
+            <AuthProviderButton
+              key={provider}
+              provider={provider}
+              name={providers?.[provider]?.name || provider}
+            />
           ))}
       </div>
     </div>

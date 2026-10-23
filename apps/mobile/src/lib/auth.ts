@@ -1,6 +1,7 @@
-import { expoClient } from "@better-auth/expo/client"
+import { expoClient, getSetCookie, storageAdapter } from "@better-auth/expo/client"
 import type { BaseAuthPlugins } from "@follow/shared/auth"
 import { baseAuthPlugins } from "@follow/shared/auth"
+import { invalidateSessionUser, onLocalDataOfAnotherAccount } from "@follow/store/sync/account"
 import { isNewUserQueryKey } from "@follow/store/user/constants"
 import { whoamiQueryKey } from "@follow/store/user/hooks"
 import { userActions } from "@follow/store/user/store"
@@ -9,20 +10,26 @@ import { useQuery } from "@tanstack/react-query"
 import type { BetterAuthClientOptions } from "better-auth/client"
 import { createAuthClient } from "better-auth/react"
 import { nativeApplicationVersion } from "expo-application"
-import * as FileSystem from "expo-file-system/legacy"
 import Storage from "expo-sqlite/kv-store"
+import * as WebBrowser from "expo-web-browser"
 import { Platform } from "react-native"
 import DeviceInfo from "react-native-device-info"
 
-import { getDbPath } from "@/src/database"
-
-import { createMobileAuthCookieSyncPlugin } from "./auth-cookie-sync"
+import {
+  createMobileAuthCookieSyncPlugin,
+  createSessionAwareAuthCookieStorage,
+} from "./auth-cookie-sync"
 import { getClientId, getSessionId } from "./client-session"
+import { scheduleLocalDataReset } from "./local-data-reset"
 import { getUserAgent } from "./native/user-agent"
 import { Navigation } from "./navigation/Navigation"
 import { getEnvProfile, proxyEnv } from "./proxy-env"
+import { unregisterPushToken } from "./push-token"
 import { queryClient } from "./query-client"
+import { reloadApp } from "./reload-app"
 import { safeSecureStore } from "./secure-store"
+import type { SocialSignInResult } from "./social-auth"
+import { buildAuthorizationProxyURL, parseSocialAuthCallbackURL } from "./social-auth"
 
 const storagePrefix = "follow_auth"
 export const cookieKey = `${storagePrefix}_cookie`
@@ -32,6 +39,11 @@ const sessionCookieRefreshIntervalSeconds = 60 * 60 * 12
 
 let authStateRevision = 0
 let lastAuthStateChangeAt = 0
+/**
+ * Set while signing out, which ends in a reload with an empty database. The session's queries
+ * are not loaded again before it: without the session the server would only refuse them.
+ */
+let signingOut = false
 
 export const getAuthStateRevision = () => authStateRevision
 export const getLastAuthStateChangeAt = () => lastAuthStateChangeAt
@@ -64,9 +76,8 @@ type MobileAuthClientOptions = Omit<BetterAuthClientOptions, "plugins"> & {
   plugins: MobileAuthPlugins
 }
 
-const authCookieStorage = {
+const secureAuthCookieStorage = {
   setItem(key: string, value: string) {
-    const previousValue = key === cookieKey ? safeSecureStore.getItem(key) : null
     try {
       safeSecureStore.setItem(key, value)
     } catch (e) {
@@ -83,11 +94,6 @@ const authCookieStorage = {
           // Keychain may be unavailable in background
         }
       }
-      bumpAuthStateRevision()
-      const authStateChanged = previousValue !== value
-      if (authStateChanged) {
-        void refreshSessionQueries()
-      }
     }
   },
   getItem(key: string) {
@@ -99,7 +105,6 @@ const authCookieStorage = {
     }
   },
   removeItem(key: string) {
-    const previousValue = key === cookieKey ? safeSecureStore.getItem(key) : null
     try {
       safeSecureStore.removeItem(key)
     } catch (e) {
@@ -112,19 +117,36 @@ const authCookieStorage = {
         const env = getEnvProfile()
         safeSecureStore.removeItem(`${cookieKey}_${env}`)
       }
-      bumpAuthStateRevision()
-      if (previousValue) {
-        void refreshSessionQueries()
-      }
     }
   },
 }
+
+const authCookieStorage = createSessionAwareAuthCookieStorage({
+  cookieKey,
+  storage: secureAuthCookieStorage,
+  onSessionChange() {
+    bumpAuthStateRevision()
+    // Whose session it is stays unknown until the session endpoint answers, so queued changes
+    // are not sent with it before.
+    invalidateSessionUser()
+    // The Expo plugin drops the stored session as the sign-out request leaves
+    if (!signingOut) void refreshSessionQueries()
+  },
+})
+
+// Share Better Auth's write queue and recoverable UTF-8 chunk storage with its
+// Expo plugin so a two-factor cookie update cannot race a session refresh.
+const expoCookieStorage = storageAdapter(authCookieStorage)
 
 const plugins = [
   ...baseAuthPlugins,
   createMobileAuthCookieSyncPlugin({
     cookieKey,
     storage: authCookieStorage,
+    cookieStorage: {
+      getItem: expoCookieStorage.getItem,
+      setItem: expoCookieStorage.setItemAsync,
+    },
   }),
   expoClient({
     scheme: "folo",
@@ -133,8 +155,10 @@ const plugins = [
   }),
 ] as MobileAuthPlugins
 
+const getAuthBaseURL = () => `${proxyEnv.API_URL}/better-auth`
+
 export const authClient = createAuthClient<MobileAuthClientOptions>({
-  baseURL: `${proxyEnv.API_URL}/better-auth`,
+  baseURL: getAuthBaseURL(),
   sessionOptions: {
     refetchInterval: sessionCookieRefreshIntervalSeconds,
     refetchOnWindowFocus: true,
@@ -200,6 +224,57 @@ export const useAuthSessionCookieRefresh = () => {
 
 export const forgetPassword = authClient.requestPasswordReset
 
+/**
+ * Runs the same auth session as the Expo plugin's automatic redirect, but reports how it ended,
+ * so a failed callback can be shown instead of leaving the user on the login screen.
+ */
+export const signInWithSocialProvider = async (
+  provider: string,
+  callbackURL: string,
+): Promise<SocialSignInResult> => {
+  const { data, error } = await signIn.social({
+    provider,
+    callbackURL,
+    // Without it a failed callback ends on the website instead of returning to the app.
+    errorCallbackURL: callbackURL,
+    disableRedirect: true,
+  })
+  if (error || !data?.url) {
+    return { type: "error", error: error?.code || error?.message || "sign_in_request_failed" }
+  }
+
+  if (Platform.OS === "android") {
+    try {
+      WebBrowser.dismissAuthSession()
+    } catch {
+      // No Custom Tab left over from an earlier attempt.
+    }
+  }
+
+  const session = await WebBrowser.openAuthSessionAsync(
+    buildAuthorizationProxyURL({
+      authBaseURL: getAuthBaseURL(),
+      authorizationURL: data.url,
+      storedCookie: expoCookieStorage.getItem(cookieKey),
+    }),
+    callbackURL,
+  )
+  if (session.type !== "success") {
+    return { type: "cancel" }
+  }
+
+  const { result, cookie } = parseSocialAuthCallbackURL(session.url)
+  if (cookie) {
+    const previousCookie = await expoCookieStorage.getItemAsync(cookieKey)
+    await expoCookieStorage.setItemAsync(
+      cookieKey,
+      getSetCookie(cookie, previousCookie ?? undefined),
+    )
+    authClient.$store.notify("$sessionSignal")
+  }
+  return result
+}
+
 export interface AuthProvider {
   name: string
   id: string
@@ -237,7 +312,16 @@ const clearAuthStorage = async () => {
   await Promise.all(keys.map((key) => safeSecureStore.removeItemAsync(key)))
 }
 
+/** Reload with an empty local database; the app then starts over for the current session. */
+const resetLocalData = async (reason: string) => {
+  scheduleLocalDataReset()
+  await reloadApp(reason)
+}
+
 export const signOut = async () => {
+  // While the session still authorizes the request
+  await unregisterPushToken()
+  signingOut = true
   try {
     await authClient.signOut()
   } catch (error) {
@@ -249,18 +333,37 @@ export const signOut = async () => {
   await userActions.removeCurrentUser()
   Navigation.rootNavigation.popToRoot()
   bumpAuthStateRevision()
-  await refreshSessionQueries()
-  const dbPath = getDbPath()
-  await FileSystem.deleteAsync(dbPath, { idempotent: true })
-  await expo.reloadAppAsync("User sign out")
+  try {
+    await resetLocalData("User sign out")
+  } catch (error) {
+    // Without the reload the screens would keep the signed-out account's data
+    await refreshSessionQueries()
+    throw error
+  } finally {
+    signingOut = false
+  }
 }
 
-export const deleteUser = async ({ TOTPCode }: { TOTPCode?: string }) => {
-  if (!TOTPCode) {
-    return
+let resettingForAnotherAccount = false
+// Signed in to another account than the one whose data is on this device, after that one's
+// session ended without a sign-out. The data on screen and the changes still queued belong to
+// the account before, so start over as a sign-out does, keeping the new session.
+onLocalDataOfAnotherAccount(() => {
+  if (resettingForAnotherAccount) return
+  resettingForAnotherAccount = true
+  Navigation.rootNavigation.popToRoot()
+  void resetLocalData("Signed in to another account")
+})
+
+/**
+ * @param TOTPCode - required by the server only when two-factor authentication is enabled
+ */
+export const deleteUser = async ({ TOTPCode }: { TOTPCode?: string } = {}) => {
+  const res = await authClient.deleteUserCustom(TOTPCode ? { TOTPCode } : {})
+  // The auth client resolves with the error instead of throwing; keep the session when the
+  // account was not deleted
+  if (res.error) {
+    throw new Error(res.error.message || res.error.statusText)
   }
-  await authClient.deleteUserCustom({
-    TOTPCode,
-  })
   await signOut()
 }

@@ -1,6 +1,8 @@
+import { whoami } from "@follow/store/user/getters"
 import { whoamiQueryKey } from "@follow/store/user/hooks"
 import { useMutation } from "@tanstack/react-query"
 import { useRef } from "react"
+import { useTranslation } from "react-i18next"
 import { TouchableWithoutFeedback, View } from "react-native"
 import { KeyboardController } from "react-native-keyboard-controller"
 import type { OtpInputRef } from "react-native-otp-entry"
@@ -17,7 +19,14 @@ import { queryClient } from "@/src/lib/query-client"
 import { toast } from "@/src/lib/toast"
 import { accentColor } from "@/src/theme/colors"
 
-export const TwoFactorAuthScreen: NavigationControllerView = () => {
+export const TwoFactorAuthScreen: NavigationControllerView<{
+  /**
+   * Opened by signing in, where the sign-in screen closes itself and this one once the session is
+   * in, keeping what was open under it, such as the follow form of a link
+   */
+  isSignIn?: boolean
+}> = ({ isSignIn }) => {
+  const { t } = useTranslation()
   const insets = useSafeAreaInsets()
   const label = useColor("label")
   const tertiaryLabel = useColor("tertiaryLabel")
@@ -38,9 +47,16 @@ export const TwoFactorAuthScreen: NavigationControllerView = () => {
     },
     onError(error) {
       submittedCodeRef.current = null
-      toast.error(`Failed to verify: ${error.message}`)
+      toast.error(
+        t("profile.two_factor.verify_failed_with_error", {
+          ns: "settings",
+          error: error.message,
+        }),
+      )
     },
     onSuccess() {
+      // Without the session yet, as when it failed to load, everything closes as it used to
+      if (isSignIn && whoami()) return
       navigation.popToRoot()
     },
   })
@@ -69,7 +85,7 @@ export const TwoFactorAuthScreen: NavigationControllerView = () => {
         <View className="mt-20 flex-1 pb-10">
           <View className="mb-10 flex-row items-center justify-center">
             <Text className="w-72 text-center text-3xl font-bold text-label" numberOfLines={2}>
-              Verify with your authenticator app
+              {t("login.two_factor.title")}
             </Text>
           </View>
 

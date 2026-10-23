@@ -14,10 +14,13 @@ import { toast } from "sonner"
 
 import type { PaymentFeature, PaymentPlan } from "~/atoms/server-configs"
 import { useIsPaymentEnabled, useServerConfigs } from "~/atoms/server-configs"
+import { getI18n } from "~/i18n"
 import { followClient } from "~/lib/api-client"
 import { subscription } from "~/lib/auth"
 
 const APPLE_SUBSCRIPTION_MANAGEMENT_URL = "https://apps.apple.com/account/subscriptions"
+const GOOGLE_PLAY_SUBSCRIPTION_MANAGEMENT_URL =
+  "https://play.google.com/store/account/subscriptions?package=is.follow"
 const ACTIVE_STRIPE_SUBSCRIPTION_EXISTS_ERROR_CODE = "ACTIVE_STRIPE_SUBSCRIPTION_EXISTS"
 
 type BillingPortalResponse = {
@@ -29,7 +32,7 @@ type BillingPortalResponse = {
 }
 
 type ActiveSubscription = {
-  source: "stripe" | "apple" | null
+  source: "stripe" | "apple" | "google" | null
   plan: string | null
   status: string | null
   productId: string | null
@@ -41,22 +44,19 @@ type ActiveSubscription = {
 const AI_MODEL_SELECTION_VALUE_LABELS = {
   none: {
     translationKey: "plan.featureValues.AI_MODEL_SELECTION.none",
-    fallback: "—",
   },
   curated: {
     translationKey: "plan.featureValues.AI_MODEL_SELECTION.curated",
-    fallback: "Curated best-value models",
   },
   high_performance: {
     translationKey: "plan.featureValues.AI_MODEL_SELECTION.high_performance",
-    fallback: "All high-performance models",
   },
 } as const
 
 const formatFeatureValue = (
   key: keyof PaymentFeature,
   value: PaymentFeature[keyof PaymentFeature] | null | undefined,
-  t?: TFunction<"settings">,
+  t: TFunction<"settings">,
 ): string => {
   if (value == null || value === undefined) {
     return "—"
@@ -66,7 +66,7 @@ const formatFeatureValue = (
     const selectionValue =
       AI_MODEL_SELECTION_VALUE_LABELS[value as keyof typeof AI_MODEL_SELECTION_VALUE_LABELS]
     if (selectionValue) {
-      return t?.(selectionValue.translationKey) ?? selectionValue.fallback
+      return t(selectionValue.translationKey)
     }
   }
 
@@ -75,7 +75,7 @@ const formatFeatureValue = (
   }
 
   if (value === Number.MAX_SAFE_INTEGER) {
-    return "Unlimited"
+    return t("rsshub.table.unlimited")
   }
 
   if (typeof value === "number") {
@@ -105,7 +105,7 @@ const openStripeBillingPortal = async () => {
   })
   const data = (await res.json()) as BillingPortalResponse
   if (!res.ok || data.code !== 0 || !data.data?.url) {
-    throw new Error(data.message || "Failed to open billing portal")
+    throw new Error(data.message || getI18n().t("settings:subscription.actions.manage_error"))
   }
 
   if (IN_ELECTRON) {
@@ -171,6 +171,7 @@ const useBillingPortal = () => {
 }
 
 export function SettingPlan() {
+  const { t } = useTranslation("settings")
   const isPaymentEnabled = useIsPaymentEnabled()
   const role = useUserRole()
   const [billingPeriod, setBillingPeriod] = useState<"monthly" | "yearly">("yearly")
@@ -203,14 +204,16 @@ export function SettingPlan() {
           value={billingPeriod}
           onValueChanged={(value) => setBillingPeriod(value as "monthly" | "yearly")}
         >
-          <SegmentItem value="monthly" label="Monthly" />
+          <SegmentItem value="monthly" label={t("subscription.billing.monthly")} />
           <SegmentItem
             value="yearly"
             label={
               <span className="flex items-center gap-2">
-                <span>Yearly</span>
+                <span>{t("subscription.billing.yearly")}</span>
                 {averageSavings > 0 && (
-                  <span className="text-xs font-semibold text-green">Save {averageSavings}%</span>
+                  <span className="text-xs font-semibold text-green">
+                    {t("subscription.billing.yearly_savings", { value: averageSavings })}
+                  </span>
                 )}
               </span>
             }
@@ -286,7 +289,7 @@ const PlanCard = ({ plan, billingPeriod, isCurrentPlan, currentTier }: PlanCardP
     billingPeriod === "yearly"
       ? (plan.priceInDollarsInDiscountAnnual || 0) / 12
       : plan.priceInDollarsInDiscount
-  const period = plan.role === UserRole.Free ? "" : "month"
+  const period = plan.role === UserRole.Free ? "" : t("plan.period_month")
 
   // Calculate discount percentage from prices
   const hasDiscount =
@@ -349,17 +352,21 @@ const PlanCard = ({ plan, billingPeriod, isCurrentPlan, currentTier }: PlanCardP
 }
 
 // Plan card sub-components
-const PlanBadges = ({ isPopular }: { isPopular: boolean }) => (
-  <>
-    {isPopular && (
-      <div className="absolute -top-px right-4 z-10">
-        <div className="rounded-b-lg bg-gradient-to-r from-accent to-accent/90 px-2.5 py-1 text-caption font-medium text-white shadow-sm">
-          Most Popular
+const PlanBadges = ({ isPopular }: { isPopular: boolean }) => {
+  const { t } = useTranslation("settings")
+
+  return (
+    <>
+      {isPopular && (
+        <div className="absolute -top-px right-4 z-10">
+          <div className="rounded-b-lg bg-gradient-to-r from-accent to-accent/90 px-2.5 py-1 text-caption font-medium text-white shadow-sm">
+            {t("subscription.badge.popular")}
+          </div>
         </div>
-      </div>
-    )}
-  </>
-)
+      )}
+    </>
+  )
+}
 
 const PlanHeader = ({
   title,
@@ -423,7 +430,12 @@ const PlanAction = ({
   const { data: activeSubscription } = useActiveSubscription()
   const billingPortalMutation = useBillingPortal()
   const canManageSubscription = !!activeSubscription?.canManage
-  const isAppleSubscription = activeSubscription?.source === "apple"
+  const storeSubscriptionManagementUrl =
+    activeSubscription?.source === "apple"
+      ? APPLE_SUBSCRIPTION_MANAGEMENT_URL
+      : activeSubscription?.source === "google"
+        ? GOOGLE_PLAY_SUBSCRIPTION_MANAGEMENT_URL
+        : null
 
   // Determine subscription status info
   const isCanceled = activeSubscription?.status === "canceled"
@@ -434,7 +446,7 @@ const PlanAction = ({
     switch (actionType) {
       case "coming-soon": {
         return {
-          text: "Coming Soon",
+          text: t("subscription.actions.comingSoon"),
           icon: "i-mgc-time-cute-re",
           variant: "outline" as const,
           disabled: true,
@@ -451,7 +463,7 @@ const PlanAction = ({
       }
       case "in-trial": {
         return {
-          text: "In Trial",
+          text: t("plan.in_trial"),
           icon: "i-mgc-stopwatch-cute-re",
           variant: "outline" as const,
           disabled: false,
@@ -459,7 +471,7 @@ const PlanAction = ({
       }
       case "new": {
         return {
-          text: upgradeButtonText || "Upgrade",
+          text: upgradeButtonText || t("subscription.actions.upgrade"),
           icon: "i-mgc-arrow-up-cute-re",
           className:
             "bg-gradient-to-r from-accent to-accent/90 text-white hover:from-accent/95 hover:to-accent/85",
@@ -468,7 +480,7 @@ const PlanAction = ({
       }
       case "upgrade": {
         return {
-          text: "Upgrade",
+          text: t("subscription.actions.upgrade"),
           icon: "i-mgc-arrow-up-cute-re",
           className:
             "bg-gradient-to-r from-accent to-accent/90 text-white hover:from-accent/95 hover:to-accent/85",
@@ -477,7 +489,7 @@ const PlanAction = ({
       }
       case "switch": {
         return {
-          text: "Switch Plan",
+          text: t("plan.switch_plan"),
           icon: "i-mgc-transfer-cute-re",
           className:
             "bg-gradient-to-r from-accent to-accent/90 text-white font-semibold hover:from-accent/95 hover:to-accent/85",
@@ -548,8 +560,8 @@ const PlanAction = ({
         onClick={
           actionType === "current" && canManageSubscription
             ? () => {
-                if (isAppleSubscription) {
-                  window.open(APPLE_SUBSCRIPTION_MANAGEMENT_URL, "_blank")
+                if (storeSubscriptionManagementUrl) {
+                  window.open(storeSubscriptionManagementUrl, "_blank")
                   return
                 }
 
@@ -594,7 +606,7 @@ const PlanComparisonTable = ({ plans }: { plans: PaymentPlan[] }) => {
           <thead>
             <tr className="border-b border-fill-tertiary bg-fill-secondary/50">
               <th className="sticky left-0 z-10 w-44 bg-fill-secondary/50 px-4 py-3 text-left text-sm font-semibold">
-                Features
+                {t("plan.features_heading")}
               </th>
               {plans.map((plan) => (
                 <th key={plan.name} className="px-4 py-3 text-center text-sm font-semibold">
@@ -631,9 +643,10 @@ const PlanComparisonTable = ({ plans }: { plans: PaymentPlan[] }) => {
                           "font-medium",
                           formattedValue === "—" && "text-text-tertiary",
                           formattedValue === "✓" && "text-green",
-                          (formattedValue === "Unlimited" ||
+                          (value === Number.MAX_SAFE_INTEGER ||
                             formattedValue.startsWith("×") ||
-                            formattedValue.startsWith("All")) &&
+                            (featureKey === "AI_MODEL_SELECTION" &&
+                              value === "high_performance")) &&
                             "text-accent",
                           formattedValue.length > 10 && "text-xs",
                         )}

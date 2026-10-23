@@ -8,6 +8,7 @@ import { apiMorph } from "../../morph/api"
 import { storeDbMorph } from "../../morph/store-db"
 import { feedActions } from "../feed/store"
 import { subscriptionActions, subscriptionSyncService } from "../subscription/store"
+import { unreadSyncService } from "../unread/store"
 import type { CreateListModel, ListModel } from "./types"
 
 type ListId = string
@@ -45,6 +46,13 @@ class ListActions implements Hydratable, Resetable {
       ...state,
       lists: { ...state.lists, ...Object.fromEntries(lists.map((list) => [list.id, list])) },
       listIds: [...state.listIds, ...lists.map((list) => list.id)],
+    })
+  }
+
+  removeInSession(listId: ListId) {
+    immerSet((draft) => {
+      delete draft.lists[listId]
+      draft.listIds = draft.listIds.filter((id) => id !== listId)
     })
   }
 
@@ -200,7 +208,10 @@ class ListSyncServices {
       feedActions.upsertMany([apiMorph.toFeedFromAddFeeds(feed)])
     })
     await listActions.upsertMany([
-      { ...list, feedIds: [...list.feedIds, ...feeds.data.map((feed) => feed.id)] },
+      {
+        ...list,
+        feedIds: Array.from(new Set([...list.feedIds, ...feeds.data.map((feed) => feed.id)])),
+      },
     ])
   }
 
@@ -211,6 +222,11 @@ class ListSyncServices {
 
     const feedIds = list.feedIds.filter((id) => id !== params.feedId)
     await listActions.upsertMany([{ ...list, feedIds }])
+    // The server took the entries only this list brought out of the timeline, which changes
+    // the unread counts of the feed for whoever follows the list, the owner included
+    void unreadSyncService.refresh().catch((error) => {
+      console.error("[list] failed to refresh unread counts", error)
+    })
   }
 }
 

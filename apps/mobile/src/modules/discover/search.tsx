@@ -1,5 +1,5 @@
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { use, useEffect, useRef, useState } from "react"
+import { use, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { StyleSheet, Text, TextInput, View } from "react-native"
 import Animated, {
@@ -11,28 +11,19 @@ import Animated, {
 import { useSafeAreaFrame, useSafeAreaInsets } from "react-native-safe-area-context"
 
 import { ReAnimatedPressable } from "@/src/components/common/AnimatedComponents"
-import { BlurEffect } from "@/src/components/common/BlurEffect"
 import { getDefaultHeaderHeight } from "@/src/components/layouts/utils"
 import { SetNavigationHeaderHeightContext } from "@/src/components/layouts/views/NavigationHeaderContext"
 import { Search2CuteReIcon } from "@/src/icons/search_2_cute_re"
 import { useScreenIsInSheetModal } from "@/src/lib/navigation/hooks"
-import { ScreenItemContext } from "@/src/lib/navigation/ScreenItemContext"
+import { queryClient } from "@/src/lib/query-client"
+import { useHeaderWindowControlsInsets } from "@/src/lib/window-controls"
 import { accentColor, useColor } from "@/src/theme/colors"
 
 import { useSearchPageContext, useSearchPageScrollContainerAnimatedX } from "./ctx"
 import { SearchTabBar } from "./SearchTabBar"
 
-const DynamicBlurEffect = () => {
-  const { reAnimatedScrollY } = use(ScreenItemContext)
-  const blurStyle = useAnimatedStyle(() => ({
-    opacity: Math.max(0, Math.min(1, reAnimatedScrollY.value / 50)),
-  }))
-  return (
-    <Animated.View className="absolute inset-0 flex-1" style={blurStyle} pointerEvents={"none"}>
-      <BlurEffect />
-    </Animated.View>
-  )
-}
+const SEARCH_ROW_MARGIN = 16
+
 export const DiscoverHeader = () => {
   const frame = useSafeAreaFrame()
   const insets = useSafeAreaInsets()
@@ -46,20 +37,30 @@ export const DiscoverHeader = () => {
   const { searchFocusedAtom } = useSearchPageContext()
   const isFocused = useAtomValue(searchFocusedAtom)
   const setHeaderHeight = use(SetNavigationHeaderHeightContext)
+  const windowControlsInsets = useHeaderWindowControlsInsets()
+  // Clear of the iPadOS window controls, which sit over the start of the field otherwise
+  const searchRowStyle = useMemo(
+    () => [
+      styles.header,
+      {
+        marginLeft: SEARCH_ROW_MARGIN + windowControlsInsets.left,
+        marginRight: SEARCH_ROW_MARGIN + windowControlsInsets.right,
+      },
+    ],
+    [windowControlsInsets],
+  )
   return (
     <View
       style={{
         minHeight: headerHeight,
         paddingTop: insets.top,
       }}
-      className="relative"
+      className="relative bg-system-background"
       onLayout={(e) => {
         setHeaderHeight(e.nativeEvent.layout.height)
       }}
     >
-      <DynamicBlurEffect />
-
-      <View style={styles.header}>
+      <View style={searchRowStyle}>
         <SearchInput />
       </View>
       {isFocused && <SearchTabBar animatedX={scrollContainerAnimatedX} />}
@@ -80,7 +81,7 @@ const SearchInput = () => {
   const marginRight = useSharedValue(0)
   const cancelButtonTranslateX = useSharedValue(20)
   const [tempSearchValue, setTempSearchValue] = useState(searchValue)
-  const focusOrHasValue = isFocused || searchValue || tempSearchValue
+  const focusOrHasValue = !!(isFocused || searchValue || tempSearchValue)
   useEffect(() => {
     if (focusOrHasValue) {
       skeletonOpacity.value = withTiming(0, {
@@ -155,6 +156,7 @@ const SearchInput = () => {
     marginRight: marginRight.value,
   }))
   const cancelButtonAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: placeholderOpacity.value,
     transform: [
       {
         translateX: cancelButtonTranslateX.value,
@@ -186,16 +188,27 @@ const SearchInput = () => {
           allowFontScaling={false}
           textAlignVertical="center"
           enterKeyHint="search"
+          autoCapitalize="none"
+          autoCorrect={false}
           autoFocus={isFocused}
           ref={inputRef}
-          onSubmitEditing={() => {
-            setSearchValue(tempSearchValue)
+          onSubmitEditing={({ nativeEvent }) => {
+            // Read the submitted text: typed or pasted text can arrive in the same frame as the
+            // return key, before tempSearchValue holds it
+            const { text } = nativeEvent
+            setTempSearchValue(text)
+            // Submitting the same keyword again searches again, e.g. after a failed request
+            if (text === searchValue) {
+              void queryClient.refetchQueries({ queryKey: ["searchFeed", searchValue] })
+              void queryClient.refetchQueries({ queryKey: ["searchList", searchValue] })
+            }
+            setSearchValue(text)
           }}
-          defaultValue={searchValue}
+          value={tempSearchValue}
           cursorColor={accentColor}
           selectionColor={accentColor}
           style={styles.searchInput}
-          className="text-text"
+          className="text-label"
           onFocus={() => setIsFocused(true)}
           onBlur={() => !searchValue && !tempSearchValue && setIsFocused(false)}
           onChangeText={(text) => {
@@ -217,6 +230,7 @@ const SearchInput = () => {
 
       <ReAnimatedPressable
         testID="discover-search-cancel"
+        pointerEvents={focusOrHasValue ? "auto" : "none"}
         hitSlop={10}
         onPress={() => {
           setIsFocused(false)
@@ -243,7 +257,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexDirection: "row",
     marginBottom: 14,
-    marginHorizontal: 16,
+    marginHorizontal: SEARCH_ROW_MARGIN,
     position: "relative",
     marginTop: 4,
   },

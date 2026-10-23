@@ -3,15 +3,19 @@ import { fileURLToPath } from "node:url"
 
 import { callWindowExpose } from "@follow/shared/bridge"
 import { DEV } from "@follow/shared/constants"
-import { app, BrowserWindow, clipboard, dialog, shell } from "electron"
+import { app, BrowserWindow, clipboard, dialog, session, shell } from "electron"
 import { getIpcContext, IpcMethod, IpcService } from "electron-ipc-decorator"
 import path from "pathe"
 
 import { START_IN_TRAY_ARGS } from "~/constants/app"
-import { getCacheSize } from "~/lib/cleaner"
+import { isMacOS } from "~/env"
+import { filePathToAppUrl } from "~/helper"
+import { getCacheDir, getCacheSize } from "~/lib/cleaner"
+import { setRendererReady } from "~/lib/deep-link"
+import { getDownloadFileName } from "~/lib/download-file-name"
 import { i18n } from "~/lib/i18n"
 import { store, StoreKey } from "~/lib/store"
-import { registerAppTray } from "~/lib/tray"
+import { getTrayConfig, registerAppTray } from "~/lib/tray"
 import { logger, revealLogFile } from "~/logger"
 import { AppManager } from "~/manager/app"
 import { WindowManager } from "~/manager/window"
@@ -24,11 +28,6 @@ interface WindowActionInput {
   action: "close" | "minimize" | "maximum"
 }
 
-interface SearchInput {
-  text: string
-  options: Electron.FindInPageOptions
-}
-
 interface ExportCurrentPageAsPdfInput {
   defaultPath?: string
 }
@@ -39,6 +38,18 @@ interface Sender extends Electron.WebContents {
 
 const ensurePdfExtension = (filePath: string) => {
   return path.extname(filePath).toLowerCase() === ".pdf" ? filePath : `${filePath}.pdf`
+}
+
+/**
+ * Whether the app was launched at login and should start hidden in the tray. Windows passes the
+ * login item arguments to the app (see `START_IN_TRAY_ARGS`); macOS ignores them, so check how the
+ * app was launched instead. Only when the tray icon is enabled, otherwise nothing would be left on
+ * Windows to bring the window back.
+ */
+const shouldStartInTray = () => {
+  if (!getTrayConfig()) return false
+  if (process.argv.includes(START_IN_TRAY_ARGS)) return true
+  return isMacOS && app.getLoginItemSettings().wasOpenedAtLogin
 }
 
 export class AppService extends IpcService {
@@ -79,7 +90,9 @@ export class AppService extends IpcService {
           logger.verbose("[rendererUpdateReload]: skip reload in dev")
           break
         }
-        window.loadFile(appLoadEntry)
+        // The app:// origin the window started with, or a file:// origin would come with an
+        // empty local storage and database
+        window.loadURL(filePathToAppUrl(appLoadEntry))
       } else window.destroy()
     }
 
@@ -129,50 +142,50 @@ export class AppService extends IpcService {
   }
 
   @IpcMethod()
-  readClipboard(): string {
-    return clipboard.readText()
-  }
-
-  @IpcMethod()
-  async search(input: SearchInput): Promise<Electron.Result | null> {
-    const { sender: webContents } = getIpcContext()
-
-    const { promise, resolve } = Promise.withResolvers<Electron.Result | null>()
-
-    let requestId = -1
-    webContents.once("found-in-page", (_, result) => {
-      resolve(result.requestId === requestId ? result : null)
+  relaunch(): void {
+    app.relaunch({
+      // Inside an AppImage, `process.execPath` points into the FUSE mount, which
+      // is unmounted once this process exits — the relauncher would then fail to
+      // exec it and the app would simply quit. `$APPIMAGE` is the outer bundle.
+      // It is undefined elsewhere, which keeps Electron's default behaviour.
+      execPath: process.env.APPIMAGE,
+      // Drop the autostart flag so a relaunch never resurrects the app hidden.
+      args: process.argv.slice(1).filter((arg) => arg !== START_IN_TRAY_ARGS),
     })
-    requestId = webContents.findInPage(input.text, input.options)
-    return promise
+    // `app.quit()` rather than `app.exit()`: the `before-quit` handlers persist
+    // the window bounds and flush the cookie store.
+    app.quit()
   }
 
   @IpcMethod()
-  clearSearch(): void {
-    getIpcContext().sender.stopFindInPage("keepSelection")
+  readClipboard(): Promise<string> {
+    return clipboard.readText()
   }
 
   @IpcMethod()
   async download(input: string): Promise<void> {
     const { sender } = getIpcContext()
-    const result = await dialog.showSaveDialog({
-      defaultPath: input.split("/").pop(),
-    })
+    const senderWindow = (sender as Sender).getOwnerBrowserWindow()
+    const dialogOptions: Electron.SaveDialogOptions = {
+      defaultPath: getDownloadFileName(input),
+    }
+    // Attached to the window it was asked from, like the PDF export
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
     if (result.canceled) return
 
     try {
       await downloadFile(input, result.filePath)
 
-      const senderWindow = (sender as Sender).getOwnerBrowserWindow()
-      if (senderWindow) {
-        callWindowExpose(senderWindow).toast.success("Download success!", {
+      if (senderWindow && !senderWindow.isDestroyed()) {
+        callWindowExpose(senderWindow).toast.success(i18n.t("download.success"), {
           duration: 1000,
         })
       }
     } catch (err) {
-      const senderWindow = (sender as Sender).getOwnerBrowserWindow()
-      if (senderWindow) {
-        callWindowExpose(senderWindow).toast.error("Download failed!", {
+      if (senderWindow && !senderWindow.isDestroyed()) {
+        callWindowExpose(senderWindow).toast.error(i18n.t("download.failed"), {
           duration: 1000,
         })
       }
@@ -224,18 +237,17 @@ export class AppService extends IpcService {
 
   @IpcMethod()
   readyToShowMainWindow() {
-    const shouldShowWindow =
-      !app.getLoginItemSettings().wasOpenedAsHidden && !process.argv.includes(START_IN_TRAY_ARGS)
-    if (shouldShowWindow) {
-      const window = WindowManager.getMainWindow()
-      if (window) window.show()
+    const window = WindowManager.getMainWindow()
+    if (window && getIpcContext().sender === window.webContents) {
+      setRendererReady(true)
     }
+    if (shouldStartInTray()) return
+    if (window) WindowManager.showMainWindow(window)
   }
 
   @IpcMethod()
   openCacheFolder(): void {
-    const dir = path.join(app.getPath("userData"), "cache")
-    shell.openPath(dir)
+    shell.openPath(getCacheDir())
   }
 
   @IpcMethod()
@@ -245,24 +257,10 @@ export class AppService extends IpcService {
 
   @IpcMethod()
   async clearCache(): Promise<void> {
-    const cachePath = path.join(app.getPath("userData"), "cache", "Cache_Data")
-    if (process.platform === "win32") {
-      // Request elevation on Windows
-
-      try {
-        // Create a bat file to delete cache with elevated privileges
-        const batPath = path.join(app.getPath("temp"), "clear_cache.bat")
-        await fsp.writeFile(batPath, `@echo off\nrd /s /q "${cachePath}"\ndel "%~f0"`, "utf-8")
-
-        // Execute the bat file with admin privileges
-        await shell.openPath(batPath)
-        return
-      } catch (err) {
-        logger.error("Failed to clear cache with elevation", { error: err })
-      }
-    }
-    await fsp.rm(cachePath, { recursive: true, force: true }).catch(() => {
-      logger.error("Failed to clear cache")
+    // Through Chromium, which owns the cache files while the app runs, instead of deleting them
+    // under it or, on Windows, running a batch file in a console window
+    await session.defaultSession.clearCache().catch((error) => {
+      logger.error("Failed to clear cache", error)
     })
   }
 

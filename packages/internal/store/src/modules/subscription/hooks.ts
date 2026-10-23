@@ -2,6 +2,8 @@ import { FeedViewType, getViewList } from "@follow/constants"
 import { useQuery } from "@tanstack/react-query"
 import { useCallback, useMemo, useRef } from "react"
 
+import { ensureSyncedThroughEngine } from "../../sync/sync-status"
+import { useUnreadStore } from "../unread/store"
 import {
   getAllFeedSubscriptionIdsSelector,
   getAllFeedSubscriptionSelector,
@@ -40,7 +42,12 @@ import { getDefaultCategory } from "./utils"
 export const usePrefetchSubscription = (view?: FeedViewType) => {
   return useQuery({
     queryKey: ["subscription", view],
-    queryFn: () => subscriptionSyncService.fetch(view),
+    queryFn: async () => {
+      // With a sync cursor the subscriptions are the local snapshot plus the delta feed; the
+      // full list is only needed when the engine cannot provide that.
+      if (await ensureSyncedThroughEngine()) return null
+      return subscriptionSyncService.fetch(view)
+    },
     staleTime: 30 * 1000 * 60, // 30 minutes
   })
 }
@@ -84,6 +91,11 @@ export const useGroupedSubscription = ({
   )
 }
 
+// The sorted subscription selectors read unread counts from the unread store, which the
+// subscription store doesn't notify about, so they run again whenever the counts they use change
+const useUnreadDataWhen = (enabled: boolean) =>
+  useUnreadStore(useCallback((state) => (enabled ? state.data : null), [enabled]))
+
 export const useSortedGroupedSubscription = ({
   view,
   grouped,
@@ -97,6 +109,7 @@ export const useSortedGroupedSubscription = ({
   sortOrder: "asc" | "desc"
   hideAllReadSubscriptions: boolean
 }) => {
+  const unreadData = useUnreadDataWhen(sortBy === "count" || hideAllReadSubscriptions)
   return useSubscriptionStore(
     useCallback(
       (state) => {
@@ -108,7 +121,8 @@ export const useSortedGroupedSubscription = ({
           hideAllReadSubscriptions,
         })
       },
-      [grouped, sortBy, sortOrder, view, hideAllReadSubscriptions],
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- the selector reads the unread counts
+      [grouped, sortBy, sortOrder, view, hideAllReadSubscriptions, unreadData],
     ),
   )
 }
@@ -124,6 +138,7 @@ export const useSortedUngroupedSubscription = ({
   sortOrder: "asc" | "desc"
   hideAllReadSubscriptions: boolean
 }) => {
+  const unreadData = useUnreadDataWhen(sortBy === "count" || hideAllReadSubscriptions)
   return useSubscriptionStore(
     useCallback(
       (state) => {
@@ -134,7 +149,8 @@ export const useSortedUngroupedSubscription = ({
           hideAllReadSubscriptions,
         })
       },
-      [ids, sortBy, sortOrder, hideAllReadSubscriptions],
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- the selector reads the unread counts
+      [ids, sortBy, sortOrder, hideAllReadSubscriptions, unreadData],
     ),
   )
 }

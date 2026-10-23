@@ -1,5 +1,6 @@
 import { Button } from "@follow/components/ui/button/index.js"
-import { useActionRules } from "@follow/store/action/hooks"
+import { LoadingWithIcon } from "@follow/components/ui/loading/index.jsx"
+import { useActionRules, usePrefetchActions } from "@follow/store/action/hooks"
 import { useLocalActionHydration, useLocalActionRules } from "@follow/store/action/local-hooks"
 import { localActionActions } from "@follow/store/action/local-store"
 import { actionActions } from "@follow/store/action/store"
@@ -8,9 +9,10 @@ import { JsonObfuscatedCodec } from "@follow/utils/json-codec"
 import { cn } from "@follow/utils/utils"
 import { repository } from "@pkg"
 import { useQueryClient } from "@tanstack/react-query"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import { useEventCallback } from "usehooks-ts"
 
 import { HeaderActionButton, HeaderActionGroup } from "~/components/ui/button/HeaderActionButton"
 import {
@@ -20,11 +22,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu/dropdown-menu.js"
-import { copyToClipboard, readFromClipboard } from "~/lib/clipboard"
-import { toastFetchError } from "~/lib/error-parser"
+import { ClipboardError, copyToClipboard, readFromClipboard } from "~/lib/clipboard"
 import { downloadJsonFile, selectJsonFile } from "~/lib/export"
 import {
   ActionScopeProvider,
+  useActionScope,
   useScopedActionActions,
   useScopedActionDataDirty,
   useScopedActionRules,
@@ -54,7 +56,7 @@ import { LocalAutomationSettings } from "./local-automation-settings"
 import { ProcessingServiceDetail } from "./processing-service-detail"
 import { useProcessingServiceRules } from "./use-processing-service-rules"
 import { useUnSavedBlocker } from "./use-unsaved-blocker"
-import { generateExportFilename } from "./utils"
+import { findRuleIndexWithInvalidRegex, generateExportFilename } from "./utils"
 
 const EmptyActionPlaceholder = ({ onCreateRule }: { onCreateRule: () => void }) => {
   const { t } = useTranslation(["settings", "common"])
@@ -103,6 +105,20 @@ const parseRowId = (id: string): { scope: UnifiedRuleScope; key: string } | null
 }
 
 // 本地部署只有一个增强规则入口；官方规则及不兼容旧条件保留明确的兼容入口。
+const ActionLoadError = ({ isRetrying, onRetry }: { isRetrying: boolean; onRetry: () => void }) => {
+  const { t } = useTranslation(["settings", "common"])
+
+  return (
+    <div className="flex min-h-96 w-full flex-col items-center justify-center gap-3 py-10">
+      <i className="i-mgc-warning-cute-re text-3xl text-red" />
+      <span className="text-sm text-text-secondary">{t("actions.load_failed")}</span>
+      <Button variant="outline" isLoading={isRetrying} onClick={onRetry}>
+        {t("retry", { ns: "common" })}
+      </Button>
+    </div>
+  )
+}
+
 export const ActionSetting = () => {
   const params = new URLSearchParams(window.location.search)
   return isLocalFoloHost() &&
@@ -139,6 +155,7 @@ const LegacyActionSetting = () => {
       : null
   })
 
+  const cloudQuery = usePrefetchActions()
   const cloudRules = useActionRules()
   const localRules = useLocalActionRules()
   const {
@@ -246,6 +263,25 @@ const LegacyActionSetting = () => {
     }
   }
 
+  // 云端尚未确认规则时禁止导入或编辑空数组，避免把加载失败误当成没有规则。
+  if (
+    (selected?.scope === "cloud" || (!selected && initialScope === "cloud")) &&
+    !actionActions.isLoaded()
+  ) {
+    return cloudQuery.isError ? (
+      <ActionLoadError
+        isRetrying={cloudQuery.isFetching}
+        onRetry={() => void cloudQuery.refetch()}
+      />
+    ) : (
+      <LoadingWithIcon
+        className="flex h-64 items-center justify-center"
+        icon={<i className="i-mgc-magic-2-cute-re" />}
+        size="large"
+      />
+    )
+  }
+
   return (
     <>
       <ExecutionLocationNote />
@@ -301,11 +337,11 @@ const ShareImportSection = () => {
       const jsonData = scopedActionActions.exportRules()
       const filename = generateExportFilename()
       downloadJsonFile(jsonData, filename)
-      toast.success(`Action rules exported successfully as ${filename}`)
+      toast.success(t("actions.share.export_success", { filename }))
     } catch {
-      toast.error("Failed to export action rules")
+      toast.error(t("actions.share.export_failed"))
     }
-  }, [scopedActionActions])
+  }, [scopedActionActions, t])
 
   const handleImport = useCallback(async () => {
     try {
@@ -321,9 +357,9 @@ const ShareImportSection = () => {
       if (error instanceof Error && error.message === "No file selected") {
         return
       }
-      toast.error("Failed to import action rules")
+      toast.error(t("actions.share.import_failed"))
     }
-  }, [scopedActionActions])
+  }, [scopedActionActions, t])
 
   const foloPrefix = "folo:actions#"
   const handleCopyToClipboard = useCallback(async () => {
@@ -331,18 +367,18 @@ const ShareImportSection = () => {
       const jsonData = scopedActionActions.exportRules()
       const codecData = JsonObfuscatedCodec.encode(jsonData)
       await copyToClipboard(`${foloPrefix}${codecData}`)
-      toast.success("Action rules copied to clipboard")
+      toast.success(t("actions.share.copy_success"))
     } catch (error) {
-      toast.error("Failed to copy action rules to clipboard")
+      toast.error(t("actions.share.copy_failed"))
       console.error(error)
     }
-  }, [foloPrefix, scopedActionActions])
+  }, [foloPrefix, scopedActionActions, t])
 
   const handleImportFromClipboard = useCallback(async () => {
     try {
       const clipboardData = await readFromClipboard()
       if (!clipboardData.startsWith(foloPrefix)) {
-        toast.error("Invalid clipboard data")
+        toast.error(t("actions.share.invalid_clipboard"))
         return
       }
       const codecData = clipboardData.slice(foloPrefix.length)
@@ -355,14 +391,13 @@ const ShareImportSection = () => {
         toast.error(result.message)
       }
     } catch (error) {
-      if (error instanceof Error && error.message.includes("clipboard")) {
-        toast.error(error.message)
-      } else {
-        toast.error("Failed to import from clipboard")
+      // readFromClipboard has already shown its own error
+      if (!(error instanceof ClipboardError)) {
+        toast.error(t("actions.share.import_clipboard_failed"))
       }
       console.error(error)
     }
-  }, [foloPrefix, scopedActionActions])
+  }, [foloPrefix, scopedActionActions, t])
 
   return (
     <div className="flex justify-end">
@@ -412,11 +447,17 @@ const ShareImportSection = () => {
 
 const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
   const queryClient = useQueryClient()
-  const actionLength = useScopedActionRules((actions) => actions.length)
+  const rules = useScopedActionRules()
+  const actionLength = rules.length
+  const scope = useActionScope()
   const isDirty = useScopedActionDataDirty()
   const { t } = useTranslation("settings")
 
-  useUnSavedBlocker(isDirty)
+  // 放弃云端草稿时还原确认版本；本地增强规则由各自编辑器管理。
+  useUnSavedBlocker(
+    isDirty,
+    scope === "cloud" ? () => actionActions.discardLocalEdits().catch(console.error) : undefined,
+  )
 
   const mutation = useScopedUpdateActionsMutation({
     onSuccess: () => {
@@ -425,12 +466,33 @@ const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
       })
       toast(t("actions.saveSuccess"))
     },
-    onError: (error) => {
-      toastFetchError(error)
-    },
   })
 
   const hasActions = actionLength > 0
+
+  // The pending state reaches the header button only after a render, too late for a double click
+  const isSavingRef = useRef(false)
+  const save = useEventCallback(() => {
+    if (isSavingRef.current) return
+    const invalidIndex = findRuleIndexWithInvalidRegex(
+      rules,
+      scope === "cloud" ? actionActions.getLoadedRules() : [],
+    )
+    if (invalidIndex !== -1) {
+      toast.error(
+        t("actions.save_invalid_regex", {
+          name: getRuleDisplayName(rules[invalidIndex], invalidIndex, t),
+        }),
+      )
+      return
+    }
+    isSavingRef.current = true
+    mutation.mutate(undefined, {
+      onSettled: () => {
+        isSavingRef.current = false
+      },
+    })
+  })
 
   const setRightView = useSetSubViewRightView()
   useEffect(() => {
@@ -446,9 +508,9 @@ const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
             icon="i-mgc-check-circle-cute-re"
             disabled={!isDirty}
             loading={mutation.isPending}
-            onClick={() => mutation.mutate()}
+            onClick={save}
           >
-            {mutation.isPending ? "Saving..." : t("actions.save")}
+            {mutation.isPending ? t("actions.saving") : t("actions.save")}
           </HeaderActionButton>
         )}
       </HeaderActionGroup>,
@@ -456,7 +518,7 @@ const ActionButtonGroup = ({ onCreateRule }: { onCreateRule: () => void }) => {
     return () => {
       setRightView(null)
     }
-  }, [setRightView, actionLength, hasActions, isDirty, mutation, onCreateRule, t])
+  }, [setRightView, actionLength, hasActions, isDirty, mutation, onCreateRule, save, t])
 
   return null
 }

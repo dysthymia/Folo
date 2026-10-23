@@ -37,20 +37,27 @@ export function FeedCardActions<T extends TrendingFeedItem | DiscoveryItem>({
   const follow = useFollow()
   const { t } = useTranslation()
   const location = useLocation()
+  const list = "list" in item ? item.list : undefined
 
   return (
     <div className="flex items-center justify-between gap-2">
       {!isSubscribed && (
         <Button
           variant="ghost"
-          disabled={!item.feed?.id}
+          disabled={!item.feed?.id && !list?.id}
           buttonClassName="rounded-lg px-3 font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-white"
           onClick={() => {
+            const backPath = `${location.pathname}${location.search}`
+            // A list result has no feed; its timeline previews it the same way
+            if (list?.id) {
+              navigateEntry({ listId: list.id, view: list.view, backPath })
+              return
+            }
             if (!item.feed?.id) return
             navigateEntry({
               feedId: item.feed.id,
               view: item.analytics?.view ?? 0,
-              backPath: `${location.pathname}${location.search}`,
+              backPath,
             })
           }}
         >
@@ -110,7 +117,7 @@ export const DiscoverFeedCard: FC<DiscoverFeedCardProps> = memo(
           {item.docs ? (
             <a href={item.docs} target="_blank" rel="noreferrer">
               <Button buttonClassName="rounded-full bg-zinc-900 px-6 text-white transition-opacity hover:opacity-90 dark:bg-white dark:text-zinc-900">
-                View Docs
+                {t("discover.view_docs", { ns: "app" })}
               </Button>
             </a>
           ) : (
@@ -169,6 +176,7 @@ export const DiscoverFeedCard: FC<DiscoverFeedCardProps> = memo(
 export const SearchResultContent: FC<{
   entry: NonUndefined<DiscoveryItem["entries"]>[number]
 }> = memo(({ entry }) => {
+  const { t } = useTranslation()
   const safeUrl = useFeedSafeUrl(entry.id)
   return (
     <a
@@ -189,7 +197,9 @@ export const SearchResultContent: FC<{
         ) : (
           <div className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400">
             <i className="i-mgc-link-cute-re shrink-0 translate-y-px self-start text-[14px]" />
-            <span className="line-clamp-2 break-all">{entry.url || "Untitled"}</span>
+            <span className="line-clamp-2 break-all">
+              {entry.url || t("discover.untitled_entry")}
+            </span>
           </div>
         )}
         <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">

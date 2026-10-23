@@ -36,9 +36,16 @@ beforeEach(() => {
 describe("EntryService 大列表删除", () => {
   it("hydrate 清理分批删除全部超额条目，并保留原来的每订阅 20 条范围", async () => {
     const entryIds = Array.from({ length: 1221 }, (_, index) => `entry-${index}`)
-    databaseMocks.entryFindMany.mockResolvedValue(
-      entryIds.map((id) => ({ id, feedId: "feed-1", inboxHandle: null, sources: null })),
-    )
+    // 上游先查询轻量候选，再单独回读保留内容；模拟真实的两阶段查询。
+    const entries = entryIds.map((id) => ({
+      id,
+      feedId: "feed-1",
+      inboxHandle: null,
+      sources: null,
+    }))
+    databaseMocks.entryFindMany
+      .mockResolvedValueOnce(entries)
+      .mockResolvedValueOnce(entries.slice(0, 20))
     databaseMocks.subscriptionFindMany.mockResolvedValue([
       { feedId: "feed-1", inboxId: null, listId: null },
     ])

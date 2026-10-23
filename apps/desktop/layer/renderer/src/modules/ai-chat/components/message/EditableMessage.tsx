@@ -3,16 +3,17 @@ import type { LexicalRichEditorRef } from "@follow/components/ui/lexical-rich-ed
 import { LexicalRichEditor } from "@follow/components/ui/lexical-rich-editor/index.js"
 import { ScrollArea } from "@follow/components/ui/scroll-area/ScrollArea.js"
 import { cn, nextFrame } from "@follow/utils"
-import { isEqual } from "es-toolkit"
 import type { EditorState, LexicalEditor, SerializedEditorState } from "lexical"
 import { $getRoot } from "lexical"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Trans, useTranslation } from "react-i18next"
 
 import { useEditingMessageId, useSetEditingMessageId } from "~/modules/ai-chat/atoms/session"
 import { useChatStatus } from "~/modules/ai-chat/store/hooks"
 import type { BizUIMessage } from "~/modules/ai-chat/store/types"
 
 import { MentionPlugin, ShortcutPlugin } from "../../editor"
+import { isEditorStateUnchanged } from "../../utils/editor-state"
 
 interface EditableMessageProps {
   messageId: string
@@ -31,6 +32,7 @@ export const EditableMessage = ({
   className,
   initialHeight,
 }: EditableMessageProps) => {
+  const { t } = useTranslation("ai")
   const status = useChatStatus()
   const editingMessageId = useEditingMessageId()
   const setEditingMessageId = useSetEditingMessageId()
@@ -38,9 +40,13 @@ export const EditableMessage = ({
   const editorRef = useRef<LexicalRichEditorRef>(null)
   const [currentEditor, setCurrentEditor] = useState<LexicalEditor | null>(null)
 
+  // The stored state is the JSON string of the editor state
   const initialEditorState = useMemo(() => {
-    return (parts.find((part) => part.type === "data-rich-text") as any)?.data
-      .state as SerializedEditorState
+    const richTextPart = parts.find(
+      (part): part is Extract<BizUIMessage["parts"][number], { type: "data-rich-text" }> =>
+        part.type === "data-rich-text",
+    )
+    return richTextPart?.data.state
   }, [parts])
 
   const isEditing = editingMessageId === messageId
@@ -64,26 +70,27 @@ export const EditableMessage = ({
       if (setInitialEditorStateOnceRef.current) return
       const editor = editorRef.current?.getEditor()
 
-      if (!editor) return
+      if (!editor || !initialEditorState) return
       editor.setEditorState(editor.parseEditorState(initialEditorState))
       setInitialEditorStateOnceRef.current = true
     })
   }, [initialEditorState])
 
-  const handleSave = useCallback(() => {
-    if (currentEditor && editorRef.current && !editorRef.current.isEmpty()) {
-      const serializedEditorState = currentEditor.getEditorState().toJSON()
-
-      if (!isEqual(serializedEditorState, initialEditorState)) {
-        onSave(serializedEditorState, currentEditor)
-      }
-    }
-  }, [currentEditor, initialEditorState, onSave])
-
   const handleCancel = useCallback(() => {
     setEditingMessageId(null)
     onCancel()
   }, [onCancel, setEditingMessageId])
+
+  const handleSave = useCallback(() => {
+    if (!currentEditor || !editorRef.current || editorRef.current.isEmpty()) return
+
+    // Sending an unchanged message again would replace its answer and use another request
+    if (initialEditorState && isEditorStateUnchanged(currentEditor, initialEditorState)) {
+      handleCancel()
+      return
+    }
+    onSave(currentEditor.getEditorState().toJSON(), currentEditor)
+  }, [currentEditor, handleCancel, initialEditorState, onSave])
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
@@ -128,7 +135,7 @@ export const EditableMessage = ({
         >
           <LexicalRichEditor
             ref={editorRef}
-            placeholder="Edit your message..."
+            placeholder={t("chat.placeholder.edit_message")}
             className="h-full min-w-64"
             onChange={handleEditorChange}
             onKeyDown={handleKeyDown}
@@ -144,7 +151,7 @@ export const EditableMessage = ({
             onClick={handleCancel}
             disabled={isProcessing}
             className="flex size-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-fill/50 hover:text-text disabled:opacity-50"
-            title="Cancel (Esc)"
+            title={t("chat.message.edit_cancel")}
           >
             <i className="i-mgc-close-cute-re size-4" />
           </button>
@@ -153,7 +160,7 @@ export const EditableMessage = ({
             onClick={handleSave}
             disabled={isProcessing || isEmpty}
             className="flex size-8 items-center justify-center rounded-lg text-accent transition-colors hover:bg-accent/10 hover:text-accent disabled:opacity-50"
-            title="Save (Enter)"
+            title={t("chat.message.edit_save")}
           >
             <i className="i-mgc-send-plane-cute-fi size-4" />
           </button>
@@ -164,7 +171,14 @@ export const EditableMessage = ({
       <div className="relative mt-2">
         <div className="absolute -inset-x-2 -bottom-2 -top-8 z-[-1] bg-background" />
         <div className="relative z-[1] text-xs text-text-secondary">
-          Press <Kbd abbr="Enter">Enter</Kbd> to save, <Kbd abbr="Esc">Esc</Kbd> to cancel
+          <Trans
+            t={t}
+            i18nKey="chat.message.edit_hint"
+            components={{
+              enter: <Kbd abbr="Enter">Enter</Kbd>,
+              esc: <Kbd abbr="Esc">Esc</Kbd>,
+            }}
+          />
         </div>
       </div>
     </div>

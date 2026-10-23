@@ -104,7 +104,14 @@ const ChatHeaderLayout = ({
             )}
             <ChatHistoryDropdown
               triggerElement={
-                <AIHeaderTitle title={displayTitle} placeholder={t("common.new_chat")} />
+                <AIHeaderTitle
+                  title={displayTitle}
+                  placeholder={t("common.new_chat")}
+                  // Named apart from the New Chat button, as it opens the chat history
+                  aria-label={t("chat.history.trigger", {
+                    title: displayTitle || t("common.new_chat"),
+                  })}
+                />
               }
             />
           </div>
@@ -141,8 +148,8 @@ export const ChatHeader: FC<{ isFloating: boolean }> = ({ isFloating }) => {
           <ActionButton
             tooltip={
               panelStyle === AIChatPanelStyle.Fixed
-                ? "Switch to Floating Panel"
-                : "Switch to Fixed Panel"
+                ? t("chat.header.switch_to_floating")
+                : t("chat.header.switch_to_fixed")
             }
             onClick={onTogglePanelStyle}
           >
@@ -158,7 +165,7 @@ export const ChatHeader: FC<{ isFloating: boolean }> = ({ isFloating }) => {
           <ChatMoreDropdown
             canClosePanel={!isAllView}
             triggerElement={
-              <ActionButton tooltip="More">
+              <ActionButton tooltip={t("chat.header.more")}>
                 <i className="i-mingcute-more-1-fill size-5 text-text-secondary" />
               </ActionButton>
             }
@@ -167,7 +174,10 @@ export const ChatHeader: FC<{ isFloating: boolean }> = ({ isFloating }) => {
           {isFloating && (
             <>
               <div className="h-5 w-px bg-border" />
-              <ActionButton tooltip="Close" onClick={() => setAIPanelVisibility(false)}>
+              <ActionButton
+                tooltip={t("words.close", { ns: "common" })}
+                onClick={() => setAIPanelVisibility(false)}
+              >
                 <i className="i-mgc-close-cute-re size-5 text-text-secondary" />
               </ActionButton>
             </>
@@ -178,40 +188,26 @@ export const ChatHeader: FC<{ isFloating: boolean }> = ({ isFloating }) => {
   )
 }
 
+// The full-page chat at /ai has no panel, so it leaves out the panel style and close controls
 export const ChatPageHeader = () => {
   const { t } = useTranslation("ai")
 
   return (
     <ChatHeaderLayout
       isFloating={false}
-      renderActions={({ onNewChatClick, panelStyle, onTogglePanelStyle }) => (
+      renderActions={({ onNewChatClick }) => (
         <>
           <ActionButton tooltip={t("common.new_chat")} onClick={onNewChatClick}>
             <i className="i-mgc-edit-cute-re size-5 text-text-secondary" />
-          </ActionButton>
-          <ActionButton
-            tooltip={
-              panelStyle === AIChatPanelStyle.Fixed
-                ? "Switch to Floating Panel"
-                : "Switch to Fixed Panel"
-            }
-            onClick={onTogglePanelStyle}
-          >
-            <i
-              className={`size-5 text-text-secondary ${
-                panelStyle === AIChatPanelStyle.Fixed
-                  ? "i-mingcute-rectangle-vertical-line"
-                  : "i-mingcute-layout-right-line"
-              }`}
-            />
           </ActionButton>
 
           <TaskReportDropdown />
 
           <div className="mx-2 h-5 w-px bg-border" />
           <ChatMoreDropdown
+            canClosePanel={false}
             triggerElement={
-              <ActionButton tooltip="More">
+              <ActionButton tooltip={t("chat.header.more")}>
                 <i className="i-mingcute-more-1-fill size-5 text-text-secondary" />
               </ActionButton>
             }

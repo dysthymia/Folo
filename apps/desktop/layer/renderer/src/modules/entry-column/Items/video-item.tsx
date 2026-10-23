@@ -6,6 +6,7 @@ import { transformVideoUrl } from "@follow/utils/url-for-video"
 import { cn } from "@follow/utils/utils"
 import { useHover } from "@use-gesture/react"
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
 import { RelativeTime } from "~/components/ui/datetime"
 import { Media } from "~/components/ui/media/Media"
@@ -19,10 +20,12 @@ import type { EntryItemStatelessProps, UniversalItemProps } from "../types"
 const ViewTag = IN_ELECTRON ? "webview" : "iframe"
 
 export function VideoItem({ entryId, translation }: UniversalItemProps) {
+  const { t } = useTranslation()
+  // Return store references or primitives only: the store compares selector
+  // results shallowly, so a fresh `[]` would re-render on every entry write.
   const entry = useEntry(entryId, (state) => {
-    const { id, url } = state
+    const { id, url, attachments, media } = state
 
-    const attachments = state.attachments || []
     const { duration_in_seconds } =
       attachments?.find((attachment) => attachment.duration_in_seconds) ?? {}
     const seconds = duration_in_seconds
@@ -30,8 +33,7 @@ export function VideoItem({ entryId, translation }: UniversalItemProps) {
       : undefined
     const duration = formatDuration(seconds)
 
-    const media = state.media || []
-    const firstMedia = media[0]
+    const firstMedia = media?.[0]
 
     return { attachments, duration, firstMedia, id, url, media }
   })
@@ -117,7 +119,7 @@ export function VideoItem({ entryId, translation }: UniversalItemProps) {
           ) : (
             <div className="center aspect-video w-full flex-col gap-1 rounded-md bg-material-medium text-xs text-text-secondary">
               <i className="i-mgc-sad-cute-re size-6" />
-              No media available
+              {t("entry_content.no_content")}
             </div>
           )}
           {!!entry.duration && (
@@ -132,6 +134,7 @@ export function VideoItem({ entryId, translation }: UniversalItemProps) {
 }
 
 export function VideoItemStateLess({ entry, feed }: EntryItemStatelessProps) {
+  const { t } = useTranslation()
   return (
     <div className="p-1.5">
       <div className="w-full">
@@ -157,7 +160,7 @@ export function VideoItemStateLess({ entry, feed }: EntryItemStatelessProps) {
           ) : (
             <div className="center aspect-video w-full flex-col gap-1 rounded-md bg-material-medium text-xs text-text-secondary">
               <i className="i-mgc-sad-cute-re size-6" />
-              No media available
+              {t("entry_content.no_content")}
             </div>
           )}
         </div>

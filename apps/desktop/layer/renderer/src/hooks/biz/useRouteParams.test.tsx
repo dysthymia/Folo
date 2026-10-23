@@ -1,74 +1,127 @@
+import { setRoute } from "@follow/components/atoms/route.js"
+import { StableRouterProvider } from "@follow/components/providers/stable-router-provider.js"
+import { FeedViewType } from "@follow/constants"
+import { Provider } from "jotai"
 import * as React from "react"
 import { act } from "react"
+import type { Root } from "react-dom/client"
 import { createRoot } from "react-dom/client"
-import { Link, MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { createMemoryRouter, Outlet, RouterProvider } from "react-router"
+import { afterEach, beforeAll, describe, expect, test } from "vitest"
 
-import { useRouterRouteParams } from "./useRouteParams"
+import { jotaiStore } from "~/lib/jotai"
 
-vi.mock("@follow/store/list/getters", () => ({ getListById: () => undefined }))
-vi.mock("@follow/components/atoms/route.js", () => ({
-  // 模拟尚未提交的新路由：只读原子仍停在上一页。
-  useReadonlyRoute: () => ({
-    params: { timelineId: "articles", feedId: "old-feed", entryId: "old-entry" },
-    searchParams: new URLSearchParams(),
-  }),
-  useReadonlyRouteSelector: vi.fn(),
-  getReadonlyRoute: vi.fn(),
-}))
+import { useRouteParams, useRouteParamsSelector } from "./useRouteParams"
 
-function PersistentReaderLayout() {
-  const params = useRouterRouteParams()
-  const location = useLocation()
+const RouteParamsProbe = () => {
+  const { feedId, entryId, view } = useRouteParams()
+  const selected = useRouteParamsSelector((params) => ({
+    feedId: params.feedId,
+    view: params.view,
+  }))
+
   return (
     <>
-      <output data-testid="scope">
-        {JSON.stringify({ pathname: location.pathname, ...params })}
-      </output>
-      <Link to="/events">综述</Link>
-      <Link to="/timeline/all/collections/pending">收藏</Link>
-      <Outlet />
+      <output data-probe="params">{JSON.stringify({ feedId, entryId, view })}</output>
+      <output data-probe="selector">{JSON.stringify(selected)}</output>
     </>
   )
 }
 
-const host = document.createElement("div")
-document.body.append(host)
-const root = createRoot(host)
-afterEach(async () => {
-  await act(() => root.render(null))
-})
+const AppRoot = () => (
+  <Provider store={jotaiStore}>
+    <StableRouterProvider />
+    <Outlet />
+  </Provider>
+)
 
-describe("持续挂载的阅读路由快照", () => {
-  it("在父布局中读取当前子路由参数，切换综述和收藏不依赖旧原子的提交", async () => {
-    await act(() =>
-      root.render(
-        <MemoryRouter initialEntries={["/timeline/articles/source/entry"]}>
-          <Routes>
-            <Route element={<PersistentReaderLayout />}>
-              <Route path="/events" element={<span>事件列表</span>} />
-              <Route
-                path="/timeline/:timelineId/:feedId/:entryId"
-                element={<span>普通列表</span>}
-              />
-            </Route>
-          </Routes>
-        </MemoryRouter>,
-      ),
-    )
-    const scope = () => JSON.parse(host.querySelector('[data-testid="scope"]')?.textContent ?? "{}")
-    expect(scope()).toMatchObject({ feedId: "source", entryId: "entry" })
-    await act(() => host.querySelector<HTMLAnchorElement>('a[href="/events"]')?.click())
-    expect(scope()).toMatchObject({ pathname: "/events", isCollection: false })
-    expect(scope().entryId).toBeUndefined()
-    await act(() =>
-      host.querySelector<HTMLAnchorElement>('a[href="/timeline/all/collections/pending"]')?.click(),
-    )
-    expect(scope()).toMatchObject({
-      pathname: "/timeline/all/collections/pending",
-      isCollection: true,
-      feedId: "collections",
+const createRouter = (initialPath: string) =>
+  createMemoryRouter(
+    [
+      {
+        path: "/",
+        Component: AppRoot,
+        children: [
+          { path: "discover", Component: () => <p>discover</p> },
+          { path: "timeline/:timelineId/:feedId/:entryId", Component: RouteParamsProbe },
+        ],
+      },
+    ],
+    { initialEntries: [initialPath] },
+  )
+
+const readProbe = (container: HTMLElement, probe: "params" | "selector"): unknown =>
+  JSON.parse(container.querySelector(`[data-probe="${probe}"]`)?.textContent ?? "null")
+
+describe("useRouteParams", () => {
+  let root: Root | null = null
+  let host: HTMLElement | null = null
+
+  const render = async (router: ReturnType<typeof createRouter>) => {
+    const element = document.createElement("div")
+    document.body.append(element)
+    host = element
+    root = createRoot(element)
+    await act(async () => {
+      root?.render(<RouterProvider router={router} />)
+    })
+    return element
+  }
+
+  beforeAll(() => {
+    ;(globalThis as typeof globalThis & { React: typeof React }).React = React
+    ;(
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true
+  })
+
+  afterEach(async () => {
+    await act(async () => {
+      root?.unmount()
+    })
+    host?.remove()
+    root = null
+    host = null
+    setRoute({
+      params: {},
+      searchParams: new URLSearchParams(),
+      location: { pathname: "", search: "", hash: "", state: null, key: "" },
+    })
+  })
+
+  // StableRouterProvider writes the route atom in a layout effect, after the components of the
+  // same commit have rendered. They must still end up with the route of that commit.
+  test("reads the params of a deep URL on the first load", async () => {
+    const container = await render(createRouter("/timeline/pictures/feed-1/pending"))
+
+    expect(readProbe(container, "params")).toEqual({
+      feedId: "feed-1",
       entryId: "pending",
+      view: FeedViewType.Pictures,
+    })
+    expect(readProbe(container, "selector")).toEqual({
+      feedId: "feed-1",
+      view: FeedViewType.Pictures,
+    })
+  })
+
+  test("reads the params after navigating into the timeline from another layout", async () => {
+    const router = createRouter("/discover")
+    const container = await render(router)
+    expect(container.querySelector('[data-probe="params"]')).toBeNull()
+
+    await act(async () => {
+      await router.navigate("/timeline/videos/feed-2/pending")
+    })
+
+    expect(readProbe(container, "params")).toEqual({
+      feedId: "feed-2",
+      entryId: "pending",
+      view: FeedViewType.Videos,
+    })
+    expect(readProbe(container, "selector")).toEqual({
+      feedId: "feed-2",
+      view: FeedViewType.Videos,
     })
   })
 })

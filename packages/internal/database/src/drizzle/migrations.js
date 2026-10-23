@@ -38,7 +38,11 @@ import m0034 from "./0034_curly_darkstar.sql"
 import m0035 from "./0035_last_valeria_richards.sql"
 import m0036 from "./0036_entry_tag_summary.sql"
 import m0037 from "./0037_bored_the_leader.sql"
-import m0038 from "./0038_local_entry_open_stats.sql"
+import m0038 from "./0038_sync_transactions.sql"
+import m0039 from "./0039_sync_meta.sql"
+import m0040 from "./0040_sync_transaction_owner.sql"
+// 本地统计重排到上游迁移之后，旧库会通过幂等 SQL 保留已有记录。
+import m0041 from "./0041_local_entry_open_stats.sql"
 import journal from "./meta/_journal.json"
 
 export default {
@@ -83,5 +87,8 @@ export default {
     m0036,
     m0037,
     m0038,
+    m0039,
+    m0040,
+    m0041,
   },
 }

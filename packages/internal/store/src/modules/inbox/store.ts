@@ -49,7 +49,7 @@ class InboxActions implements Hydratable, Resetable {
     tx.persist(() => {
       return InboxService.upsertMany(inboxes)
     })
-    tx.run()
+    await tx.run()
   }
 
   deleteById(id: string) {
@@ -73,26 +73,70 @@ class InboxActions implements Hydratable, Resetable {
 }
 
 class InboxSyncService {
-  async createInbox({ handle, title }: { handle: string; title: string }) {
-    const newInbox = {
-      id: handle,
-      title,
-      secret: "",
+  private async requestInboxById(handle: string): Promise<InboxSchema> {
+    const { data } = await api().inboxes.get({ handle })
+    return {
+      id: data.id,
+      title: data.title,
+      secret: data.secret,
     }
-    const tx = createTransaction()
-    tx.store(async () => {
-      await inboxActions.upsertManyInSession([newInbox])
-    })
-    tx.request(async () => {
-      await api().inboxes.post({
-        handle,
-        title,
-      })
+  }
+
+  async fetchInboxById(handle: string) {
+    const inbox = await this.requestInboxById(handle)
+
+    await inboxActions.upsertMany([inbox])
+
+    return inbox
+  }
+
+  async fetchOwnedInboxes() {
+    const { data } = await api().inboxes.list()
+    const inboxes = data.map((inbox) => ({
+      id: inbox.id,
+      title: inbox.title,
+      secret: inbox.secret,
+    }))
+
+    await inboxActions.upsertMany(inboxes)
+
+    return inboxes
+  }
+
+  async getInboxSecret(handle: string) {
+    const cachedSecret = get().inboxes[handle]?.secret
+    if (cachedSecret) return cachedSecret
+
+    const inbox = await this.fetchInboxById(handle)
+    if (!inbox.secret) {
+      throw new Error("Inbox secret is unavailable")
+    }
+
+    return inbox.secret
+  }
+
+  async createInbox({ handle, title }: { handle: string; title: string }) {
+    await api().inboxes.post({
+      handle,
+      title,
     })
 
-    tx.persist(() => InboxService.upsertMany([newInbox]))
-    tx.rollback(() => inboxActions.deleteById(handle))
-    await tx.run()
+    let inbox: InboxSchema
+    try {
+      inbox = await this.requestInboxById(handle)
+    } catch (error) {
+      console.error("Failed to fetch the created inbox", error)
+      await inboxActions.upsertMany([
+        {
+          id: handle,
+          title,
+          secret: "",
+        },
+      ])
+      return
+    }
+
+    await inboxActions.upsertMany([inbox])
   }
 
   async updateInbox({ handle, title }: { handle: string; title: string }) {

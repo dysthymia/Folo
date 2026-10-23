@@ -3,6 +3,7 @@ import { useWhoami, whoamiQueryKey } from "@follow/store/user/hooks"
 import { userSyncService } from "@follow/store/user/store"
 import { tracker } from "@follow/tracker"
 import { clearStorage } from "@follow/utils/ns"
+import { FollowAPIError } from "@follow-app/client-sdk"
 import type { FetchError } from "ofetch"
 import { useEffect } from "react"
 
@@ -18,6 +19,7 @@ import {
 import { ipcServices } from "~/lib/client"
 import { clearAuthSessionToken, getAuthSessionToken } from "~/lib/client-session"
 import { defineQuery } from "~/lib/defineQuery"
+import { reloadAtAppRoot } from "~/lib/reload-at-app-root"
 import { clearLocalPersistStoreData } from "~/store/utils/clear"
 
 const sessionCookieRefreshInterval = 1000 * 60 * 60 * 12
@@ -102,7 +104,9 @@ export const useSession = (options?: { enabled?: boolean }) => {
     },
     enabled: options?.enabled ?? true,
     refetchOnMount: true,
-    staleTime: 0,
+    // Start-up fetches the session through the same query, and several components mount this
+    // hook right after. A short window lets them share that result; a login reloads the page.
+    staleTime: 60_000,
     meta: {
       persist: true,
     },
@@ -211,15 +215,24 @@ export const signOut = async () => {
     await tracker.manager.clear()
   }
 
-  window.location.reload()
+  reloadAtAppRoot()
 }
 
 export const deleteUser = async ({ TOTPCode }: { TOTPCode?: string }) => {
   if (!TOTPCode) {
     return
   }
-  await deleteUserFn({
+  const res = await deleteUserFn({
     TOTPCode,
   })
+  // The auth client resolves with the error instead of throwing. Keep the session when the
+  // account was not deleted, and keep the code so the form can tell a wrong TOTP code apart.
+  if (res.error) {
+    throw new FollowAPIError(
+      res.error.message || res.error.statusText,
+      res.error.status,
+      res.error.code ? String(res.error.code) : undefined,
+    )
+  }
   await signOut()
 }

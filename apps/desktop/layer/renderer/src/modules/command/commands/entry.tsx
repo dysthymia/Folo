@@ -1,18 +1,22 @@
+import { getReadonlyRoute } from "@follow/components/atoms/route.js"
 import { getMousePosition } from "@follow/components/hooks/useMouse.js"
 import { FeedViewType } from "@follow/constants"
 import { IN_ELECTRON } from "@follow/shared/constants"
 import { isEntryStarred } from "@follow/store/collection/getter"
 import { collectionSyncService } from "@follow/store/collection/store"
+import { isOnboardingEntryUrl } from "@follow/store/constants/onboarding"
 import { getEntry } from "@follow/store/entry/getter"
 import { entrySyncServices } from "@follow/store/entry/store"
+import { getMarkReadTimeRange } from "@follow/store/entry/utils"
+import { getInboxList } from "@follow/store/inbox/getters"
 import { unreadSyncService } from "@follow/store/unread/store"
 import { cn, resolveUrlWithBase } from "@follow/utils/utils"
 import { useMutation } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
-import { AudioPlayer, getAudioPlayerAtomValue } from "~/atoms/player"
 import { showPopover } from "~/atoms/popover"
+import { getGeneralSettings } from "~/atoms/settings/general"
 import {
   getShowSourceContent,
   toggleShowSourceContent,
@@ -24,15 +28,42 @@ import { navigateEntry } from "~/hooks/biz/useNavigateEntry"
 import { getRouteParams } from "~/hooks/biz/useRouteParams"
 import { copyToClipboard } from "~/lib/clipboard"
 import { exportPageAsPdf } from "~/lib/export"
+import { getEffectiveRouteEntrySortOrder } from "~/modules/entry-column/hooks/entry-sort-order"
+import { getIsPreviewFeed } from "~/modules/entry-column/hooks/useIsPreviewFeed"
 import { markAllByRoute } from "~/modules/entry-column/hooks/useMarkAll"
 import { useGalleryModal } from "~/modules/entry-content/hooks"
-import { playEntryTts } from "~/modules/player/entry-tts"
+import { toggleEntryTts } from "~/modules/player/entry-tts"
 
 import { useRegisterFollowCommand } from "../hooks/use-register-command"
 import type { Command, CommandCategory } from "../types"
 import { COMMAND_ID } from "./id"
 
 const category: CommandCategory = "category.entry"
+const getCurrentEntrySortOrder = () => {
+  const routeParams = getRouteParams()
+  const { timelineSortOrder, unreadOnly } = getGeneralSettings()
+
+  return {
+    routeParams,
+    sortOrder: getEffectiveRouteEntrySortOrder({
+      sortOrder: timelineSortOrder,
+      unreadOnly,
+      view: routeParams.view,
+      listId: routeParams.listId,
+      hasInboxSubscriptions: getInboxList().length > 0,
+      // 原生双流固定倒序，批量已读的上下方必须对应实际显示方向。
+      nativeTimeline:
+        getReadonlyRoute().location.pathname.startsWith("/timeline/") &&
+        !routeParams.isCollection &&
+        !getIsPreviewFeed(routeParams),
+      feedId: routeParams.feedId,
+      inboxId: routeParams.inboxId,
+      isCollection: routeParams.isCollection,
+      isPreview: getIsPreviewFeed(routeParams),
+    }),
+  }
+}
+
 const useCollect = () => {
   const { t } = useTranslation()
   return useMutation({
@@ -122,7 +153,7 @@ export const useRegisterEntryCommands = () => {
           const entry = getEntry(entryId)
           const isStarred = isEntryStarred(entryId)
           if (!entry) {
-            toast.error("Failed to star: entry is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.star"), { duration: 3000 })
             return
           }
 
@@ -141,7 +172,7 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry) {
-            toast.error("Failed to delete: entry is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.delete"), { duration: 3000 })
             return
           }
           deleteInboxEntry.mutate(entry.id)
@@ -155,10 +186,11 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry) {
-            toast.error("Failed to copy link: entry is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.copy_link"), { duration: 3000 })
             return
           }
-          if (!entry.url) return
+          // The onboarding entries link to an internal folo:// address nobody else can open
+          if (!entry.url || isOnboardingEntryUrl(entry.url)) return
           copyToClipboard(entry.url)
           toast(t("entry_actions.copied_notify", { which: t("words.link") }), {
             duration: 1000,
@@ -174,12 +206,12 @@ export const useRegisterEntryCommands = () => {
           const entry = getEntry(entryId)
 
           if (!entry) {
-            toast.error("Failed to export as pdf: entry is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.export_as_pdf"), { duration: 3000 })
             return
           }
 
           void exportPageAsPdf({ title: entry.title || entry.url || undefined }).catch(() => {
-            toast.error("Failed to export as pdf", { duration: 3000 })
+            toast.error(t("entry_actions.failed_to_export_as_pdf"), { duration: 3000 })
           })
         },
       },
@@ -191,7 +223,7 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry) {
-            toast.error("Failed to copy link: entry is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.copy_title"), { duration: 3000 })
             return
           }
           if (!entry.title) return
@@ -211,9 +243,10 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry || !entry.url) {
-            toast.error("Failed to open in browser: url is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.open_in_browser"), { duration: 3000 })
             return
           }
+          if (isOnboardingEntryUrl(entry.url)) return
           void entrySyncServices.recordEntryOpen(entry.id, "external")
           window.open(entry.url, "_blank")
         },
@@ -230,9 +263,11 @@ export const useRegisterEntryCommands = () => {
           if (!getShowSourceContent()) {
             const entry = getEntry(entryId)
             if (!entry || !entry.url) {
-              toast.error("Failed to view source content: url is not available", { duration: 3000 })
+              toast.error(t("entry_actions.unavailable.view_source_content"), { duration: 3000 })
               return
             }
+            // The onboarding entries have no source page, only an internal folo:// address
+            if (isOnboardingEntryUrl(entry.url)) return
             const routeParams = getRouteParams()
             const viewPreviewInModal = [
               FeedViewType.SocialMedia,
@@ -262,9 +297,10 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry || !entry.url) {
-            toast.error("Failed to share: url is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.share"), { duration: 3000 })
             return
           }
+          if (isOnboardingEntryUrl(entry.url)) return
 
           const xy = getMousePosition()
           showPopover(
@@ -281,10 +317,15 @@ export const useRegisterEntryCommands = () => {
         label: t("entry_actions.mark_above_as_read"),
         category,
         run: ({ publishedAt }: { publishedAt: string }) => {
-          return markAllByRoute(getRouteParams(), {
-            startTime: new Date(publishedAt).getTime() + 1,
-            endTime: Date.now(),
-          })
+          const { routeParams, sortOrder } = getCurrentEntrySortOrder()
+          return markAllByRoute(
+            routeParams,
+            getMarkReadTimeRange({
+              publishedAt,
+              position: "above",
+              sortOrder,
+            }),
+          )
         },
       },
       {
@@ -297,7 +338,7 @@ export const useRegisterEntryCommands = () => {
         run: ({ entryId }) => {
           const entry = getEntry(entryId)
           if (!entry) {
-            toast.error("Failed to mark as unread: feed is not available", { duration: 3000 })
+            toast.error(t("entry_actions.unavailable.toggle_read"), { duration: 3000 })
             return
           }
           if (entry.read) {
@@ -312,10 +353,15 @@ export const useRegisterEntryCommands = () => {
         label: t("entry_actions.mark_below_as_read"),
         category,
         run: ({ publishedAt }: { publishedAt: string }) => {
-          return markAllByRoute(getRouteParams(), {
-            startTime: 1,
-            endTime: new Date(publishedAt).getTime() - 1,
-          })
+          const { routeParams, sortOrder } = getCurrentEntrySortOrder()
+          return markAllByRoute(
+            routeParams,
+            getMarkReadTimeRange({
+              publishedAt,
+              position: "below",
+              sortOrder,
+            }),
+          )
         },
       },
       {
@@ -339,12 +385,7 @@ export const useRegisterEntryCommands = () => {
         category,
         icon: <i className="i-mgc-voice-cute-re" />,
         run: async ({ entryId }) => {
-          if (getAudioPlayerAtomValue().entryId === entryId) {
-            AudioPlayer.togglePlayAndPause()
-            return
-          }
-
-          await playEntryTts(entryId, {
+          await toggleEntryTts(entryId, {
             toastTitle: t("entry_content.header.play_tts"),
           })
         },

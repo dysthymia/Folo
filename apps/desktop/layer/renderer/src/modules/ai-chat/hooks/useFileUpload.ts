@@ -1,6 +1,9 @@
 import { nanoid } from "nanoid"
 import { useCallback } from "react"
+import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+
+import { getFetchErrorMessage } from "~/lib/error-parser"
 
 import { useChatBlockActions } from "../store/hooks"
 import type { FileAttachment } from "../store/types"
@@ -54,10 +57,11 @@ export function useFileUpload(
   const {
     showSuccessToast = false,
     showErrorToast = true,
-    successMessage = "File uploaded successfully",
-    errorMessagePrefix = "File upload error",
+    successMessage,
+    errorMessagePrefix,
     ...processOptions
   } = options
+  const { t } = useTranslation("ai")
 
   const blockActions = useChatBlockActions()
 
@@ -102,7 +106,11 @@ export function useFileUpload(
           blockActions.updateFileAttachment(initialFileAttachment.id, finalAttachment)
 
           if (showSuccessToast) {
-            toast.success(`${successMessage}: ${file.name}`)
+            toast.success(
+              successMessage
+                ? `${successMessage}: ${file.name}`
+                : t("chat.file.upload.success", { name: file.name }),
+            )
           }
 
           // Return result with consistent ID
@@ -115,14 +123,18 @@ export function useFileUpload(
           const errorAttachment: FileAttachment = {
             ...initialFileAttachment,
             uploadStatus: "error",
-            errorMessage: result.error || "Upload failed",
+            errorMessage: result.error || t("chat.file.upload_failed"),
             uploadProgress: undefined,
           }
 
           blockActions.updateFileAttachment(initialFileAttachment.id, errorAttachment)
 
           if (showErrorToast && result.error) {
-            toast.error(`${errorMessagePrefix}: ${result.error}`)
+            toast.error(
+              errorMessagePrefix
+                ? `${errorMessagePrefix}: ${result.error}`
+                : t("chat.file.upload.error", { error: result.error }),
+            )
           }
 
           return {
@@ -131,7 +143,10 @@ export function useFileUpload(
           }
         }
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : "Unknown error"
+        const errorMessage =
+          error instanceof Error
+            ? getFetchErrorMessage(error)
+            : t("error_screen.unknown", { ns: "common" })
 
         // Update to error state
         const errorAttachment: FileAttachment = {
@@ -144,7 +159,11 @@ export function useFileUpload(
         blockActions.updateFileAttachment(initialFileAttachment.id, errorAttachment)
 
         if (showErrorToast) {
-          toast.error(`${errorMessagePrefix}: ${errorMessage}`)
+          toast.error(
+            errorMessagePrefix
+              ? `${errorMessagePrefix}: ${errorMessage}`
+              : t("chat.file.upload.error", { error: errorMessage }),
+          )
         }
 
         console.error("File upload failed:", error)
@@ -163,6 +182,7 @@ export function useFileUpload(
       showErrorToast,
       successMessage,
       errorMessagePrefix,
+      t,
     ],
   )
 

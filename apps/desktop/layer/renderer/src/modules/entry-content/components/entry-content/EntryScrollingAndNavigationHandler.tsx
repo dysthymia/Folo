@@ -11,6 +11,7 @@ import type { JSAnimation } from "motion/react"
 import { AnimatePresence, m } from "motion/react"
 import * as React from "react"
 import { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { useEventCallback } from "usehooks-ts"
 
 import { FocusablePresets } from "~/components/common/Focusable"
@@ -18,14 +19,41 @@ import { COMMAND_ID } from "~/modules/command/commands/id"
 import { useCommandBinding } from "~/modules/command/hooks/use-command-binding"
 
 export const EntryScrollingAndNavigationHandler = ({
+  entryId,
   scrollerRef,
   scrollAnimationRef,
 }: {
+  entryId: string
   scrollerRef: React.RefObject<HTMLDivElement | null>
   scrollAnimationRef: React.RefObject<JSAnimation<any> | null>
 }) => {
+  const { t } = useTranslation()
   const isAlreadyScrolledBottomRef = useRef(false)
   const [showKeepScrollingPanel, setShowKeepScrollingPanel] = useState(false)
+  const resetScrolledBottom = useEventCallback(() => {
+    isAlreadyScrolledBottomRef.current = false
+    setShowKeepScrollingPanel(false)
+  })
+
+  // The "keep pressing for the next entry" state belongs to one entry
+  useEffect(() => {
+    resetScrolledBottom()
+  }, [entryId, resetScrolledBottom])
+
+  useEffect(() => {
+    const $scroller = scrollerRef.current
+    if (!$scroller) return
+
+    const handler = () => {
+      if (!isAlreadyScrolledBottomRef.current) return
+      const { scrollTop, scrollHeight, clientHeight } = $scroller
+      if (scrollHeight - scrollTop - clientHeight >= 2) {
+        resetScrolledBottom()
+      }
+    }
+    $scroller.addEventListener("scroll", handler, { passive: true })
+    return () => $scroller.removeEventListener("scroll", handler)
+  }, [entryId, resetScrolledBottom, scrollerRef])
 
   const when = useGlobalFocusableScopeSelector(FocusablePresets.isEntryRender)
 
@@ -95,7 +123,8 @@ export const EntryScrollingAndNavigationHandler = ({
         cleanupScrollAnimation()
         const targetScroll = Math.max(0, currentScroll - delta)
         smoothScrollTo(targetScroll, $scroller)
-        checkScrollBottom($scroller)
+        // Scrolling up leaves the bottom, it never moves to the next entry
+        resetScrolledBottom()
       }),
 
       EventBus.subscribe(COMMAND_ID.entryRender.scrollDown, () => {
@@ -131,7 +160,14 @@ export const EntryScrollingAndNavigationHandler = ({
         },
       ),
     )
-  }, [highlightBoundary, navigateToNext, scrollAnimationRef, scrollerRef, smoothScrollTo])
+  }, [
+    highlightBoundary,
+    navigateToNext,
+    resetScrolledBottom,
+    scrollAnimationRef,
+    scrollerRef,
+    smoothScrollTo,
+  ])
 
   return (
     <AnimatePresence>
@@ -156,9 +192,9 @@ export const EntryScrollingAndNavigationHandler = ({
           >
             <i className="i-mingcute-arrow-down-fill mr-1 size-5 text-text/90" />
             <span className="text-left text-[13px] font-medium text-text/90">
-              Already scrolled to the bottom.
+              {t("entry_content.scrolled_to_bottom")}
               <br />
-              Keep pressing to jump to the next article
+              {t("entry_content.keep_pressing_for_next")}
             </span>
           </button>
         </m.div>

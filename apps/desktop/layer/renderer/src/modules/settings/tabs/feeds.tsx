@@ -95,9 +95,12 @@ export const SettingFeeds = () => {
   )
 }
 
+// 保留处理标签和阅读统计；窄表隐藏日期以给订阅名称留出空间。
+const DATE_COLUMN_CLASSNAME = "@max-[1100px]:hidden"
 const GRID_COLS_WITH_TAGS_CLASSNAME =
-  "grid-cols-[30px_minmax(160px,1fr)_96px_minmax(120px,160px)_130px_58px_58px_66px_66px_66px]"
-const GRID_COLS_CLASSNAME = "grid-cols-[30px_minmax(160px,1fr)_96px_130px_58px_58px_66px_66px_66px]"
+  "grid-cols-[30px_minmax(160px,1fr)_96px_minmax(120px,160px)_130px_58px_58px_66px_66px_66px] @max-[1100px]:grid-cols-[30px_minmax(160px,1fr)_96px_minmax(120px,160px)_58px_58px_66px_66px_66px]"
+const GRID_COLS_CLASSNAME =
+  "grid-cols-[30px_minmax(160px,1fr)_96px_130px_58px_58px_66px_66px_66px] @max-[1100px]:grid-cols-[30px_minmax(160px,1fr)_96px_58px_58px_66px_66px_66px]"
 const OPEN_RATE_SORT_FIELDS = new Set<SortField>(["dayOpenRate", "weekOpenRate", "monthOpenRate"])
 
 const SubscriptionFeedsSection = () => {
@@ -308,7 +311,7 @@ const SubscriptionFeedsSection = () => {
       )}
 
       {filteredFeeds.length > 0 && (
-        <div className="mt-6 overflow-x-auto pb-2">
+        <div className="mt-6 overflow-x-auto pb-2 @container">
           <div className="min-w-[1000px] space-y-0.5">
             {/* Header - Sticky */}
             <div
@@ -344,7 +347,10 @@ const SubscriptionFeedsSection = () => {
                 <div className="text-left">{t("feeds.tableHeaders.processing_tags")}</div>
               )}
               <button
-                className="text-center transition-colors hover:text-text"
+                className={clsx(
+                  "text-center transition-colors hover:text-text",
+                  DATE_COLUMN_CLASSNAME,
+                )}
                 onClick={() => handleSort("date")}
                 type="button"
               >
@@ -758,6 +764,7 @@ const FeedListItem = memo(
     const subscription = useSubscriptionByFeedId(id)
     const feed = useFeedById(id)
     const isCustomizeName = subscription?.title && feed?.title !== subscription?.title
+    const { t } = useTranslation("settings")
     const { t: tCommon } = useTranslation("common")
     const isRSSHub = Boolean(feed?.url?.startsWith("rsshub://"))
 
@@ -799,7 +806,7 @@ const FeedListItem = memo(
                   </TooltipTrigger>
                   <TooltipPortal>
                     <TooltipContent>
-                      {feed?.errorMessage || "Feed has encountered an error"}
+                      {feed?.errorMessage || t("feeds.tableRow.errorFallback")}
                     </TooltipContent>
                   </TooltipPortal>
                 </Tooltip>
@@ -817,7 +824,7 @@ const FeedListItem = memo(
                     </div>
                   </TooltipTrigger>
                   <TooltipPortal>
-                    <TooltipContent>This feed is powered by RSSHub</TooltipContent>
+                    <TooltipContent>{tCommon("feed.powered_by_rsshub")}</TooltipContent>
                   </TooltipPortal>
                 </Tooltip>
               )}
@@ -851,7 +858,9 @@ const FeedListItem = memo(
           </div>
         )}
         {!!subscription.createdAt && (
-          <div className="whitespace-nowrap pr-1 text-center text-xs">
+          <div
+            className={clsx("whitespace-nowrap pr-1 text-center text-xs", DATE_COLUMN_CLASSNAME)}
+          >
             <RelativeDay date={new Date(subscription.createdAt)} />
           </div>
         )}
@@ -867,7 +876,7 @@ const FeedListItem = memo(
                 </div>
               </TooltipTrigger>
               <TooltipPortal>
-                <TooltipContent>Subscription Count</TooltipContent>
+                <TooltipContent>{t("feeds.tableRow.subscriptionCount")}</TooltipContent>
               </TooltipPortal>
             </Tooltip>
           ) : (
@@ -882,13 +891,14 @@ const FeedListItem = memo(
                   <div className="flex items-center justify-center gap-0.5 text-text-secondary">
                     <i className="i-mgc-safety-certificate-cute-re text-[10px]" />
                     <span className="text-[11px] tabular-nums">
-                      {Math.round(feed.updatesPerWeek)}
-                      {"/w"}
+                      {t("feeds.tableRow.updatesPerWeekValue", {
+                        value: Math.round(feed.updatesPerWeek),
+                      })}
                     </span>
                   </div>
                 </TooltipTrigger>
                 <TooltipPortal>
-                  <TooltipContent>Updates Per Week</TooltipContent>
+                  <TooltipContent>{t("feeds.tableRow.updatesPerWeek")}</TooltipContent>
                 </TooltipPortal>
               </Tooltip>
               {feed.latestEntryPublishedAt && (
@@ -899,7 +909,7 @@ const FeedListItem = memo(
                       <RelativeDay date={new Date(feed.latestEntryPublishedAt)} />
                     </div>
                   </TooltipTrigger>
-                  <TooltipContent>Latest Entry Published</TooltipContent>
+                  <TooltipContent>{t("feeds.tableRow.latestEntryPublished")}</TooltipContent>
                 </Tooltip>
               )}
             </div>
