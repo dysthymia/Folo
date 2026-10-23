@@ -1549,6 +1549,97 @@ describe("私人事件综述投影", () => {
     expect(generatedPage(store, { search: "AI 发布" }).total).toBe(1)
   })
 
+  it("综述投影只点查成员正文，库存计数与混合模式一致且不受阅读筛选影响", () => {
+    const store = fixture()
+    publishRelease(store)
+    const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+    const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+    const id = createAggregateStory(store, [first, second], "AI 发布")
+    publishDecision(store, entry("hidden", "2026-01-03T00:00:00.000Z"), { status: "hide" })
+    publishDecision(store, entry("context", "2026-01-04T00:00:00.000Z"), {
+      status: "needs_context",
+    })
+    publishInput(store, entry("unrelated", "2026-01-05T00:00:00.000Z"))
+    store.saveEntry(entry("pending", "2026-01-06T00:00:00.000Z"))
+    store.saveEntry(entry("failed", "2026-01-07T00:00:00.000Z"))
+    const failed = store.automation.assign(store.automation.inputs().at(-1)!.seq)
+    store.processingState.fail(failed, "model_failed")
+    const baseline = generatedPage(store, { mode: "smart" }).counts
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const published = vi.spyOn(store.processingState, "published")
+    const page = generatedPage(store)
+    expect(page.items.map((item) => item.id)).toEqual([id])
+    expect(page.counts).toEqual(baseline)
+    expect(page.counts).toMatchObject({
+      inputs: 7,
+      uncovered: 1,
+      hidden: 1,
+      folded: 2,
+      pending: 1,
+      failed: 1,
+      needsContext: 1,
+    })
+    // 成员之外的原文和决定都不属于综述正文查询范围，空态诊断也不能扩大读取范围。
+    expect(published).toHaveBeenLastCalledWith([first.seq, second.seq])
+    expect(inputs.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+    expect([...new Set(inputs.mock.calls.flatMap(([seqs]) => seqs ?? []))]).toEqual([
+      first.seq,
+      second.seq,
+    ])
+    published.mockClear()
+    const empty = generatedPage(store, {
+      search: "不存在",
+      unreadOnly: true,
+      topic: "无主题",
+      since: "2030-01-01T00:00:00.000Z",
+    })
+    expect(empty.items).toEqual([])
+    expect(empty.counts).toEqual(baseline)
+    expect(published).toHaveBeenCalledTimes(1)
+    expect(generatedPage(store, { sourceKeys: [source.key] }).counts.folded).toBe(0)
+    expect(generatedPage(store, { sourceKeys: ["feed/missing"] }).counts.inputs).toBe(0)
+  })
+
+  it("综述库存折叠保留现有去重关系、人工恢复与已读参考的口径", () => {
+    for (const makeFixture of [() => containmentFixture(false), readReferenceFixture]) {
+      const { store } = makeFixture()
+      const baseline = generatedPage(store, { mode: "smart" }).counts
+      const inputs = vi.spyOn(store.automation, "inputs")
+      const published = vi.spyOn(store.processingState, "published")
+      expect(generatedPage(store).counts).toEqual(baseline)
+      expect(inputs.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+      expect(published.mock.calls.every(([seqs]) => Array.isArray(seqs))).toBe(true)
+      inputs.mockRestore()
+      published.mockRestore()
+    }
+    const { store, b } = containmentFixture(false)
+    store.processingState.setOverride(b.seq, "restore", 0)
+    expect(generatedPage(store).counts).toEqual(generatedPage(store, { mode: "smart" }).counts)
+    expect(generatedPage(store).counts.folded).toBe(0)
+  })
+
+  it.each(["withdrawn", "source", "generation", "content"] as const)(
+    "综述轻量投影仍尊重成员失效：%s",
+    (change) => {
+      const store = fixture()
+      publishRelease(store)
+      const first = publishInput(store, entry("one", "2026-01-01T00:00:00.000Z"))
+      const second = publishInput(store, entry("two", "2026-01-02T00:00:00.000Z"))
+      const id = createAggregateStory(store, [first, second], "事件")
+      const frozen = generatedPage(store)
+      expect(frozen.items.map((item) => item.id)).toEqual([id])
+      if (change === "withdrawn") store.stories.withdrawMaterial(first.seq, "撤回")
+      if (change === "source") store.replaceSources([])
+      if (change === "generation") store.automation.invalidateSources([source.key])
+      if (change === "content")
+        store.saveEntry({ ...entry("one", "2026-01-01T00:00:00.000Z"), content: "新正文" })
+      // 冻结快照与主动刷新共用原来的安全边界，不能继续暴露已撤回或换代的综述。
+      if (change !== "generation")
+        expect(generatedPage(store, { snapshotId: frozen.snapshotId }).items).toEqual([])
+      expect(generatedPage(store, { refresh: true }).items).toEqual([])
+    },
+  )
+
   it("服务端统一排序分页，后台新结果只提示而不插入冻结列表", () => {
     const store = fixture()
     publishRelease(store)

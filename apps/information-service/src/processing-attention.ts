@@ -8,7 +8,16 @@ import type {
 } from "@follow/information-core"
 import { matchConditions, semanticEntityId, semanticTagDefinition } from "@follow/information-core"
 
-import type { ProcessingDecision } from "./processing-decision"
+import type { EntrySemanticProfile, ProcessingDecision } from "./processing-decision"
+
+// 列表关注计算只依赖上下文和证据索引，不要求载入完整决定或原文正文。
+export type ProcessingAttentionDecision = Pick<ProcessingDecision, "context"> & {
+  semanticProfile?: Pick<
+    EntrySemanticProfile,
+    "evidence" | "substantiveContribution" | "materialCoverage" | "semanticAssessmentCoverage"
+  > &
+    Partial<Pick<EntrySemanticProfile, "assessments" | "entities">>
+}
 
 const substantiveTags = new Set([
   "event:security_incident",
@@ -49,7 +58,7 @@ const hasEvidence = (ids: readonly string[], evidence: Record<string, string>) =
 // 只读当前客观证据和用户偏好；修改关注配置不需要新增语义请求或改动读态。
 export function processingAttention(options: {
   config: RuleSet | null
-  decision: ProcessingDecision
+  decision: ProcessingAttentionDecision
   assessments?: readonly TagAssessment[]
   entities?: readonly SemanticEntity[]
   now?: number

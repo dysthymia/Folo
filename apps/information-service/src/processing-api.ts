@@ -18,6 +18,7 @@ import { AutomationError } from "./automation-store"
 import type { SourceEntry } from "./folo"
 import type { GeneratedFeedQuery } from "./generated-feeds"
 import { generatedFeedQuerySchema } from "./generated-feeds"
+import type { ProcessingAttentionDecision } from "./processing-attention"
 import { mergeAttention, processingAttention } from "./processing-attention"
 import { processingRuleInput } from "./processing-context"
 import type { ProcessingDecision } from "./processing-decision"
@@ -234,7 +235,7 @@ function currentAttentionConfig(store: Store): RuleSet | null {
   return latest ? store.automation.release(latest.version) : null
 }
 function decisionSignals(
-  decision: ProcessingDecision,
+  decision: ProcessingAttentionDecision & Pick<ProcessingDecision, "pendingPolicyFields">,
   config: RuleSet | null,
   assessments?: readonly TagAssessment[],
   entities?: readonly SemanticEntity[],
@@ -548,65 +549,68 @@ export function processingApi(
     )
     const semanticEntities = store.semantics.presentEntitiesByInput()
     // 时间线只轮询身份和标签索引，正文与完整证据在用户点击后才读取。
-    const entries = store.processingState.published().flatMap(({ input, decision, decisionId }) => {
-      if (
-        input.releaseVersion === null ||
-        !availableSources.has(input.sourceKey) ||
-        store.stories.isMaterialWithdrawn(input.seq)
-      )
-        return []
-      if (!releases.has(input.releaseVersion))
-        releases.set(input.releaseVersion, store.automation.release(input.releaseVersion))
-      const config = releases.get(input.releaseVersion)
-      if (!config) return []
-      const instructions = compileInstructions(config, decision.context)
-      // 处理状态取执行时实际命中的 AI 规则；仅摘要变换才暴露可打开的 AI 结果。
-      if (
-        !instructions.matched.some((rule) => ruleUsesAI(rule) || ruleRequiresSemantics(rule)) &&
-        !decision.semanticProfile &&
-        !attentionConfig?.rules.some(
-          (rule) => rule.enabled && rule.actions.some((action) => action.type === "attention"),
+    const entries = store.processingState
+      .publishedEntryResults()
+      .flatMap(({ input, decision, decisionId }) => {
+        if (
+          input.releaseVersion === null ||
+          !availableSources.has(input.sourceKey) ||
+          store.stories.isMaterialWithdrawn(input.seq)
         )
-      )
-        return []
-      return [
-        {
-          itemId: input.itemId,
-          sourceKey: input.sourceKey,
-          sourceId: input.body.feedId
-            ? `${input.body.feedKind ?? "feed"}/${input.body.feedId}`
-            : /^(?:feed|inbox)\//u.test(decision.context.source_id ?? "")
-              ? decision.context.source_id
-              : /^(?:feed|inbox)\//u.test(input.sourceKey)
-                ? input.sourceKey
-                : null,
-          inputSeq: input.seq,
-          decisionId,
-          contentVersion: input.contentVersion,
-          releaseVersion: input.releaseVersion,
-          ...decisionSignals(
-            decision,
-            attentionConfig,
-            semanticAssessments.get(input.seq),
-            semanticEntities.get(input.seq),
-          ),
-          ...(semanticTags.has(input.seq) ? { semanticTags: semanticTags.get(input.seq)! } : {}),
-          ...(semanticAssessments.has(input.seq)
-            ? { semanticAssessments: semanticAssessments.get(input.seq)! }
-            : {}),
-          ...(semanticEntities.has(input.seq)
-            ? { semanticEntities: semanticEntities.get(input.seq)! }
-            : {}),
-          hasResult:
-            !!decision.semanticProfile ||
-            (!!decision.summary.trim() && instructions.transformations.length > 0) ||
-            !!decision.pendingPolicyFields?.length ||
-            !!attentionConfig?.rules.some(
-              (rule) => rule.enabled && rule.actions.some((action) => action.type === "attention"),
+          return []
+        if (!releases.has(input.releaseVersion))
+          releases.set(input.releaseVersion, store.automation.release(input.releaseVersion))
+        const config = releases.get(input.releaseVersion)
+        if (!config) return []
+        const instructions = compileInstructions(config, decision.context)
+        // 处理状态取执行时实际命中的 AI 规则；仅摘要变换才暴露可打开的 AI 结果。
+        if (
+          !instructions.matched.some((rule) => ruleUsesAI(rule) || ruleRequiresSemantics(rule)) &&
+          !decision.hasSemanticProfile &&
+          !attentionConfig?.rules.some(
+            (rule) => rule.enabled && rule.actions.some((action) => action.type === "attention"),
+          )
+        )
+          return []
+        return [
+          {
+            itemId: input.itemId,
+            sourceKey: input.sourceKey,
+            sourceId: input.body.feedId
+              ? `${input.body.feedKind ?? "feed"}/${input.body.feedId}`
+              : /^(?:feed|inbox)\//u.test(decision.context.source_id ?? "")
+                ? decision.context.source_id
+                : /^(?:feed|inbox)\//u.test(input.sourceKey)
+                  ? input.sourceKey
+                  : null,
+            inputSeq: input.seq,
+            decisionId,
+            contentVersion: input.contentVersion,
+            releaseVersion: input.releaseVersion,
+            ...decisionSignals(
+              decision,
+              attentionConfig,
+              semanticAssessments.get(input.seq),
+              semanticEntities.get(input.seq),
             ),
-        },
-      ]
-    })
+            ...(semanticTags.has(input.seq) ? { semanticTags: semanticTags.get(input.seq)! } : {}),
+            ...(semanticAssessments.has(input.seq)
+              ? { semanticAssessments: semanticAssessments.get(input.seq)! }
+              : {}),
+            ...(semanticEntities.has(input.seq)
+              ? { semanticEntities: semanticEntities.get(input.seq)! }
+              : {}),
+            hasResult:
+              decision.hasSemanticProfile ||
+              (decision.hasSummary && instructions.transformations.length > 0) ||
+              !!decision.pendingPolicyFields?.length ||
+              !!attentionConfig?.rules.some(
+                (rule) =>
+                  rule.enabled && rule.actions.some((action) => action.type === "attention"),
+              ),
+          },
+        ]
+      })
     return {
       processed: entries.map(({ itemId, sourceKey, sourceId }) => ({
         itemId,

@@ -682,6 +682,8 @@ export class ProcessingReadingStore {
       overrides: Map<number, ReturnType<ProcessingStateStore["overrides"]>[number]>
     },
   ): GeneratedReaderProjection {
+    // 综述列表只需要成员正文，不能为了最后被丢弃的原文行扫描整个材料库。
+    if (query.mode === "stories") return this.computeGeneratedStoriesProjection(query)
     const ownerId = this.requireOwner()
     // 空态库存只改变阅读筛选，复用当前请求的原文和决定，避免递归重扫同一批数据。
     const sourceByKey =
@@ -736,29 +738,7 @@ export class ProcessingReadingStore {
         const published = allDecisions.get(member.inputSeq)
         return published ? [published] : []
       })
-      const status = this.stories.readStatus(story.id, ownerId)
-      // 材料数由服务器按原文身份计数，同一原帖跨订阅上下文不会重复计数。
-      const materialCount = new Set(members.map((item) => contentIdentity(item.input.body))).size
-      const item: GeneratedReaderItem = {
-        kind: "story",
-        origin: "generated",
-        generatedFeedId: GENERATED_EVENTS_FEED_ID,
-        id: story.id,
-        storyId: story.id,
-        revision: revision.revision,
-        substantiveRevision: revision.substantiveRevision,
-        title: revision.title,
-        summary: revision.body,
-        publishedAt: story.createdAt,
-        updatedAt: story.updatedAt,
-        read: !status.unread,
-        collected: this.stories.isCollected(story.id, ownerId),
-        collectedAt: this.stories.collectedAt(story.id, ownerId),
-        hasImportantUpdate: status.unread && status.readSubstantiveRevision > 0,
-        materialCount,
-        topics: [...new Set(members.flatMap((item) => item.decision.labels))].sort(),
-        sourceKeys: [...new Set(members.map((item) => item.input.sourceKey))].sort(),
-      }
+      const item = this.generatedStoryItem(story, revision, members, ownerId)
       for (const member of members)
         storyIdsBySeq.set(member.input.seq, [
           ...(storyIdsBySeq.get(member.input.seq) ?? []),
@@ -929,9 +909,226 @@ export class ProcessingReadingStore {
       return { items, reservoir: items, counts }
     }
     return {
-      items: (query.mode === "stories" ? storyItems : [...storyItems, ...entries]).sort(compare),
-      reservoir: (query.mode === "stories" ? storyItems : reservoir).sort(compare),
+      items: [...storyItems, ...entries].sort(compare),
+      reservoir: reservoir.sort(compare),
       counts,
+    }
+  }
+
+  // 综述与混合阅读复用同一个展示模型，材料身份和读态口径保持一致。
+  private generatedStoryItem(
+    story: Story,
+    revision: StoryRevision,
+    members: PublishedDecision[],
+    ownerId: string,
+  ): GeneratedReaderItem {
+    const status = this.stories.readStatus(story.id, ownerId)
+    // 材料数由服务器按原文身份计数，同一原帖跨订阅上下文不会重复计数。
+    const materialCount = new Set(members.map((item) => contentIdentity(item.input.body))).size
+    return {
+      kind: "story",
+      origin: "generated",
+      generatedFeedId: GENERATED_EVENTS_FEED_ID,
+      id: story.id,
+      storyId: story.id,
+      revision: revision.revision,
+      substantiveRevision: revision.substantiveRevision,
+      title: revision.title,
+      summary: revision.body,
+      publishedAt: story.createdAt,
+      updatedAt: story.updatedAt,
+      read: !status.unread,
+      collected: this.stories.isCollected(story.id, ownerId),
+      collectedAt: this.stories.collectedAt(story.id, ownerId),
+      hasImportantUpdate: status.unread && status.readSubstantiveRevision > 0,
+      materialCount,
+      topics: [...new Set(members.flatMap((item) => item.decision.labels))].sort(),
+      sourceKeys: [...new Set(members.map((item) => item.input.sourceKey))].sort(),
+    }
+  }
+
+  // 原文库存只读轻量发布投影；仅综述和已有去重关系涉及的材料按序号读取正文。
+  private computeGeneratedStoriesProjection(query: GeneratedFeedScope): GeneratedReaderProjection {
+    const ownerId = this.requireOwner()
+    const sourceByKey = new Map(
+      this.db
+        .prepare("SELECT body FROM sources WHERE active=1")
+        .all()
+        .map((row) => {
+          const source = JSON.parse(String(row.body)) as Source
+          return [source.key, source] as const
+        }),
+    )
+    const availability = new Map<string, boolean>()
+    const scoped = (sourceKey: string) => {
+      if (sourceKey.startsWith("generated:")) return false
+      if (query.sourceKeys && !query.sourceKeys.includes(sourceKey)) return false
+      const source = sourceByKey.get(sourceKey)
+      if (
+        query.category &&
+        (!source ||
+          (query.category.view !== "all" && source.view !== query.category.view) ||
+          source.category !== query.category.name)
+      )
+        return false
+      if (
+        !query.sourceKeys &&
+        !query.category &&
+        typeof query.view === "number" &&
+        (!source || source.view !== query.view)
+      )
+        return false
+      if (!availability.has(sourceKey)) availability.set(sourceKey, this.sourceAvailable(sourceKey))
+      return availability.get(sourceKey)!
+    }
+    const overrides = new Map(this.processingState.overrides().map((item) => [item.inputSeq, item]))
+    const inputs = this.db
+      .prepare(
+        `
+      SELECT inputs.seq,inputs.source_key,inputs.status,inputs.release_version,
+        decisions.id AS valid_decision_id,status.body AS summary
+      FROM processing_inputs inputs
+      LEFT JOIN entry_decisions decisions ON inputs.status='succeeded'
+        AND decisions.id=inputs.decision_id AND decisions.generation=inputs.generation
+        AND decisions.release_version=inputs.release_version
+      LEFT JOIN entry_decision_status status ON status.decision_id=decisions.id AND status.input_seq=inputs.seq
+        AND status.generation=inputs.generation AND status.release_version=inputs.release_version
+      WHERE inputs.current=1
+    `,
+      )
+      .all()
+      .flatMap((row) => {
+        const sourceKey = String(row.source_key)
+        if (!scoped(sourceKey)) return []
+        const summary = row.summary
+          ? (JSON.parse(String(row.summary)) as {
+              status: ProcessingDecision["status"]
+              resultIndex?: {
+                version: number
+                supportedSchema: boolean
+                policy: PresentationPolicy
+              }
+            })
+          : null
+        // 与时间线结果索引一样，旧投影须显式重建，不能回退到全量解析正文。
+        if (
+          row.valid_decision_id !== null &&
+          (summary?.resultIndex?.version !== 1 ||
+            (summary.resultIndex.supportedSchema && !summary.resultIndex.policy))
+        )
+          throw new Error("entry_result_projection_not_ready")
+        return [
+          {
+            seq: Number(row.seq),
+            status: String(row.status),
+            releaseVersion: row.release_version,
+            decision:
+              row.valid_decision_id !== null && summary?.resultIndex?.supportedSchema
+                ? { status: summary.status, policy: summary.resultIndex.policy }
+                : undefined,
+          },
+        ]
+      })
+    const scopedSeqs = new Set(inputs.map((input) => input.seq))
+    // resolveLink 仍负责成员撤回、排除、正文版本和发布代际失效，保留原来的安全边界。
+    const linkedStories = this.stories.list().flatMap((story) => {
+      const link = this.stories.resolveLink(story.id)
+      return link.kind === "current" &&
+        link.revision.members.some((member) => scopedSeqs.has(member.inputSeq))
+        ? [link]
+        : []
+    })
+    const preserveSourceEntries = query.sourceKeys?.length === 1 && !query.category
+    const latest = this.automation.releases()[0]
+    const fingerprints =
+      preserveSourceEntries || !latest
+        ? []
+        : activeDedupeActions(this.automation.release(latest.version)).map(
+            (action) => action.fingerprint,
+          )
+    const dedupeSeqs = fingerprints.length
+      ? this.db
+          .prepare(
+            `
+      SELECT keep_input_seq,hide_input_seq FROM processing_dedupe_decisions
+      WHERE config_fingerprint IN (SELECT value FROM json_each(?))
+    `,
+          )
+          .all(JSON.stringify(fingerprints))
+          .flatMap((row) =>
+            [Number(row.keep_input_seq), Number(row.hide_input_seq)].filter((seq) => seq > 0),
+          )
+      : []
+    const memberSeqs = linkedStories.flatMap(({ revision }) =>
+      revision.members.map((member) => member.inputSeq),
+    )
+    const detailSeqs = [...new Set([...memberSeqs, ...dedupeSeqs])]
+    const decisions = new Map(
+      this.processingState.published(detailSeqs).map((item) => [item.input.seq, item]),
+    )
+    const storyItems: GeneratedReaderItem[] = []
+    const represented = new Set<number>()
+    for (const { story, revision } of linkedStories) {
+      if (!this.revisionAvailable(revision, decisions)) continue
+      const members = revision.members.map((member) => decisions.get(member.inputSeq)!)
+      const item = this.generatedStoryItem(story, revision, members, ownerId)
+      if (matchesGeneratedItem(item, query)) storyItems.push(item)
+      // 库存计数始终在搜索、读态、主题与时间过滤前计算，无需递归重建第二次投影。
+      if (!preserveSourceEntries)
+        for (const member of members)
+          if (storyRepresentsWholeEntry(member, revision)) represented.add(member.input.seq)
+    }
+    const visible = inputs.filter(
+      (input) =>
+        input.decision &&
+        input.decision.status !== "needs_context" &&
+        !this.entryHidden(overrides.get(input.seq), input.decision),
+    )
+    const unfolded = visible.filter(
+      (input) =>
+        !represented.has(input.seq) ||
+        overrides.get(input.seq)?.mode === "restore" ||
+        input.decision?.policy.standalone === "always",
+    )
+    const visibleSeqs = new Set(unfolded.map((input) => input.seq))
+    const merged = new Set<number>()
+    if (dedupeSeqs.length) {
+      const dedupeInputs = this.automation.inputs([...new Set(dedupeSeqs)])
+      for (const merge of this.currentDedupeMerges(dedupeInputs, decisions)) {
+        if (
+          (visibleSeqs.has(merge.keep.seq) ||
+            represented.has(merge.keep.seq) ||
+            (merge.keepReference && scopedSeqs.has(merge.keep.seq))) &&
+          visibleSeqs.has(merge.hide.seq)
+        )
+          merged.add(merge.hide.seq)
+      }
+    }
+    const entries = unfolded.filter(
+      (input) =>
+        !merged.has(input.seq) ||
+        overrides.get(input.seq)?.mode === "restore" ||
+        input.decision?.policy.standalone === "always",
+    )
+    const items = storyItems.sort(
+      (left, right) =>
+        Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
+        left.id.localeCompare(right.id) ||
+        left.sourceKeys.join().localeCompare(right.sourceKeys.join()),
+    )
+    return {
+      items,
+      reservoir: items,
+      counts: {
+        inputs: inputs.length,
+        uncovered: inputs.filter((input) => input.releaseVersion === null).length,
+        hidden: inputs.filter((input) => this.entryHidden(overrides.get(input.seq), input.decision))
+          .length,
+        folded: preserveSourceEntries ? 0 : visible.length - entries.length,
+        pending: inputs.filter((input) => ["pending", "running"].includes(input.status)).length,
+        failed: inputs.filter((input) => input.status === "failed").length,
+        needsContext: inputs.filter((input) => input.decision?.status === "needs_context").length,
+      },
     }
   }
 

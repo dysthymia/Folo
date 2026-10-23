@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { DatabaseSync } from "node:sqlite"
 
 import type { RuleSet } from "@follow/information-core"
-import { afterEach, describe, expect, it } from "vitest"
+import { join } from "pathe"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { Source, SourceEntry } from "./folo"
 import type { ProcessingEntryResultsResponse } from "./processing-api"
@@ -10,7 +14,12 @@ import type { ProcessingDecision } from "./processing-decision"
 import { Store } from "./store"
 
 const stores: Store[] = []
-afterEach(() => stores.splice(0).forEach((store) => store.close()))
+const directories: string[] = []
+afterEach(() => {
+  vi.restoreAllMocks()
+  stores.splice(0).forEach((store) => store.close())
+  directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }))
+})
 const source: Source = {
   key: "feed/1",
   kind: "feed",
@@ -29,8 +38,8 @@ const entry: SourceEntry = {
   read: false,
   publishedAt: "2026-09-01T00:00:00.000Z",
 }
-function fixture(action: "transform" | "dedupe" | "local" = "transform") {
-  const store = new Store(":memory:")
+function fixture(action: "transform" | "dedupe" | "local" = "transform", path = ":memory:") {
+  const store = new Store(path)
   stores.push(store)
   store.bindOwner("owner")
   store.replaceSources([source], "2026-09-01T00:00:00.000Z")
@@ -93,6 +102,90 @@ const results = (store: Store) =>
   processingApi(store, "GET", "/processing/entry-results", null) as ProcessingEntryResultsResponse
 
 describe("时间线 AI 结果轻量索引", () => {
+  it("轮询只读取身份与固化投影，不读取原文或完整决定", () => {
+    const store = fixture()
+    const input = complete(store)
+    const expected = results(store)
+    const published = vi.spyOn(store.processingState, "published")
+    const inputs = vi.spyOn(store.automation, "inputs")
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare")
+    expect(results(store)).toEqual(expected)
+    expect(expected.results[0]?.inputSeq).toBe(input.seq)
+    expect(published).not.toHaveBeenCalled()
+    expect(inputs).not.toHaveBeenCalled()
+    // 检查实际 SQL，防止接口今后换个 helper 又退回读取大正文。
+    const sql = prepare.mock.calls.map(([query]) => query).join("\n")
+    expect(sql).not.toMatch(/decisions?\.body/u)
+    expect(sql).not.toContain("inputs.body")
+    expect(sql).not.toContain("SELECT * FROM processing_inputs")
+  })
+
+  it("旧投影明确要求回填，分批回填与新发布投影一致且不写入原文摘要", () => {
+    const directory = mkdtempSync(join(tmpdir(), "folo-result-projection-"))
+    directories.push(directory)
+    const path = join(directory, "test.sqlite")
+    const store = fixture("transform", path)
+    complete(store)
+    const expected = results(store)
+    const db = new DatabaseSync(path)
+    try {
+      db.exec("UPDATE entry_decision_status SET body=json_remove(body,'$.resultIndex')")
+      expect(() => results(store)).toThrow("entry_result_projection_not_ready")
+      expect(store.automation.rebuildDecisionStatusSummaries().updated).toBe(1)
+      expect(results(store)).toEqual(expected)
+      const summary = JSON.parse(
+        String(db.prepare("SELECT body FROM entry_decision_status").get()!.body),
+      )
+      expect(summary.resultIndex).toMatchObject({ version: 1, hasSummary: true })
+      expect(JSON.stringify(summary.resultIndex)).not.toContain("完整原文")
+      expect(JSON.stringify(summary.resultIndex)).not.toContain("AI摘要")
+      db.exec("DELETE FROM entry_decision_status")
+      expect(() => results(store)).toThrow("entry_result_projection_not_ready")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("历史决定没有摘要时仍标记已处理，重发不能替换首个决定的索引", () => {
+    const store = fixture()
+    const input = complete(store)
+    const { summary: _summary, ...withoutSummary } = store.processingState.published()[0]!.decision
+    const current = store.automation.recalculate(input, withoutSummary).input
+    const expected = {
+      processed: [{ itemId: entry.id, sourceKey: source.key, sourceId: source.key }],
+      results: [],
+    }
+    expect(results(store)).toEqual(expected)
+    // 同一代重发的内容不替换首个不可变决定，也不能令索引凭空出现摘要结果。
+    store.automation.complete(current, { ...withoutSummary, summary: "迟到的摘要" })
+    expect(results(store)).toEqual(expected)
+    expect(store.automation.rebuildDecisionStatusSummaries().updated).toBe(1)
+    expect(results(store)).toEqual(expected)
+  })
+
+  it("失效发布指针先按原代际守卫过滤，不误报缺少投影", () => {
+    const directory = mkdtempSync(join(tmpdir(), "folo-stale-result-"))
+    directories.push(directory)
+    const path = join(directory, "test.sqlite")
+    const store = fixture("transform", path)
+    const input = complete(store)
+    const db = new DatabaseSync(path)
+    try {
+      // 即使投影也缺失，旧代际、旧发布和不存在的决定均不属于当前有效结果。
+      db.exec("DELETE FROM entry_decision_status")
+      db.exec("UPDATE entry_decisions SET generation=generation+1")
+      expect(results(store)).toEqual({ processed: [], results: [] })
+      db.exec(
+        "UPDATE entry_decisions SET generation=generation-1,release_version=release_version+1",
+      )
+      expect(results(store)).toEqual({ processed: [], results: [] })
+      db.prepare("UPDATE processing_inputs SET decision_id='missing' WHERE seq=?").run(input.seq)
+      expect(results(store)).toEqual({ processed: [], results: [] })
+    } finally {
+      db.close()
+    }
+  })
+
   it("只返回真实变换结果身份，完整内容懒加载并携带版本标识", () => {
     const store = fixture()
     const input = complete(store)

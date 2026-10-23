@@ -8,6 +8,8 @@ import type { ReasoningEffort } from "./ai-reasoning"
 import type { AutomationStore, ProcessingInput } from "./automation-store"
 import { AutomationError } from "./automation-store"
 import type { DecisionsSettings } from "./decisions-config"
+import type { SourceEntry } from "./folo"
+import type { ProcessingAttentionDecision } from "./processing-attention"
 import type { ProcessingDecision, PublishedDecision } from "./processing-decision"
 import type { DecisionsAudit } from "./processing-decisions"
 
@@ -32,6 +34,15 @@ export type DecisionQuarantine = {
   // 修复正文由已核验原文提供，不能复用错误的模型摘要。
   summary: string
 }
+type EntryResultIndex = ProcessingAttentionDecision &
+  Pick<ProcessingDecision, "pendingPolicyFields" | "policy"> & {
+    version: 1
+    supportedSchema: boolean
+    feedId?: SourceEntry["feedId"]
+    feedKind?: SourceEntry["feedKind"]
+    hasSummary: boolean
+    hasSemanticProfile: boolean
+  }
 export class ProcessingStateStore {
   constructor(
     private readonly db: DatabaseSync,
@@ -435,11 +446,52 @@ export class ProcessingStateStore {
     }))
   }
 
-  published(inputSeqs?: readonly number[]): PublishedDecision[] {
-    // 在 SQL 中一次筛出有效发布指针，避免逐条解析未处理原文并查询决定而阻塞 HTTP。
+  // 时间线结果索引只读已固化的小投影；历史升级须先执行 rebuild-projections status。
+  publishedEntryResults() {
     const rows = this.db
       .prepare(
-        `SELECT inputs.seq,decisions.id,decisions.body FROM processing_inputs inputs
+        `SELECT inputs.seq,inputs.source_key,inputs.item_id,inputs.content_version,
+          inputs.release_version,inputs.decision_id,status.body AS summary
+         FROM processing_inputs inputs
+         JOIN entry_decisions decisions ON decisions.id=inputs.decision_id
+         LEFT JOIN entry_decision_status status ON status.decision_id=inputs.decision_id
+           AND status.input_seq=inputs.seq AND status.generation=inputs.generation
+           AND status.release_version=inputs.release_version
+         WHERE inputs.current=1 AND inputs.status='succeeded'
+           AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version
+         ORDER BY inputs.seq`,
+      )
+      .all()
+    return rows.flatMap((row) => {
+      const summary = row.summary
+        ? (JSON.parse(String(row.summary)) as { resultIndex?: EntryResultIndex })
+        : null
+      const index = summary?.resultIndex
+      // 缺少新投影时明确失败，不能悄悄漏条目或回退为阻塞 HTTP 的全量正文扫描。
+      if (index?.version !== 1) throw new Error("entry_result_projection_not_ready")
+      if (!index.supportedSchema) return []
+      return [
+        {
+          input: {
+            seq: Number(row.seq),
+            sourceKey: String(row.source_key),
+            itemId: String(row.item_id),
+            contentVersion: String(row.content_version),
+            releaseVersion: Number(row.release_version),
+            body: { feedId: index.feedId, feedKind: index.feedKind },
+          },
+          decisionId: String(row.decision_id),
+          decision: index,
+        },
+      ]
+    })
+  }
+
+  published(inputSeqs?: readonly number[]): PublishedDecision[] {
+    // 有范围时按输入主键读取有效发布指针，避免队列索引扫描和临时排序完整决定正文。
+    const rows = this.db
+      .prepare(
+        `SELECT inputs.seq,decisions.id,decisions.body FROM processing_inputs inputs ${inputSeqs ? "NOT INDEXED" : ""}
         JOIN entry_decisions decisions ON inputs.decision_id=decisions.id
         WHERE inputs.current=1 AND inputs.status='succeeded'
           AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version

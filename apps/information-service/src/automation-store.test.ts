@@ -58,6 +58,31 @@ function decision(fingerprint: string): ProcessingDecision {
   }
 }
 
+it("按输入身份读取保留当前版本语义，并使用主键点读而非全队列扫描", () => {
+  const { db, repository } = fixture()
+  const old = repository.capture(entry)
+  const current = repository.capture({ ...entry, content: "修改后的原文" })
+  const other = repository.capture({ ...entry, id: "e2" })
+  expect(repository.inputs([other, old, current]).map((input) => input.seq)).toEqual([
+    current,
+    other,
+  ])
+  expect(repository.inputs([])).toEqual([])
+  // 在实际 prepare 边界验证执行计划，防止大库恢复为队列索引扫描和正文临时排序。
+  const prepare = db.prepare.bind(db)
+  let plan: string[] = []
+  vi.spyOn(db, "prepare").mockImplementation((sql) => {
+    if (sql.startsWith("SELECT * FROM processing_inputs"))
+      plan = prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .all(JSON.stringify([current]))
+        .map((row) => String(row.detail))
+    return prepare(sql)
+  })
+  expect(repository.inputs([current])).toHaveLength(1)
+  expect(plan.join(" ")).toContain("INTEGER PRIMARY KEY")
+  expect(plan.join(" ")).not.toMatch(/processing_input_queue|TEMP B-TREE/)
+})
+
 it("persists a rule's executor across draft, activation, reload and copied identity without changing siblings", () => {
   const { repository } = fixture()
   const make = (id: string, order: number) => ({

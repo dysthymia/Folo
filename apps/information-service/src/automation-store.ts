@@ -134,6 +134,8 @@ export class AutomationStore {
       CREATE INDEX IF NOT EXISTS processing_input_identity ON processing_inputs(source_key,item_id,current);
       CREATE INDEX IF NOT EXISTS processing_input_queue ON processing_inputs(current,status,source_key);
       CREATE TABLE IF NOT EXISTS entry_decisions (id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
+      -- 发布资格校验使用覆盖索引，避免列表轮询逐条回读含大正文的决定表页。
+      CREATE INDEX IF NOT EXISTS entry_decision_publication ON entry_decisions(id,generation,release_version);
       CREATE TABLE IF NOT EXISTS entry_decision_status (decision_id TEXT PRIMARY KEY, input_seq INTEGER NOT NULL, generation INTEGER NOT NULL, release_version INTEGER NOT NULL, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS rule_activation_requests (id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS publication_requests (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, scope TEXT NOT NULL, release_version INTEGER NOT NULL);
@@ -596,11 +598,11 @@ export class AutomationStore {
   }
 
   inputs(inputSeqs?: readonly number[]): ProcessingInput[] {
-    // 详情只读取当前组的输入，避免解析全库正文；未传范围时保持原有队列口径。
+    // 有明确身份范围时按主键点读；避免队列索引扫描所有当前输入并为正文做临时排序。
     return this.db
       .prepare(
         inputSeqs
-          ? "SELECT * FROM processing_inputs WHERE current=1 AND seq IN (SELECT value FROM json_each(?)) ORDER BY seq"
+          ? "SELECT * FROM processing_inputs NOT INDEXED WHERE current=1 AND seq IN (SELECT value FROM json_each(?)) ORDER BY seq"
           : "SELECT * FROM processing_inputs WHERE current=1 ORDER BY seq",
       )
       .all(...(inputSeqs ? [JSON.stringify(inputSeqs)] : []))
@@ -930,7 +932,7 @@ export class AutomationStore {
       const id = createHash("sha256")
         .update(JSON.stringify([target.seq, target.generation, target.releaseVersion]))
         .digest("hex")
-      this.db
+      const inserted = this.db
         .prepare("INSERT OR IGNORE INTO entry_decisions VALUES(?,?,?,?,?,?)")
         .run(
           id,
@@ -940,6 +942,12 @@ export class AutomationStore {
           JSON.stringify(decision),
           new Date().toISOString(),
         )
+      // 重发必须沿用不可变的首个决定，不能用后到内容改写列表投影。
+      const persistedDecision = inserted.changes
+        ? decision
+        : (JSON.parse(
+            String(this.db.prepare("SELECT body FROM entry_decisions WHERE id=?").get(id)!.body),
+          ) as object)
       // 状态页只需要少量字段；连同命中规则一起固化，避免每次请求解析全部决定正文。
       this.db
         .prepare("INSERT OR REPLACE INTO entry_decision_status VALUES(?,?,?,?,?)")
@@ -948,7 +956,7 @@ export class AutomationStore {
           target.seq,
           target.generation,
           target.releaseVersion,
-          JSON.stringify(this.decisionStatusSummary(target, decision)),
+          JSON.stringify(this.decisionStatusSummary(target, persistedDecision)),
         )
       // 晚到任务保留历史，但不能覆盖新内容、新发布范围或重算后的当前结果。
       const result = this.db
@@ -967,6 +975,7 @@ export class AutomationStore {
     release?: RuleSet | null,
   ) {
     const record = decision as Record<string, unknown>
+    const profile = record.semanticProfile as Record<string, unknown> | undefined
     const config =
       release === undefined
         ? target.releaseVersion === null
@@ -992,6 +1001,26 @@ export class AutomationStore {
         : [],
       publishedAt: String(target.body.publishedAt ?? ""),
       title: target.body.title ?? null,
+      // 时间线轮询复用状态投影；只固化规则、关注和身份所需字段，不复制原文、摘要或事实正文。
+      resultIndex: {
+        version: 1,
+        supportedSchema: record.schemaVersion === 1 || record.schemaVersion === 2,
+        feedId: target.body.feedId,
+        feedKind: target.body.feedKind,
+        context: record.context ?? {},
+        policy: record.policy,
+        hasSummary: typeof record.summary === "string" && record.summary.trim().length > 0,
+        hasSemanticProfile: Boolean(profile),
+        pendingPolicyFields: record.pendingPolicyFields,
+        semanticProfile: profile
+          ? {
+              evidence: profile.evidence ?? {},
+              materialCoverage: profile.materialCoverage,
+              semanticAssessmentCoverage: profile.semanticAssessmentCoverage,
+              substantiveContribution: profile.substantiveContribution,
+            }
+          : undefined,
+      },
     }
   }
 
@@ -1002,26 +1031,31 @@ export class AutomationStore {
     const releases = new Map<number, RuleSet | null>()
     let updated = 0
     let cursor = 0
-    this.transaction(() => {
-      for (;;) {
-        const rows = this.db
-          .prepare(
-            `SELECT decisions.id,decisions.body AS decision,inputs.seq,inputs.generation,
+    // 固定本轮上界并按主键分页；每批单独提交，避免排序大正文或长期占住后台写锁。
+    const upperSeq = Number(
+      this.db.prepare("SELECT COALESCE(MAX(seq),0) AS seq FROM processing_inputs").get()!.seq,
+    )
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          `SELECT decisions.id,decisions.body AS decision,inputs.seq,inputs.generation,
                inputs.release_version,inputs.body AS input
-             FROM processing_inputs inputs
+             FROM processing_inputs inputs NOT INDEXED
              JOIN entry_decisions decisions ON inputs.decision_id=decisions.id
-             WHERE inputs.current=1 AND inputs.status='succeeded' AND inputs.seq>?
+             WHERE inputs.current=1 AND inputs.status='succeeded' AND inputs.seq>? AND inputs.seq<=?
+               AND decisions.generation=inputs.generation AND decisions.release_version=inputs.release_version
              ORDER BY inputs.seq LIMIT 500`,
-          )
-          .all(cursor) as Array<{
-          id: string
-          decision: string
-          seq: number
-          generation: number
-          release_version: number | null
-          input: string
-        }>
-        if (!rows.length) break
+        )
+        .all(cursor, upperSeq) as Array<{
+        id: string
+        decision: string
+        seq: number
+        generation: number
+        release_version: number | null
+        input: string
+      }>
+      if (!rows.length) break
+      this.transaction(() => {
         for (const row of rows) {
           const releaseVersion = row.release_version === null ? null : Number(row.release_version)
           let release = releaseVersion === null ? null : releases.get(releaseVersion)
@@ -1048,9 +1082,9 @@ export class AutomationStore {
           )
           updated++
         }
-        cursor = Number(rows.at(-1)!.seq)
-      }
-    })
+      })
+      cursor = Number(rows.at(-1)!.seq)
+    }
     return { updated, durationMs: Date.now() - startedAt }
   }
 
