@@ -185,7 +185,11 @@ def install(manifest, package=None, home=None, checkpoint=False):
     web_plist = home / "Library/LaunchAgents" / (WEB_LABEL + ".plist")
     existing = plistlib.loads(web_plist.read_bytes()) if web_plist.exists() else {}
     worker_registered = registered(domain, WORKER_LABEL).returncode == 0
-    split = existing.get("EnvironmentVariables", {}).get("FOLO_INFORMATION_PROCESS_ROLE") == "web" and worker_registered
+    worker_plist_path = home / "Library/LaunchAgents" / (WORKER_LABEL + ".plist")
+    worker_existing = plistlib.loads(worker_plist_path.read_bytes()) if worker_plist_path.exists() else {}
+    # 已安装的拆分服务即使暂时停止注册，也不是首次从单进程迁移；仍保护网页中的选材调用。
+    worker_installed = worker_existing.get("EnvironmentVariables", {}).get("FOLO_INFORMATION_PROCESS_ROLE") == "worker"
+    split = existing.get("EnvironmentVariables", {}).get("FOLO_INFORMATION_PROCESS_ROLE") == "web" and (worker_registered or worker_installed)
     database = pathlib.Path(os.environ.get("FOLO_INFORMATION_DATA_DIR", str(home / ".local/share/folo-information-p0"))) / "information.sqlite"
     # 首次检查点交接先准备产物，冻结后的复核才决定能否停止；准备耗时不能错过空闲窗口。
     if not checkpoint or split:

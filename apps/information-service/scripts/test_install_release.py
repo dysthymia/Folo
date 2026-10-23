@@ -102,6 +102,20 @@ class InstallReleaseTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as db, db:
             self.assertEqual(db.execute("SELECT status FROM processing_inputs").fetchone()[0], "running")
 
+    def test_stopped_split_services_are_restored_without_first_migration_guard(self):
+        self.split()
+        self.worker_registered = False
+        (self.agents / (installer.WORKER_LABEL + ".plist")).write_bytes(plistlib.dumps({
+            "EnvironmentVariables": {"FOLO_INFORMATION_PROCESS_ROLE": "worker"},
+        }))
+        # 停止后的旧批次租约由新版执行器恢复，不能误认为仍有单进程在执行它。
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("INSERT INTO processing_schedule_triggers VALUES('running')")
+        installer.install(self.manifest, self.package, self.home)
+        self.assertEqual((self.runtime / "index.mjs").read_text(), "new-releaseindex.mjs")
+        self.assertTrue(any(call[:2] == ["launchctl", "bootstrap"] and
+                            call[-1].endswith(installer.WORKER_LABEL + ".plist") for call in self.calls))
+
     def test_first_migration_preserves_a_busy_monolithic_service(self):
         self.running()
         with self.assertRaisesRegex(SystemExit, "首次拆分"):
