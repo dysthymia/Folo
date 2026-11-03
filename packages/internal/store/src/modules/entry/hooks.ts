@@ -348,7 +348,8 @@ export const useEntriesQuery = (
   )
 
   const fetchedEntryIds = useMemo(() => {
-    if (!query.data || query.isLoading || query.isError) {
+    // 分页失败仍保留已加载条目，让去重和本地规则继续处理同一份列表。
+    if (!query.data || query.isLoading) {
       return []
     }
     const titleByEntryId = new Map<string, string | null | undefined>()
@@ -375,7 +376,7 @@ export const useEntriesQuery = (
       ),
       getTitle: (entryId) => titleByEntryId.get(entryId),
     })
-  }, [query.data, query.isLoading, query.isError, hidePrivateSubscriptionsInTimeline])
+  }, [query.data, query.isLoading, hidePrivateSubscriptionsInTimeline])
 
   useEffect(() => {
     void localActionRevision

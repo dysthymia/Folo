@@ -154,6 +154,8 @@ export function AllItem({
   }, [simple, translation?.description, translation?.title, bilingual])
 
   const dimRead = useGeneralSettingKey("dimRead")
+  // 列表悬停预览也遵循全局自动播放设置。
+  const autoPlayVideo = useGeneralSettingKey("autoPlayVideo")
   // NOTE: prevent 0 height element, react virtuoso will not stop render any more
   if (!entry || !(feed || inbox)) return null
 
@@ -173,7 +175,7 @@ export function AllItem({
       )}
       <div className="flex h-fit min-w-0 flex-1 items-center text-sm leading-tight">
         {entry.firstAudio && <AudioIcon entryId={entryId} src={entry.firstAudio.url} />}
-        {entry.video && <VideoIcon src={entry.video} />}
+        {entry.video && <VideoIcon src={entry.video} autoPlay={autoPlayVideo} />}
         {/* 标题和标签先占用自然宽度，简介只使用剩余空间；窄栏中标题换行而不被简介挤短。 */}
         <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-4">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -310,13 +312,14 @@ function AudioIcon({ entryId, src }: { entryId: string; src: string }) {
   )
 }
 
-function VideoIcon({ src }: { src: string }) {
+function VideoIcon({ src, autoPlay }: { src: string; autoPlay: boolean }) {
+  const icon = <i className="i-mgc-video-cute-fi mr-1 shrink-0 text-base text-text/90" />
+  if (!autoPlay) return icon
+
   return (
     <Tooltip>
       <TooltipRoot>
-        <TooltipTrigger asChild>
-          <i className="i-mgc-video-cute-fi mr-1 shrink-0 text-base text-text/90" />
-        </TooltipTrigger>
+        <TooltipTrigger asChild>{icon}</TooltipTrigger>
         <TooltipPortal>
           <TooltipContent className="flex-col gap-1" side={"bottom"}>
             <div className="flex items-center gap-1">

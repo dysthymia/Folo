@@ -108,6 +108,8 @@ function makeEntries(overrides: Partial<UseEntriesReturn> = {}): UseEntriesRetur
     isReady: true,
     isFetching: false,
     isFetchingNextPage: false,
+    // 默认没有分页错误，与共享查询的返回结构保持一致。
+    isFetchNextPageError: false,
     error: null,
     fetchNextPage: vi.fn(async () => undefined),
     refetch: vi.fn(async () => undefined),

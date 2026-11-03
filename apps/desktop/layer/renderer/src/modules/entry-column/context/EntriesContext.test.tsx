@@ -61,6 +61,7 @@ describe("EntriesProvider", () => {
       paginationBoundary: undefined,
       hasNextPage: false,
       isFetchingNextPage: false,
+      isFetchNextPageError: false,
       isFetching: false,
       isLoading: false,
       isOffline: false,
